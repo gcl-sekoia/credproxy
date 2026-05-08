@@ -38,7 +38,14 @@ def main() -> None:
     if not isinstance(data, dict):
         data = {}
 
-    data[name] = value
+    # File is the startup envelope: {"auth_token": "...", "secrets": {...}}.
+    # We must only mutate `.secrets` -- preserving auth_token is critical
+    # because the supervisor re-pipes this file into each python spawn.
+    secrets = data.get("secrets")
+    if not isinstance(secrets, dict):
+        secrets = {}
+        data["secrets"] = secrets
+    secrets[name] = value
 
     tmp = SECRETS_PATH + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

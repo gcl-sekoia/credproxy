@@ -37,17 +37,29 @@ up:
 	@# Instead we run in the foreground and background it. POSIX shells
 	@# default backgrounded jobs' stdin to /dev/null, so we explicitly
 	@# redirect </dev/stdin to keep the pipe attached -- that's how EOF
-	@# from the source `echo {...} | make up` reaches the supervisor's cat.
-	docker run -i --rm \
-		--name $(PROXY_NAME) \
-		--cap-add NET_ADMIN \
-		--tmpfs /run/secrets:size=64k,uid=31337,mode=0700 \
-		-v $(CURDIR)/proxy:/opt/proxy \
-		$(PROXY_IMAGE) </dev/stdin >/dev/null 2>&1 &
+	@# from the source `<json> | make up` reaches the supervisor's cat.
+	@#
+	@# Stdin shape: {"auth_token": "...", "secrets": {...}}.
+	@# We generate a fresh bearer token here, persist a copy to
+	@# .run/auth.token (0600) for the host CLI to reuse, and wrap the
+	@# user's secrets JSON. TOKEN is passed to python via env (not argv)
+	@# so it doesn't show in ps. The wrapper python tolerates empty stdin.
+	@mkdir -p .run
+	@TOKEN=$$(openssl rand -hex 16); \
+	echo -n "$$TOKEN" > .run/auth.token; \
+	chmod 600 .run/auth.token; \
+	TOKEN="$$TOKEN" python3 -c 'import json,os,sys; raw=sys.stdin.read().strip(); secrets=json.loads(raw) if raw else {}; print(json.dumps({"auth_token":os.environ["TOKEN"],"secrets":secrets}))' \
+		| docker run -i --rm \
+			--name $(PROXY_NAME) \
+			--cap-add NET_ADMIN \
+			--tmpfs /run/secrets:size=64k,uid=31337,mode=0700 \
+			-p 127.0.0.1:39997:39997 \
+			-v $(CURDIR)/proxy:/opt/proxy \
+			$(PROXY_IMAGE) </dev/stdin >/dev/null 2>&1 &
 	@sleep 0.5
 	@docker ps --filter name=$(PROXY_NAME) --format '{{.Names}}' \
 		| grep -q $(PROXY_NAME) \
-		&& echo "$(PROXY_NAME) started" \
+		&& echo "$(PROXY_NAME) started; token in .run/auth.token" \
 		|| (echo "$(PROXY_NAME) failed to start; check 'docker logs'"; exit 1)
 
 down:

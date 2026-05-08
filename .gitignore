@@ -1,3 +1,4 @@
 proxy/config.yaml
+.run/
 __pycache__/
 *.pyc
