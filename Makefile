@@ -9,7 +9,7 @@ SHELL := /bin/bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build up down restart logs reload shell workspace rebuild test add-secret
+.PHONY: help build up down restart logs reload shell workspace rebuild test add-secret set-config
 
 help:
 	@echo "credproxy dev harness"
@@ -28,6 +28,9 @@ help:
 	@echo "  make test       run pytest in the proxy image"
 	@echo "  make add-secret NAME=X  add/update secret X (value on stdin); reloads"
 	@echo "                  e.g. op read 'op://...' | make add-secret NAME=GITHUB_PAT"
+	@echo "  make set-config push proxy/config.yaml via admin API after resolving"
+	@echo "                  \$${secret:NAME} refs from host env. Reloads proxy."
+	@echo "                  e.g. GITHUB_PAT=\$$(op read 'op://...') make set-config"
 
 build:
 	docker build -t $(PROXY_IMAGE) proxy/
@@ -102,3 +105,6 @@ add-secret:
 			--data-binary @- \
 			http://127.0.0.1:39997/admin/secrets \
 		&& echo
+
+set-config:
+	@./bin/credproxy push-config

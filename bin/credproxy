@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""credproxy host CLI.
+
+Currently one subcommand: `push-config`, which reads a YAML config
+from disk, resolves `${secret:NAME}` references against host environment
+variables, and POSTs the resolved JSON to /admin/config on the running
+proxy. Authentication uses the bearer token in `.run/auth.token`
+(written by `make up`).
+
+Requires PyYAML on the host. Install with `pip install pyyaml` if
+missing.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    sys.exit(
+        "[credproxy] missing PyYAML on host; install with: pip install pyyaml"
+    )
+
+DEFAULT_CONFIG = "proxy/config.yaml"
+DEFAULT_TOKEN_FILE = ".run/auth.token"
+DEFAULT_URL = "http://127.0.0.1:39997/admin/config"
+
+SECRET_REF = re.compile(r"\$\{secret:([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _fail(msg: str) -> None:
+    sys.exit(f"[credproxy] {msg}")
+
+
+def resolve_string(value: str, where: str) -> str:
+    """Substring-replace ${secret:NAME} with os.environ[NAME].
+
+    Raises (sys.exit) if any referenced env var is not set.
+    """
+    def sub(m: re.Match[str]) -> str:
+        name = m.group(1)
+        v = os.environ.get(name)
+        if v is None:
+            _fail(
+                f"{where} references ${{secret:{name}}} but {name} is not "
+                f"set in the host environment"
+            )
+        return v
+    return SECRET_REF.sub(sub, value)
+
+
+def resolve_config(cfg: dict) -> dict:
+    """Walk hosts.<H>.headers.<K>.real and resolve env-var references."""
+    hosts = cfg.get("hosts") or {}
+    if not isinstance(hosts, dict):
+        return cfg
+    for host, h_entry in hosts.items():
+        if not isinstance(h_entry, dict):
+            continue
+        headers = h_entry.get("headers") or {}
+        if not isinstance(headers, dict):
+            continue
+        for header, hentry in headers.items():
+            if not isinstance(hentry, dict):
+                continue
+            real = hentry.get("real")
+            if isinstance(real, str):
+                hentry["real"] = resolve_string(
+                    real, f"hosts.{host}.headers.{header}.real"
+                )
+    return cfg
+
+
+def push_config(args: argparse.Namespace) -> None:
+    config_path = Path(args.config)
+    token_path = Path(args.token_file)
+
+    if not config_path.exists():
+        _fail(f"config not found: {config_path}")
+    if not token_path.exists():
+        _fail(f"token not found: {token_path}; is the proxy up?")
+
+    raw = yaml.safe_load(config_path.read_text()) or {}
+    if not isinstance(raw, dict):
+        _fail(f"{config_path}: top level must be a mapping")
+    resolved = resolve_config(raw)
+
+    body = json.dumps(resolved).encode()
+    token = token_path.read_text().strip()
+    req = urllib.request.Request(
+        args.url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            print(resp.read().decode().rstrip())
+    except urllib.error.HTTPError as e:
+        _fail(f"HTTP {e.code}: {e.read().decode().rstrip()}")
+    except urllib.error.URLError as e:
+        _fail(f"connect error: {e.reason}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="credproxy")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    push = sub.add_parser(
+        "push-config",
+        help="resolve ${secret:NAME} from env and POST to /admin/config",
+    )
+    push.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG,
+        help=f"YAML config path (default: {DEFAULT_CONFIG})",
+    )
+    push.add_argument(
+        "--token-file",
+        default=DEFAULT_TOKEN_FILE,
+        help=f"auth token file (default: {DEFAULT_TOKEN_FILE})",
+    )
+    push.add_argument(
+        "--url",
+        default=DEFAULT_URL,
+        help=f"admin URL (default: {DEFAULT_URL})",
+    )
+    push.set_defaults(func=push_config)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
