@@ -9,7 +9,7 @@ SHELL := /bin/bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build up down restart logs reload shell workspace rebuild test
+.PHONY: help build up down restart logs reload shell workspace rebuild test add-secret
 
 help:
 	@echo "credproxy dev harness"
@@ -26,6 +26,8 @@ help:
 	@echo "  make workspace  run a workspace container joined to the proxy netns"
 	@echo "  make rebuild    down + build + up -- expects secrets on stdin"
 	@echo "  make test       run pytest in the proxy image"
+	@echo "  make add-secret NAME=X  add/update secret X (value on stdin); reloads"
+	@echo "                  e.g. op read 'op://...' | make add-secret NAME=GITHUB_PAT"
 
 build:
 	docker build -t $(PROXY_IMAGE) proxy/
@@ -39,6 +41,7 @@ up:
 	docker run -i --rm \
 		--name $(PROXY_NAME) \
 		--cap-add NET_ADMIN \
+		--tmpfs /run/secrets:size=64k,uid=31337,mode=0700 \
 		-v $(CURDIR)/proxy:/opt/proxy \
 		$(PROXY_IMAGE) </dev/stdin >/dev/null 2>&1 &
 	@sleep 0.5
@@ -75,3 +78,9 @@ test:
 		--entrypoint python \
 		$(PROXY_IMAGE) \
 		-m pytest -v tests/
+
+add-secret:
+	@[ -n "$(NAME)" ] || { echo 'usage: NAME=X make add-secret  (value on stdin)'; exit 1; }
+	@docker exec -i --user 31337 $(PROXY_NAME) python /opt/proxy/add_secret.py $(NAME)
+	@docker exec $(PROXY_NAME) /opt/proxy/reload.sh
+	@echo "$(PROXY_NAME) reloaded"

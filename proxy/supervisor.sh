@@ -1,22 +1,30 @@
 #!/bin/sh
 # Tiny supervisor: respawn the python sidecar process forever.
 # `make reload` (-> reload.sh) kills the python child; this loop
-# brings it back with freshly imported source.
-# SIGTERM/INT to the supervisor itself shuts everything down cleanly.
+# brings it back with freshly imported source AND a fresh read of the
+# secrets file. SIGTERM/INT shuts everything down cleanly.
 #
-# Secrets pipeline: docker run -i hands stdin to this process. We read
-# all of it once into a non-exported shell variable (heap, not environ
-# -- not visible via /proc/$pid/environ) and re-pipe to each python
-# spawn so `make reload` doesn't need to re-prompt. The cached value
-# never touches a file or the environment.
+# Secrets pipeline:
+#   1. docker run -i hands stdin to this process. We slurp it once
+#      and write to /run/secrets/secrets.json (tmpfs, mode 0600).
+#   2. Each python spawn reads that file as its stdin.
+#   3. add_secret.py (called via `docker exec -i --user 31337` from
+#      `make add-secret`) atomically rewrites the file at runtime; the
+#      next reload picks up the new state without container restart.
+#
+# The file lives on tmpfs (--tmpfs /run/secrets in `make up`) so secrets
+# never hit persistent disk. Inside the container, only mitmuser
+# (uid 31337) can read it. From outside, reading requires root or
+# CAP_SYS_PTRACE on the container.
 set -u
 
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONUNBUFFERED=1
 
-# Slurp stdin once. Empty stdin -> empty string -> python sees empty
-# stdin and treats secrets as {}.
-secrets=$(cat)
+SECRETS_FILE=/run/secrets/secrets.json
+
+# Initial population from stdin. EOF -> empty file -> python sees {}.
+( umask 077; cat > "$SECRETS_FILE" )
 
 shutting_down=0
 child=""
@@ -29,7 +37,7 @@ handle_term() {
 trap handle_term TERM INT
 
 while :; do
-    printf '%s' "$secrets" | python -u /opt/proxy/main.py &
+    python -u /opt/proxy/main.py < "$SECRETS_FILE" &
     child=$!
     wait "$child" 2>/dev/null || true
 
