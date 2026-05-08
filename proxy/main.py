@@ -13,13 +13,21 @@ from mitmproxy.tools.dump import DumpMaster
 
 import addon
 import bootstrap
+import config
 
 PROXY_PORT = 39999
 BOOTSTRAP_PORT = 39998
 
 
 async def run() -> None:
-    runner = web.AppRunner(bootstrap.make_app(), access_log=None)
+    creds = config.load()
+    print(
+        f"[main] loaded config: {len(creds.intercept_hosts())} intercept "
+        f"host(s): {sorted(creds.intercept_hosts())}",
+        flush=True,
+    )
+
+    runner = web.AppRunner(bootstrap.make_app(creds), access_log=None)
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", BOOTSTRAP_PORT).start()
     print(
@@ -33,7 +41,7 @@ async def run() -> None:
         mode=["transparent"],
     )
     master = DumpMaster(opts, with_termlog=True, with_dumper=False)
-    master.addons.add(addon.HostnameLogger())
+    master.addons.add(addon.HostnameLogger(creds))
     print(
         f"[main] mitmproxy listening on 127.0.0.1:{PROXY_PORT} (transparent)",
         flush=True,

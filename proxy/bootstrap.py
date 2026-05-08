@@ -8,10 +8,11 @@ from pathlib import Path
 
 from aiohttp import web
 
-from addon import INTERCEPT_HOSTS
+from config import Credentials
 
 CA_CERT_PATH = Path("/home/mitmuser/.mitmproxy/mitmproxy-ca-cert.pem")
 VERSION = "0.0.1"
+CREDS_KEY = web.AppKey("creds", Credentials)
 
 CA_ENV = {
     "SSL_CERT_FILE": "/tmp/proxy-ca.crt",
@@ -121,8 +122,9 @@ async def setup(_: web.Request) -> web.Response:
     )
 
 
-async def domains(_: web.Request) -> web.Response:
-    return _no_store(web.json_response({"inject": sorted(INTERCEPT_HOSTS)}))
+async def domains(request: web.Request) -> web.Response:
+    creds = request.app[CREDS_KEY]
+    return _no_store(web.json_response({"inject": sorted(creds.intercept_hosts())}))
 
 
 async def llms_txt(_: web.Request) -> web.Response:
@@ -131,8 +133,9 @@ async def llms_txt(_: web.Request) -> web.Response:
     )
 
 
-def make_app() -> web.Application:
+def make_app(creds: Credentials) -> web.Application:
     app = web.Application(middlewares=[access_log])
+    app[CREDS_KEY] = creds
     app.router.add_get("/health", health)
     app.router.add_get("/ca.crt", ca_crt)
     app.router.add_get("/bootstrap.sh", bootstrap_sh)
