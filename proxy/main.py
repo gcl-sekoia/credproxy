@@ -15,7 +15,10 @@ The supervisor preserves them across reloads via a tmpfs file.
 """
 import asyncio
 import json
+import os
+import signal
 import sys
+from pathlib import Path
 
 from aiohttp import web
 from mitmproxy import options
@@ -29,6 +32,7 @@ import config
 PROXY_PORT = 39999
 BOOTSTRAP_PORT = 39998
 ADMIN_PORT = 39997
+SECRETS_PATH = Path("/run/secrets/secrets.json")
 
 
 def _load_startup() -> tuple[str, dict[str, str]]:
@@ -95,9 +99,19 @@ async def run() -> None:
 
     # Admin app must bind 0.0.0.0 (not 127.0.0.1) so docker -p host->container
     # forwarding can reach it via the bridge interface. Workspace access via
-    # the shared netns is blocked by the iptables OWNER-uid rule installed
-    # in entrypoint.sh.
-    admin_runner = web.AppRunner(admin.make_admin_app(auth_token), access_log=None)
+    # the shared netns is blocked by the iptables rules installed in
+    # entrypoint.sh (INPUT-on-lo + OUTPUT-uid).
+    def trigger_reload() -> None:
+        # Schedule SIGTERM after this event loop tick so the response from
+        # the admin handler has time to flush. Supervisor catches the exit
+        # and respawns python, which re-reads the secrets file.
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.1, lambda: os.kill(os.getpid(), signal.SIGTERM))
+
+    admin_runner = web.AppRunner(
+        admin.make_admin_app(auth_token, SECRETS_PATH, trigger_reload),
+        access_log=None,
+    )
     await admin_runner.setup()
     await web.TCPSite(admin_runner, "0.0.0.0", ADMIN_PORT).start()
     print(

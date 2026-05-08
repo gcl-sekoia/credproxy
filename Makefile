@@ -93,6 +93,12 @@ test:
 
 add-secret:
 	@[ -n "$(NAME)" ] || { echo 'usage: NAME=X make add-secret  (value on stdin)'; exit 1; }
-	@docker exec -i --user 31337 $(PROXY_NAME) python /opt/proxy/add_secret.py $(NAME)
-	@docker exec $(PROXY_NAME) /opt/proxy/reload.sh
-	@echo "$(PROXY_NAME) reloaded"
+	@[ -f .run/auth.token ] || { echo "$(PROXY_NAME): .run/auth.token missing; is the proxy up?"; exit 1; }
+	@TOKEN=$$(cat .run/auth.token); \
+	NAME="$(NAME)" python3 -c 'import json,os,sys; print(json.dumps({"name": os.environ["NAME"], "value": sys.stdin.read()}))' \
+		| curl -sS --fail --show-error \
+			-H "Authorization: Bearer $$TOKEN" \
+			-H "Content-Type: application/json" \
+			--data-binary @- \
+			http://127.0.0.1:39997/admin/secrets \
+		&& echo

@@ -14,7 +14,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY entrypoint.sh supervisor.sh reload.sh main.py addon.py bootstrap.py \
-     admin.py config.py add_secret.py ./
+     admin.py config.py ./
 RUN chmod 0755 entrypoint.sh supervisor.sh reload.sh
 
 ENTRYPOINT ["/opt/proxy/entrypoint.sh"]
