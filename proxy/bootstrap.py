@@ -8,6 +8,8 @@ from pathlib import Path
 
 from aiohttp import web
 
+from addon import INTERCEPT_HOSTS
+
 CA_CERT_PATH = Path("/home/mitmuser/.mitmproxy/mitmproxy-ca-cert.pem")
 VERSION = "0.0.1"
 
@@ -21,23 +23,36 @@ CA_ENV = {
 }
 
 BOOTSTRAP_SH = """#!/bin/sh
+# Run via: curl -sSL http://proxy.local/bootstrap.sh | sh
+# Run as root (the default in most workspace images).
 set -eu
 CA_PATH=/tmp/proxy-ca.crt
+PROFILE_PATH=/etc/profile.d/credproxy.sh
+
 curl -sf -o "$CA_PATH" http://proxy.local/ca.crt
 
+# System-wide trust covers curl, git, openssl, python stdlib. Best-effort:
+# images without ca-certificates installed will skip this gracefully.
+if command -v update-ca-certificates >/dev/null 2>&1; then
+  cp "$CA_PATH" /usr/local/share/ca-certificates/proxy.crt 2>/dev/null \\
+    && update-ca-certificates >/dev/null 2>&1 || true
+fi
+
+# Persistent env vars for tools that ignore the system trust store
+# (Python requests via certifi, Node, Cargo, AWS SDKs). Picked up by
+# future login shells; for the current shell, source it manually.
+if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then
+  cat > "$PROFILE_PATH" <<EOF
 export SSL_CERT_FILE="$CA_PATH"
 export REQUESTS_CA_BUNDLE="$CA_PATH"
 export NODE_EXTRA_CA_CERTS="$CA_PATH"
 export GIT_SSL_CAINFO="$CA_PATH"
 export CARGO_HTTP_CAINFO="$CA_PATH"
 export AWS_CA_BUNDLE="$CA_PATH"
-
-if command -v update-ca-certificates >/dev/null 2>&1; then
-  cp "$CA_PATH" /usr/local/share/ca-certificates/proxy.crt 2>/dev/null \\
-    && update-ca-certificates >/dev/null 2>&1 || true
+EOF
 fi
 
-echo "Bootstrap complete. CA installed at $CA_PATH."
+echo "Bootstrap complete. CA at $CA_PATH; env in $PROFILE_PATH."
 """
 
 ENV_SH = "".join(f'export {k}="{v}"\n' for k, v in CA_ENV.items())
@@ -45,23 +60,24 @@ ENV_SH = "".join(f'export {k}="{v}"\n' for k, v in CA_ENV.items())
 LLMS_TXT = """\
 This sandbox runs behind a transparent egress proxy.
 
-Bootstrap (do this once, in your shell):
+Bootstrap (do this once, as root):
 
-    eval "$(curl -s http://proxy.local/env.sh)"
-    curl -sf http://proxy.local/ca.crt -o /tmp/proxy-ca.crt
+    curl -sSL http://proxy.local/bootstrap.sh | sh
 
-After that, HTTPS to configured hosts will receive credential headers
-automatically. You won't see the secrets.
+That installs the proxy CA system-wide and writes env vars to
+/etc/profile.d/credproxy.sh. After that, HTTPS to configured hosts is
+intercepted; everything else is byte-passthrough. The proxy may inject
+credential headers on intercepted hosts; you will not see the secrets.
 
 If proxy.local does not resolve, use 169.254.1.1 directly.
 
 Endpoints (all GET):
   /health        liveness probe (json)
   /ca.crt        CA certificate (PEM)
-  /bootstrap.sh  shell script: download CA + export env vars
-  /env.sh        env-var exports only
+  /bootstrap.sh  one-shot setup: install CA + write /etc/profile.d
+  /env.sh        env-var exports only (for `eval` use)
   /setup         JSON: ca_url, env, version
-  /domains       JSON: configured inject hosts (currently none)
+  /domains       JSON: configured intercept hosts
   /llms.txt      this file
 """
 
@@ -106,7 +122,7 @@ async def setup(_: web.Request) -> web.Response:
 
 
 async def domains(_: web.Request) -> web.Response:
-    return _no_store(web.json_response({"inject": []}))
+    return _no_store(web.json_response({"inject": sorted(INTERCEPT_HOSTS)}))
 
 
 async def llms_txt(_: web.Request) -> web.Response:
