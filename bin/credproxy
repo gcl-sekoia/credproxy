@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """credproxy host CLI.
 
-Currently one subcommand: `push-config`, which reads a YAML config
-from disk, resolves `${secret:NAME}` references against host environment
-variables, and POSTs the resolved JSON to /admin/config on the running
-proxy. Authentication uses the bearer token in `.run/auth.token`
-(written by `make up`).
+`push-config`: read the YAML config, resolve `${secret:NAME}` refs
+against host env vars, and POST the resolved config to /admin/config.
 
-Requires PyYAML on the host. Install with `pip install pyyaml` if
-missing.
+State machine vs. the proxy:
+
+- First call after `make up`: the proxy is in TOFU. We generate a
+  fresh bearer token, send it as `Authorization`, and on success cache
+  it at .run/auth.token (mode 0600). The proxy persists the same
+  token to its own tmpfs and recognizes it on every subsequent call.
+- Subsequent calls: we read the cached token and reuse it.
+- Mismatch (proxy reports initialized=true but no local cache, or 401
+  with a cached token): the proxy was likely re-initialized by another
+  process or by a container restart. We fail loudly with a recovery
+  hint rather than silently retrying.
+
+Requires PyYAML on the host. Install with `pip install pyyaml` if missing.
 """
 from __future__ import annotations
 
@@ -16,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import sys
 import urllib.error
 import urllib.request
@@ -30,7 +39,7 @@ except ImportError:
 
 DEFAULT_CONFIG = "proxy/config.yaml"
 DEFAULT_TOKEN_FILE = ".run/auth.token"
-DEFAULT_URL = "http://127.0.0.1:39997/admin/config"
+DEFAULT_BASE_URL = "http://127.0.0.1:39998"
 
 SECRET_REF = re.compile(r"\$\{secret:([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -78,24 +87,32 @@ def resolve_config(cfg: dict) -> dict:
     return cfg
 
 
-def push_config(args: argparse.Namespace) -> None:
-    config_path = Path(args.config)
-    token_path = Path(args.token_file)
+def _atomic_write_token(path: Path, token: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(path) + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token)
+    os.replace(tmp, path)
 
-    if not config_path.exists():
-        _fail(f"config not found: {config_path}")
-    if not token_path.exists():
-        _fail(f"token not found: {token_path}; is the proxy up?")
 
-    raw = yaml.safe_load(config_path.read_text()) or {}
-    if not isinstance(raw, dict):
-        _fail(f"{config_path}: top level must be a mapping")
-    resolved = resolve_config(raw)
+def _http_get_json(url: str) -> tuple[int, dict]:
+    try:
+        with urllib.request.urlopen(url) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode())
+        except json.JSONDecodeError:
+            return e.code, {}
+    except urllib.error.URLError as e:
+        _fail(f"connect error: {e.reason}")
+        raise  # unreachable; satisfies type checker
 
-    body = json.dumps(resolved).encode()
-    token = token_path.read_text().strip()
+
+def _http_post_json(url: str, body: bytes, token: str) -> tuple[int, dict]:
     req = urllib.request.Request(
-        args.url,
+        url,
         data=body,
         headers={
             "Authorization": f"Bearer {token}",
@@ -105,11 +122,76 @@ def push_config(args: argparse.Namespace) -> None:
     )
     try:
         with urllib.request.urlopen(req) as resp:
-            print(resp.read().decode().rstrip())
+            return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
-        _fail(f"HTTP {e.code}: {e.read().decode().rstrip()}")
+        raw = e.read().decode()
+        try:
+            return e.code, json.loads(raw)
+        except json.JSONDecodeError:
+            return e.code, {"error": raw}
     except urllib.error.URLError as e:
         _fail(f"connect error: {e.reason}")
+        raise  # unreachable
+
+
+def push_config(args: argparse.Namespace) -> None:
+    config_path = Path(args.config)
+    token_path = Path(args.token_file)
+
+    if not config_path.exists():
+        _fail(f"config not found: {config_path}")
+
+    raw = yaml.safe_load(config_path.read_text()) or {}
+    if not isinstance(raw, dict):
+        _fail(f"{config_path}: top level must be a mapping")
+    resolved = resolve_config(raw)
+
+    state_url = f"{args.base_url}/admin/state"
+    config_url = f"{args.base_url}/admin/config"
+
+    status, state = _http_get_json(state_url)
+    if status != 200:
+        _fail(f"GET {state_url}: HTTP {status}")
+    initialized = bool(state.get("initialized"))
+    have_cache = token_path.exists()
+
+    if initialized and not have_cache:
+        _fail(
+            f"proxy reports initialized=true but no local token cache "
+            f"({token_path}). Another process may have claimed the proxy. "
+            f"Run `make down && make up` and retry; verify nothing "
+            f"unexpected happened."
+        )
+
+    if have_cache:
+        token = token_path.read_text().strip()
+        if not token:
+            _fail(f"token cache {token_path} is empty; remove it and retry")
+    else:
+        token = secrets.token_hex(16)
+
+    body = json.dumps(resolved).encode()
+    status, payload = _http_post_json(config_url, body, token)
+
+    if status == 200:
+        if not have_cache and payload.get("initialized"):
+            _atomic_write_token(token_path, token)
+            print(f"initialized; token cached at {token_path}")
+        elif payload.get("reloaded"):
+            print("reloaded")
+        else:
+            print(json.dumps(payload))
+        return
+
+    if status == 401:
+        _fail(
+            f"proxy rejected our token (HTTP 401). The proxy may have been "
+            f"re-initialized after a restart, or the cached token is stale. "
+            f"Run `make down && rm {token_path} && make up && make set-config` "
+            f"and verify nothing unexpected happened."
+        )
+
+    _fail(f"HTTP {status}: {payload.get('error', payload)}")
 
 
 def main() -> None:
@@ -118,7 +200,8 @@ def main() -> None:
 
     push = sub.add_parser(
         "push-config",
-        help="resolve ${secret:NAME} from env and POST to /admin/config",
+        help="resolve ${secret:NAME} from env and POST to /admin/config "
+             "(TOFU init on first call, reload thereafter)",
     )
     push.add_argument(
         "--config",
@@ -128,12 +211,12 @@ def main() -> None:
     push.add_argument(
         "--token-file",
         default=DEFAULT_TOKEN_FILE,
-        help=f"auth token file (default: {DEFAULT_TOKEN_FILE})",
+        help=f"auth token cache (default: {DEFAULT_TOKEN_FILE})",
     )
     push.add_argument(
-        "--url",
-        default=DEFAULT_URL,
-        help=f"admin URL (default: {DEFAULT_URL})",
+        "--base-url",
+        default=DEFAULT_BASE_URL,
+        help=f"admin base URL (default: {DEFAULT_BASE_URL})",
     )
     push.set_defaults(func=push_config)
 

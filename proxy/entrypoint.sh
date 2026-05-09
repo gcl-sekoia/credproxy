@@ -6,8 +6,7 @@ set -eu
 
 MITMPROXY_UID=31337
 PROXY_PORT=39999
-BOOTSTRAP_PORT=39998
-ADMIN_PORT=39997
+HTTP_PORT=39998
 SENTINEL_IP=169.254.1.1
 
 echo "[entrypoint] installing iptables rules"
@@ -22,9 +21,9 @@ if ! grep -q "proxy.local" /etc/hosts; then
 fi
 
 # nat OUTPUT — order matters.
-# 1. Sentinel:80 -> bootstrap HTTP API (handled by aiohttp in main.py).
+# 1. Sentinel:80 -> merged HTTP API (admin + bootstrap routes).
 iptables -t nat -A OUTPUT -d "$SENTINEL_IP" -p tcp --dport 80 \
-    -j REDIRECT --to-port "$BOOTSTRAP_PORT"
+    -j REDIRECT --to-port "$HTTP_PORT"
 # 2. Don't loop mitmproxy's own outbound back into itself.
 iptables -t nat -A OUTPUT -m owner --uid-owner "$MITMPROXY_UID" -j RETURN
 # 3. Don't touch workspace-internal loopback.
@@ -34,18 +33,6 @@ iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port "$PROXY_PORT"
 
 # filter OUTPUT — force HTTP/3 to fall back to TCP.
 iptables -A OUTPUT -p udp --dport 443 -j DROP
-
-# Admin port is host-only. Two complementary filters because the
-# workspace can reach the listener via two paths in the shared netns:
-#   (a) 127.0.0.1:$ADMIN_PORT (loopback) -- routes via lo;
-#   (b) <bridge IP>:$ADMIN_PORT -- kernel detects local IP, routes via lo;
-# both arrive on lo. Host port-published traffic comes in via eth0
-# (the bridge), unaffected by the lo filter.
-iptables -A INPUT -p tcp --dport "$ADMIN_PORT" -i lo -j DROP
-# Defense-in-depth: also drop OUTPUTs from non-mitmuser uids targeting
-# the admin port. Catches the SYN before lo loopback.
-iptables -A OUTPUT -p tcp --dport "$ADMIN_PORT" \
-    -m owner ! --uid-owner "$MITMPROXY_UID" -j DROP
 
 # IPv6: not supported in v1; drop everything. May fail in environments
 # without ip6tables; non-fatal.

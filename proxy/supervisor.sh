@@ -1,30 +1,18 @@
 #!/bin/sh
-# Tiny supervisor: respawn the python sidecar process forever.
+# Tiny supervisor: respawn the python sidecar process on death.
 # `make reload` (-> reload.sh) kills the python child; this loop
-# brings it back with freshly imported source AND a fresh read of the
-# secrets file. SIGTERM/INT shuts everything down cleanly.
+# brings it back with freshly imported source. SIGTERM/INT shuts
+# everything down cleanly.
 #
-# Secrets pipeline:
-#   1. docker run -i hands stdin to this process. We slurp it once
-#      and write to /run/secrets/secrets.json (tmpfs, mode 0600).
-#   2. Each python spawn reads that file as its stdin.
-#   3. add_secret.py (called via `docker exec -i --user 31337` from
-#      `make add-secret`) atomically rewrites the file at runtime; the
-#      next reload picks up the new state without container restart.
-#
-# The file lives on tmpfs (--tmpfs /run/secrets in `make up`) so secrets
-# never hit persistent disk. Inside the container, only mitmuser
-# (uid 31337) can read it. From outside, reading requires root or
-# CAP_SYS_PTRACE on the container.
+# State (auth token + config) is persisted by the python process to
+# /run/secrets/{auth.token,config.json} (tmpfs, mode 0400 owned by
+# mitmuser/uid 31337). Respawned python reads both at startup; if
+# either is missing the proxy is in TOFU mode and the host CLI's first
+# push-config call claims it.
 set -u
 
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONUNBUFFERED=1
-
-SECRETS_FILE=/run/secrets/secrets.json
-
-# Initial population from stdin. EOF -> empty file -> python sees {}.
-( umask 077; cat > "$SECRETS_FILE" )
 
 shutting_down=0
 child=""
@@ -37,7 +25,7 @@ handle_term() {
 trap handle_term TERM INT
 
 while :; do
-    python -u /opt/proxy/main.py < "$SECRETS_FILE" &
+    python -u /opt/proxy/main.py &
     child=$!
     wait "$child" 2>/dev/null || true
 

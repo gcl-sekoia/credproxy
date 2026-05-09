@@ -23,6 +23,12 @@ class FakeCreds:
         return {h: {s.header: s.placeholder for s in subs} for h, subs in self._hosts.items()}
 
 
+def make_state(hosts):
+    """HostnameLogger reads `state.creds` fresh on each call; tests mimic that
+    by wrapping FakeCreds in a SimpleNamespace with a `.creds` attribute."""
+    return SimpleNamespace(creds=FakeCreds(hosts))
+
+
 def make_clienthello(sni):
     """Minimal mitmproxy.tls.ClientHelloData stand-in.
 
@@ -47,21 +53,21 @@ def make_flow(host="api.github.com", path="/user", headers=None):
 # ---- tls_clienthello: intercept decision ----
 
 def test_clienthello_intercepted_does_not_set_ignore():
-    log = addon.HostnameLogger(FakeCreds({"api.github.com": []}))
+    log = addon.HostnameLogger(make_state({"api.github.com": []}))
     data = make_clienthello("api.github.com")
     log.tls_clienthello(data)
     assert data.ignore_connection is False
 
 
 def test_clienthello_passthrough_sets_ignore():
-    log = addon.HostnameLogger(FakeCreds({"api.github.com": []}))
+    log = addon.HostnameLogger(make_state({"api.github.com": []}))
     data = make_clienthello("example.com")
     log.tls_clienthello(data)
     assert data.ignore_connection is True
 
 
 def test_clienthello_no_sni_passthrough():
-    log = addon.HostnameLogger(FakeCreds({"api.github.com": []}))
+    log = addon.HostnameLogger(make_state({"api.github.com": []}))
     data = make_clienthello(None)
     log.tls_clienthello(data)
     assert data.ignore_connection is True
@@ -70,43 +76,39 @@ def test_clienthello_no_sni_passthrough():
 # ---- request: substitution behavior ----
 
 def test_request_substitutes_placeholder():
-    creds = FakeCreds({
+    log = addon.HostnameLogger(make_state({
         "api.github.com": [Substitution("Authorization", "PH", "REAL")]
-    })
-    log = addon.HostnameLogger(creds)
+    }))
     flow = make_flow(headers={"Authorization": "Bearer PH"})
     log.request(flow)
     assert flow.request.headers["Authorization"] == "Bearer REAL"
 
 
 def test_request_no_substitution_when_placeholder_absent_in_value():
-    creds = FakeCreds({
+    log = addon.HostnameLogger(make_state({
         "api.github.com": [Substitution("Authorization", "PH", "REAL")]
-    })
-    log = addon.HostnameLogger(creds)
+    }))
     flow = make_flow(headers={"Authorization": "Bearer not_the_placeholder"})
     log.request(flow)
     assert flow.request.headers["Authorization"] == "Bearer not_the_placeholder"
 
 
 def test_request_no_substitution_when_header_absent():
-    creds = FakeCreds({
+    log = addon.HostnameLogger(make_state({
         "api.github.com": [Substitution("Authorization", "PH", "REAL")]
-    })
-    log = addon.HostnameLogger(creds)
+    }))
     flow = make_flow(headers={})
     log.request(flow)
     assert "Authorization" not in flow.request.headers
 
 
 def test_request_multiple_headers_substituted():
-    creds = FakeCreds({
+    log = addon.HostnameLogger(make_state({
         "api.github.com": [
             Substitution("Authorization", "PH1", "REAL1"),
             Substitution("X-API-Key", "PH2", "REAL2"),
         ]
-    })
-    log = addon.HostnameLogger(creds)
+    }))
     flow = make_flow(headers={"Authorization": "PH1", "X-API-Key": "PH2"})
     log.request(flow)
     assert flow.request.headers["Authorization"] == "REAL1"
@@ -115,13 +117,12 @@ def test_request_multiple_headers_substituted():
 
 def test_request_only_one_of_multiple_headers_present():
     """If only one configured header is present, only that one is substituted."""
-    creds = FakeCreds({
+    log = addon.HostnameLogger(make_state({
         "api.github.com": [
             Substitution("Authorization", "PH1", "REAL1"),
             Substitution("X-API-Key", "PH2", "REAL2"),
         ]
-    })
-    log = addon.HostnameLogger(creds)
+    }))
     flow = make_flow(headers={"Authorization": "PH1"})
     log.request(flow)
     assert flow.request.headers["Authorization"] == "REAL1"
@@ -130,10 +131,9 @@ def test_request_only_one_of_multiple_headers_present():
 
 def test_request_placeholder_appears_twice_in_one_value():
     """str.replace replaces all occurrences."""
-    creds = FakeCreds({
+    log = addon.HostnameLogger(make_state({
         "api.github.com": [Substitution("X-Weird", "PH", "REAL")]
-    })
-    log = addon.HostnameLogger(creds)
+    }))
     flow = make_flow(headers={"X-Weird": "PH and PH again"})
     log.request(flow)
     assert flow.request.headers["X-Weird"] == "REAL and REAL again"
@@ -142,10 +142,23 @@ def test_request_placeholder_appears_twice_in_one_value():
 def test_request_non_intercepted_host_no_change():
     """request hook on a non-intercepted host (shouldn't fire in prod due
     to ignore_connection, but the addon must still no-op safely)."""
-    creds = FakeCreds({
+    log = addon.HostnameLogger(make_state({
         "api.github.com": [Substitution("Authorization", "PH", "REAL")]
-    })
-    log = addon.HostnameLogger(creds)
+    }))
     flow = make_flow(host="example.com", headers={"Authorization": "Bearer PH"})
     log.request(flow)
     assert flow.request.headers["Authorization"] == "Bearer PH"
+
+
+def test_state_creds_swap_takes_effect_on_next_call():
+    """In-process reload: mutating state.creds is visible to the next request."""
+    state = make_state({"api.github.com": [Substitution("Authorization", "OLD", "OLDREAL")]})
+    log = addon.HostnameLogger(state)
+    flow = make_flow(headers={"Authorization": "OLD"})
+    log.request(flow)
+    assert flow.request.headers["Authorization"] == "OLDREAL"
+
+    state.creds = FakeCreds({"api.github.com": [Substitution("Authorization", "NEW", "NEWREAL")]})
+    flow2 = make_flow(headers={"Authorization": "NEW"})
+    log.request(flow2)
+    assert flow2.request.headers["Authorization"] == "NEWREAL"

@@ -1,18 +1,18 @@
-"""Bootstrap HTTP API.
+"""Bootstrap routes: workspace-facing endpoints on the merged HTTP API.
 
-Served on 127.0.0.1:39998. iptables redirects sentinel-IP:80 here so the
-agent can `curl http://proxy.local/<endpoint>`. Plain HTTP is fine: the
-shared netns has no eavesdropper.
+Reached from the workspace via the iptables sentinel:80 -> HTTP_PORT
+redirect installed in entrypoint.sh. All routes are GET, all
+unauthenticated -- the data they expose is what the workspace needs to
+function (CA cert, env vars, placeholders).
 """
 from pathlib import Path
 
 from aiohttp import web
 
-from config import Credentials
+from admin import STATE_KEY
 
 CA_CERT_PATH = Path("/home/mitmuser/.mitmproxy/mitmproxy-ca-cert.pem")
 VERSION = "0.0.1"
-CREDS_KEY = web.AppKey("creds", Credentials)
 
 CA_ENV = {
     "SSL_CERT_FILE": "/tmp/proxy-ca.crt",
@@ -90,70 +90,53 @@ Endpoints (all GET):
 """
 
 
-def _no_store(resp: web.StreamResponse) -> web.StreamResponse:
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
-
-
-@web.middleware
-async def access_log(request: web.Request, handler):
-    print(f"[bootstrap] {request.method} {request.path}", flush=True)
-    return await handler(request)
-
-
 async def health(_: web.Request) -> web.Response:
-    return _no_store(web.json_response({"ok": True, "version": VERSION}))
+    return web.json_response({"ok": True, "version": VERSION})
 
 
 async def ca_crt(_: web.Request) -> web.Response:
     try:
         pem = CA_CERT_PATH.read_bytes()
     except FileNotFoundError:
-        return _no_store(web.Response(status=503, text="CA not yet generated\n"))
-    return _no_store(web.Response(body=pem, content_type="application/x-pem-file"))
+        return web.Response(status=503, text="CA not yet generated\n")
+    return web.Response(body=pem, content_type="application/x-pem-file")
 
 
 async def bootstrap_sh(_: web.Request) -> web.Response:
-    return _no_store(web.Response(body=BOOTSTRAP_SH, content_type="text/x-shellscript"))
+    return web.Response(body=BOOTSTRAP_SH, content_type="text/x-shellscript")
 
 
 async def env_sh(_: web.Request) -> web.Response:
-    return _no_store(web.Response(body=ENV_SH, content_type="text/x-shellscript"))
+    return web.Response(body=ENV_SH, content_type="text/x-shellscript")
 
 
 async def setup(_: web.Request) -> web.Response:
-    return _no_store(
-        web.json_response(
-            {"ca_url": "http://proxy.local/ca.crt", "env": CA_ENV, "version": VERSION}
-        )
+    return web.json_response(
+        {"ca_url": "http://proxy.local/ca.crt", "env": CA_ENV, "version": VERSION}
     )
 
 
 async def domains(request: web.Request) -> web.Response:
-    creds = request.app[CREDS_KEY]
-    return _no_store(web.json_response({"intercept": sorted(creds.intercept_hosts())}))
+    state = request.app[STATE_KEY]
+    return web.json_response({"intercept": sorted(state.creds.intercept_hosts())})
 
 
 async def tokens(request: web.Request) -> web.Response:
-    creds = request.app[CREDS_KEY]
-    return _no_store(web.json_response(creds.workspace_tokens()))
+    state = request.app[STATE_KEY]
+    return web.json_response(state.creds.workspace_tokens())
 
 
 async def llms_txt(_: web.Request) -> web.Response:
-    return _no_store(
-        web.Response(body=LLMS_TXT, content_type="text/plain", charset="utf-8")
-    )
+    return web.Response(body=LLMS_TXT, content_type="text/plain", charset="utf-8")
 
 
-def make_app(creds: Credentials) -> web.Application:
-    app = web.Application(middlewares=[access_log])
-    app[CREDS_KEY] = creds
-    app.router.add_get("/health", health)
-    app.router.add_get("/ca.crt", ca_crt)
-    app.router.add_get("/bootstrap.sh", bootstrap_sh)
-    app.router.add_get("/env.sh", env_sh)
-    app.router.add_get("/setup", setup)
-    app.router.add_get("/domains", domains)
-    app.router.add_get("/tokens", tokens)
-    app.router.add_get("/llms.txt", llms_txt)
-    return app
+bootstrap_routes = [
+    web.get("/health", health),
+    web.get("/ca.crt", ca_crt),
+    web.get("/bootstrap.sh", bootstrap_sh),
+    web.get("/env.sh", env_sh),
+    web.get("/setup", setup),
+    web.get("/domains", domains),
+    web.get("/tokens", tokens),
+    web.get("/llms.txt", llms_txt),
+]

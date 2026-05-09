@@ -1,99 +1,157 @@
-"""Admin HTTP API: host-only management endpoints.
+"""HTTP API: admin endpoints + shared AppState + middleware.
 
-Served on 0.0.0.0:39997 inside the proxy's netns. Two access patterns:
+Single aiohttp listener on 0.0.0.0:HTTP_PORT serves both this module's
+admin routes and bootstrap.py's workspace-facing routes. Workspace
+reaches it via the iptables sentinel:80 -> HTTP_PORT redirect; host
+reaches it via docker -p 127.0.0.1:HTTP_PORT.
 
-1. From the host: docker -p 127.0.0.1:39997:39997 forwards host loopback
-   to the container; arrives via the netns INPUT chain.
-2. From the workspace: blocked by iptables rules installed in
-   entrypoint.sh -- INPUT on lo for dport 39997 (load-bearing) plus
-   OUTPUT --uid-owner (defense-in-depth). Workspace traffic to either
-   127.0.0.1 or the bridge IP routes via lo (kernel local-IP shortcut),
-   so the INPUT-on-lo filter nails it.
+Trust model:
+- /admin/state is open: returns {"initialized": bool}; lets the host
+  CLI detect the TOFU window.
+- /admin/config is TOFU on first call: the bearer in that request
+  becomes the canonical admin token (persisted to tmpfs); subsequent
+  calls authenticate against it.
+- fetch_metadata_guard rejects cross-origin browser requests; together
+  with Chrome's Private Network Access default-deny (we never set
+  Access-Control-Allow-Private-Network), this covers the browser
+  threat without a shared secret.
 
-All routes under /admin/* require `Authorization: Bearer <token>`,
-matched against the auth_token passed in via the stdin envelope at
-startup. The token lives only in the proxy's heap and (host-side) in
-.run/auth.token, mode 0600.
-
-POST /admin/config writes a fully-resolved config to
-/run/secrets/config.json (tmpfs) and triggers reload via SIGTERM-self.
-The supervisor respawns python, which re-reads the file. The reload
-mechanism is injected (RELOAD_FN_KEY) so tests can supply a sentinel.
+Restart: token + config live on tmpfs at /run/secrets/{auth.token,
+config.json}. Survives python respawns; full container restart returns
+to TOFU. The host CLI surfaces the mismatch via a 401 on next push.
 """
 import hmac
 import json
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from aiohttp import web
 
 import config
+from config import Credentials, YamlCredentials
 
-TOKEN_KEY = web.AppKey("auth_token", str)
-CONFIG_PATH_KEY = web.AppKey("config_path", Path)
-RELOAD_FN_KEY = web.AppKey("reload_fn", Callable[[], None])
+HTTP_PORT = 39998
+
+TOKEN_PATH = Path("/run/secrets/auth.token")
+CONFIG_PATH = Path("/run/secrets/config.json")
 
 
-def _unauthorized(detail: str = "missing or invalid token") -> web.Response:
-    return web.Response(status=401, text=f"unauthorized: {detail}\n")
+@dataclass
+class AppState:
+    token: str = ""  # "" -> TOFU
+    creds: Credentials = field(default_factory=lambda: YamlCredentials({}))
+
+
+STATE_KEY: web.AppKey[AppState] = web.AppKey("state", AppState)
+
+
+def load_initial_state() -> AppState:
+    """Boot-time state load. Either file missing -> TOFU."""
+    if not TOKEN_PATH.exists() or not CONFIG_PATH.exists():
+        return AppState()
+    try:
+        creds = config.load_resolved(
+            json.loads(CONFIG_PATH.read_text()), source=str(CONFIG_PATH)
+        )
+    except config.ConfigError as e:
+        raise SystemExit(f"[admin] persisted config invalid: {e}")
+    return AppState(token=TOKEN_PATH.read_text().strip(), creds=creds)
+
+
+# ---- Middleware ----
 
 
 @web.middleware
-async def bearer_auth(request: web.Request, handler):
-    expected = request.app[TOKEN_KEY]
-    header = request.headers.get("Authorization", "")
-    scheme, _, presented = header.partition(" ")
-    if scheme != "Bearer" or not presented:
-        return _unauthorized("expected `Authorization: Bearer <token>`")
-    if not hmac.compare_digest(presented, expected):
-        return _unauthorized()
+async def fetch_metadata_guard(request: web.Request, handler):
+    """Reject cross-origin browser requests.
+
+    Sec-Fetch-Site is a forbidden header name (browsers set it; JS
+    cannot override). If present, require same-origin or none; if
+    absent, the client isn't a browser -- allow.
+    """
+    sfs = request.headers.get("Sec-Fetch-Site")
+    if sfs is not None and sfs not in ("same-origin", "none"):
+        return web.json_response(
+            {"error": "cross-origin requests forbidden"}, status=403
+        )
     return await handler(request)
 
 
-async def health(_: web.Request) -> web.Response:
-    return web.json_response({"ok": True})
+@web.middleware
+async def no_store(request: web.Request, handler):
+    resp = await handler(request)
+    if isinstance(resp, web.StreamResponse):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
-async def set_config(request: web.Request) -> web.Response:
-    """POST /admin/config — body is the full resolved config.
+@web.middleware
+async def access_log(request: web.Request, handler):
+    print(f"[http] {request.method} {request.path}", flush=True)
+    return await handler(request)
 
-    Validated server-side via config.load_resolved (rejects unresolved
-    ${secret:NAME} references — caller resolves client-side). On
-    success, atomic-write to /run/secrets/config.json and trigger
-    reload.
-    """
+
+# ---- Admin handlers ----
+
+
+async def admin_state(request: web.Request) -> web.Response:
+    state = request.app[STATE_KEY]
+    return web.json_response({"initialized": bool(state.token)})
+
+
+async def admin_config(request: web.Request) -> web.Response:
+    """POST /admin/config -- TOFU on first call, bearer-gated thereafter."""
+    state = request.app[STATE_KEY]
+
+    header = request.headers.get("Authorization", "")
+    scheme, _, presented = header.partition(" ")
+    if scheme != "Bearer" or not presented:
+        return web.json_response(
+            {"error": "expected `Authorization: Bearer <token>`"},
+            status=401,
+        )
+
+    # Authenticate before any body processing so unauthenticated probes
+    # can't fingerprint config schema by reading 400 errors. TOFU is the
+    # exception: any bearer is accepted because we're claiming the proxy.
+    if state.token and not hmac.compare_digest(presented, state.token):
+        return web.json_response({"error": "invalid token"}, status=401)
+
     try:
         body = await request.json()
     except json.JSONDecodeError:
         return web.json_response({"error": "invalid JSON body"}, status=400)
+
     try:
-        config.load_resolved(body, source="POST /admin/config")
+        new_creds = config.load_resolved(body, source="POST /admin/config")
     except config.ConfigError as e:
         return web.json_response({"error": str(e)}, status=400)
 
-    _write_atomic_json(request.app[CONFIG_PATH_KEY], body)
-    request.app[RELOAD_FN_KEY]()
-    return web.json_response({"ok": True, "reloading": True})
+    body_bytes = json.dumps(body).encode()
+
+    if not state.token:
+        # TOFU: first valid POST claims the proxy.
+        _atomic_write(TOKEN_PATH, presented.encode(), 0o400)
+        _atomic_write(CONFIG_PATH, body_bytes, 0o400)
+        state.token = presented
+        state.creds = new_creds
+        return web.json_response({"ok": True, "initialized": True})
+
+    _atomic_write(CONFIG_PATH, body_bytes, 0o400)
+    state.creds = new_creds
+    return web.json_response({"ok": True, "reloaded": True})
 
 
-def _write_atomic_json(path: Path, data: object) -> None:
+def _atomic_write(path: Path, data: bytes, mode: int) -> None:
     tmp = str(path) + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
     os.replace(tmp, path)
 
 
-def make_admin_app(
-    auth_token: str,
-    config_path: Path,
-    reload_fn: Callable[[], None] = lambda: None,
-) -> web.Application:
-    app = web.Application(middlewares=[bearer_auth])
-    app[TOKEN_KEY] = auth_token
-    app[CONFIG_PATH_KEY] = config_path
-    app[RELOAD_FN_KEY] = reload_fn
-    app.router.add_get("/admin/health", health)
-    app.router.add_post("/admin/config", set_config)
-    return app
+admin_routes = [
+    web.get("/admin/state", admin_state),
+    web.post("/admin/config", admin_config),
+]
