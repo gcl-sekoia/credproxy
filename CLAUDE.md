@@ -13,13 +13,13 @@ When implementation continues, the v1 deliverables enumerated in `design-v0.md` 
 The product is **two containers that must stay separated**:
 
 1. **Proxy container** (Linux, requires `NET_ADMIN`): owns the netns, installs iptables rules, runs two listeners — mitmproxy on `127.0.0.1:39999` (transparent intercept) and a single aiohttp HTTP API on `0.0.0.0:39998` that serves both workspace-facing bootstrap routes and host-facing admin routes. iptables redirects sentinel-IP `:80` to the HTTP listener and everything-else-TCP to mitmproxy. The HTTP listener is port-published to the host as `127.0.0.1:39998`; workspace reaches it through the sentinel redirect or directly via `127.0.0.1:39998` in the shared netns.
-2. **Host CLI** (`bin/credproxy`, Python; Go later): full lifecycle harness. Subcommands: `build`, `start`, `stop`, `reload`, `logs`, `shell`, `workspace`, `config`, `test`. Mount-target paths and the published HTTP port are sourced from Docker labels on the proxy image (`docker inspect`), so the image is the single source of truth for its own API; the CLI hardcodes only its own conventions (image tag, container name, host-side token path, default workspace image).
+2. **Host CLI** (`bin/credproxy`, Python; Go later): full lifecycle harness. Primary command is `credproxy workspace`, which auto-starts the proxy + pushes config + runs the workspace container + tears the proxy down on exit (single-command session). Surgical commands (`build`, `start`, `stop`, `reload`, `logs`, `shell`, `config`, `test`) exist for keeping a proxy alive across multiple workspaces or for debugging. Mount-target paths and the published HTTP port are sourced from Docker labels on the proxy image (`docker inspect`), so the image is the single source of truth for its own API; the CLI hardcodes only its own conventions (image tag, container name, host-side token path, default workspace image).
 
 The workspace container is **the user's** image — never modified, never granted privilege. This "bring your own image" constraint is load-bearing for the whole design. See `docs/workspace.md` for the constraints joining the proxy's netns imposes.
 
 Traffic flow: workspace egress → iptables OUTPUT in shared netns → REDIRECT to mitmproxy (or to the HTTP API for sentinel:80) → SNI peek → either substitute-placeholder-and-forward (terminate TLS) or passthrough (`client_hello.ignore_connection = True`).
 
-**Configuration flow**: `credproxy start` generates `.run/auth.token` (mode 0644) on the host if absent, then bind-mounts it read-only into the proxy at `/run/secrets-ro/auth.token`. The python process reads it fresh on every `/admin/config` request — no staging copy, no in-memory snapshot — so rotating the host file takes effect on the next request without a proxy restart. Config lives on tmpfs at `/run/secrets/config.json`, written by `POST /admin/config`. Lifecycle: the token survives both `credproxy reload` and full container restart (host-owned); config survives `credproxy reload` only (python re-execs in place, tmpfs persists) — the host CLI re-pushes after a container restart.
+**Configuration flow**: any path that starts the proxy (`credproxy start` or `credproxy workspace`'s auto-bootstrap) generates `.run/auth.token` (mode 0644) on the host if absent, then bind-mounts it read-only into the proxy at `/run/secrets-ro/auth.token`. The python process reads it fresh on every `/admin/config` request — no staging copy, no in-memory snapshot — so rotating the host file takes effect on the next request without a proxy restart. Config lives on tmpfs at `/run/secrets/config.json`, written by `POST /admin/config`. Lifecycle: the token survives both `credproxy reload` and full container restart (host-owned); config survives `credproxy reload` only (python re-execs in place, tmpfs persists) — `credproxy workspace`'s auto-bootstrap re-pushes config every time it starts the proxy.
 
 ## Threat model (v1)
 
@@ -69,13 +69,18 @@ If you change a label, update `proxy/Dockerfile` and re-`build`. If you change a
 
 The host CLI is `bin/credproxy`. Run subcommands as `./bin/credproxy <sub>` (or symlink to `$PATH`).
 
+**Primary entry point:**
+
+- `credproxy workspace [--image IMG] [-- CMD...]` — runs an interactive workspace container joined to the proxy netns. Auto-bootstrap behavior: if the proxy isn't running when this command starts, it generates `.run/auth.token` if absent, starts the proxy container, waits for `/health`, pushes config from `proxy/config.yaml`, runs the workspace, and **stops the proxy on exit**. If the proxy was already running (manual `credproxy start`), the command leaves it alone — explicit lifecycle wins. Default image `python:3.12-slim`, default command `bash`. e.g. `GITHUB_PAT=$(op read 'op://...') credproxy workspace`.
+
+**Surgical commands (for keeping a proxy alive across multiple workspaces or debugging):**
+
 - `credproxy build` — `docker build` the proxy image.
-- `credproxy start` / `credproxy stop` — lifecycle. `start` generates `.run/auth.token` if absent, then runs the container with the labels-derived mounts and ports. Config is empty until `credproxy config`.
-- `credproxy config [--file PATH]` — resolve `proxy/config.yaml` `${secret:NAME}` refs from host env and POST via `/admin/config`. e.g. `GITHUB_PAT=$(op read 'op://...') credproxy config`.
+- `credproxy start` / `credproxy stop` — explicit proxy lifecycle. `start` generates the token if absent, runs the container, and waits for `/health`. Config is empty until `credproxy config`.
+- `credproxy config [--file PATH]` — resolve `proxy/config.yaml` `${secret:NAME}` refs from host env and POST via `/admin/config`.
 - `credproxy logs` — `docker logs -f` (Ctrl-C to exit).
-- `credproxy reload` — SIGHUP the proxy; python re-execs itself in place, picking up edited source from the bind-mounted `proxy/`. The container, netns, iptables rules, and tmpfs all survive, so pushed config persists. A python crash takes the container down (no supervisor); recover via `credproxy start` + `credproxy config`.
+- `credproxy reload` — SIGHUP the proxy; python re-execs in place, picking up edited source from the bind-mounted `proxy/`. The container, netns, iptables rules, and tmpfs all survive, so pushed config persists. A python crash takes the container down (no supervisor); recover via `credproxy start` + `credproxy config` (or just `credproxy workspace`).
 - `credproxy shell` — root shell inside the proxy container.
-- `credproxy workspace [--image IMG] [-- CMD...]` — interactive workspace container joined to the proxy netns. Default image `python:3.12-slim`, default command `bash`.
 - `credproxy test [-- PYTEST_ARGS...]` — pytest inside the proxy image. Trailing args pass through to pytest.
 
 ## Open design questions
