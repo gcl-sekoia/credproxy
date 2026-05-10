@@ -4,11 +4,10 @@
 # brings it back with freshly imported source. SIGTERM/INT shuts
 # everything down cleanly.
 #
-# State (auth token + config) is persisted by the python process to
-# /run/secrets/{auth.token,config.json} (tmpfs, mode 0400 owned by
-# mitmuser/uid 31337). Respawned python reads both at startup; if
-# either is missing the proxy is in TOFU mode and the host CLI's first
-# push-config call claims it.
+# Auth token is bind-mounted from the host at /run/secrets-ro/auth.token
+# and read per request by admin.py. Config on tmpfs at
+# /run/secrets/config.json is written by POST /admin/config and survives
+# python respawns; full container restart drops it (host re-pushes).
 set -u
 
 export PYTHONDONTWRITEBYTECODE=1

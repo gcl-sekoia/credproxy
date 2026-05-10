@@ -28,9 +28,12 @@ except ImportError:
         "[credproxy] missing PyYAML on host; install with: pip install pyyaml"
     )
 
+# Host-side published port from the Makefile's -p flag.
+HTTP_PORT = 39998
+
 DEFAULT_CONFIG = "proxy/config.yaml"
 DEFAULT_TOKEN_FILE = ".run/auth.token"
-DEFAULT_BASE_URL = "http://127.0.0.1:39998"
+DEFAULT_BASE_URL = f"http://127.0.0.1:{HTTP_PORT}"
 
 SECRET_REF = re.compile(r"\$\{secret:([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -126,14 +129,13 @@ def push_config(args: argparse.Namespace) -> None:
     )
 
     if status == 200:
-        print("reloaded" if payload.get("reloaded") else json.dumps(payload))
+        print("ok")
         return
 
     if status == 401:
         _fail(
-            f"proxy rejected our token (HTTP 401). Host file ({token_path}) "
-            f"and the proxy disagree -- typically the host file changed after "
-            f"the container started. Run `make restart && make set-config`."
+            f"proxy rejected our token (HTTP 401). Verify {token_path} is "
+            f"readable and is the same file the proxy bind-mounts."
         )
 
     _fail(f"HTTP {status}: {payload.get('error', payload)}")
@@ -145,8 +147,7 @@ def main() -> None:
 
     push = sub.add_parser(
         "push-config",
-        help="resolve ${secret:NAME} from env and POST to /admin/config "
-             "(TOFU init on first call, reload thereafter)",
+        help="resolve ${secret:NAME} from env and POST to /admin/config",
     )
     push.add_argument(
         "--config",

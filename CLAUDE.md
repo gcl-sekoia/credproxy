@@ -19,13 +19,13 @@ The workspace container is **the user's** image — never modified, never grante
 
 Traffic flow: workspace egress → iptables OUTPUT in shared netns → REDIRECT to mitmproxy (or to the HTTP API for sentinel:80) → SNI peek → either substitute-placeholder-and-forward (terminate TLS) or passthrough (`client_hello.ignore_connection = True`).
 
-**Configuration flow**: `make up` generates `.run/auth.token` (mode 0600) on the host if absent, then bind-mounts it read-only into the proxy at `/run/secrets-ro/auth.token`. The entrypoint stages it onto tmpfs at `/run/secrets/auth.token` (mode 0400, owned by uid 31337); the python process reads it at startup and exits if missing. Config lives on tmpfs at `/run/secrets/config.json`, written by `POST /admin/config`. Lifecycle: the token survives both python respawn and full container restart (host-owned); config survives python respawn only — the host CLI re-pushes after a container restart. A 401 on push means the host file changed after the container started; recovery is `make restart`.
+**Configuration flow**: `make up` generates `.run/auth.token` (mode 0644) on the host if absent, then bind-mounts it read-only into the proxy at `/run/secrets-ro/auth.token`. The python process reads it fresh on every `/admin/config` request — no staging copy, no in-memory snapshot — so rotating the host file takes effect on the next request without a proxy restart. Config lives on tmpfs at `/run/secrets/config.json`, written by `POST /admin/config`. Lifecycle: the token survives both python respawn and full container restart (host-owned); config survives python respawn only — the host CLI re-pushes after a container restart.
 
 ## Threat model (v1)
 
 - **Workspace container**: cannot read the host filesystem, so cannot read `.run/auth.token`. Can hit `/admin/*` endpoints over the shared netns and gets 401 without the token. No window in which `/admin/config` is unauthenticated.
 - **Browser on host**: blocked by Chrome's Private Network Access (we never set `Access-Control-Allow-Private-Network`) plus the `fetch_metadata_guard` middleware (rejects requests with `Sec-Fetch-Site: cross-site`/`same-site`). Both layers act before any handler runs.
-- **Other host users on a multi-user host**: can read `.run/auth.token` only if FS perms permit (mode 0600 keeps it out of reach of other users in the normal case). Damage ceiling is DoS-or-config-replace — the user's secrets live in op://, keychain, etc., and only enter the proxy through bearer-authenticated `push-config` calls. Documented limitation; v1 is a single-user dev workstation tool.
+- **Other host users on a multi-user host**: can read `.run/auth.token` (mode 0644 so the in-container uid 31337 can read it through the bind mount) and forge admin requests. Damage ceiling is DoS-or-config-replace — the user's secrets live in op://, keychain, etc., and only enter the proxy through bearer-authenticated `push-config` calls. Documented limitation; v1 is a single-user dev workstation tool.
 - **Same-user malicious process**: out of scope (already has access to ssh keys, env vars, etc.).
 
 ## Architecture decisions that should not be casually reversed
@@ -39,7 +39,7 @@ These were spelled out in `design-v0.md` ("Architecture decisions worth preservi
 - **IPv6 dropped entirely in v1.**
 - **Bootstrap over plain HTTP from inside the netns is fine** — no eavesdropper exists on shared loopback/link-local. This resolves the chicken-and-egg of trusting the trust source. Don't add TLS or auth to the bootstrap routes.
 - **Single HTTP listener for admin + bootstrap.** Bearer auth gates `/admin/*`; bootstrap routes are open. Browsers are kept out by PNA + Sec-Fetch-Site, not by a separate listener or a separate iptables rule. Don't re-split.
-- **Host-owned bearer, bind-mounted into the proxy.** `.run/auth.token` is the source of truth; the proxy reads a tmpfs copy staged by entrypoint. No first-call ceremony, no race window; container restart preserves auth. Don't reintroduce TOFU or in-container token generation.
+- **Host-owned bearer, bind-mounted into the proxy.** `.run/auth.token` is the source of truth; the proxy reads it directly from the bind mount on every admin request — no staging copy, no in-memory snapshot, rotation works without restart. Don't reintroduce TOFU or in-container token generation.
 - **Credential lookup must go through an interface** that can be swapped for IPC to a host plugin later. Don't hard-code direct config-file reads inside the inject path; the future host-plugin system is informing the v1 design.
 - **Proxy container holds the proxy core; host plugins (future) handle host-touchy things.** Don't push host-touchy logic into the proxy to "simplify"; it breaks cross-platform.
 

@@ -11,10 +11,13 @@ from config import Substitution, YamlCredentials
 
 @pytest.fixture
 def state(monkeypatch, tmp_path):
-    """Fresh AppState; TOKEN_PATH/CONFIG_PATH redirected to tmp_path."""
-    monkeypatch.setattr(admin, "TOKEN_PATH", tmp_path / "auth.token")
+    """Fresh AppState; TOKEN_PATH/CONFIG_PATH redirected to tmp_path,
+    token file pre-populated so admin_config's per-call read succeeds."""
+    token_path = tmp_path / "auth.token"
+    monkeypatch.setattr(admin, "TOKEN_PATH", token_path)
     monkeypatch.setattr(admin, "CONFIG_PATH", tmp_path / "config.json")
-    return admin.AppState(token="established")
+    token_path.write_text("established")
+    return admin.AppState()
 
 
 @pytest.fixture
@@ -65,7 +68,6 @@ def test_load_initial_state_token_only_no_config(monkeypatch, tmp_path):
     monkeypatch.setattr(admin, "CONFIG_PATH", tmp_path / "config.json")
     (tmp_path / "auth.token").write_text("xyz\n")
     state = admin.load_initial_state()
-    assert state.token == "xyz"
     assert state.creds.intercept_hosts() == set()
 
 
@@ -75,7 +77,6 @@ def test_load_initial_state_token_and_config(monkeypatch, tmp_path):
     (tmp_path / "auth.token").write_text("xyz")
     (tmp_path / "config.json").write_text(json.dumps(VALID_CONFIG))
     state = admin.load_initial_state()
-    assert state.token == "xyz"
     assert state.creds.intercept_hosts() == {"api.github.com"}
 
 
@@ -98,7 +99,7 @@ async def test_post_with_correct_token_reloads(aiohttp_client, app, state):
         json=VALID_CONFIG,
     )
     assert resp.status == 200
-    assert await resp.json() == {"ok": True, "reloaded": True}
+    assert await resp.json() == {"ok": True}
     assert "api.github.com" in state.creds.intercept_hosts()
     assert json.loads(admin.CONFIG_PATH.read_text()) == VALID_CONFIG
 
@@ -129,9 +130,9 @@ async def test_post_with_wrong_token_401(aiohttp_client, app):
     assert resp.status == 401
 
 
-async def test_post_close_match_token_401(aiohttp_client, app, state):
+async def test_post_close_match_token_401(aiohttp_client, app):
     """Off-by-one-character token must still 401 (no prefix-match leak)."""
-    state.token = "established-token-abc"
+    admin.TOKEN_PATH.write_text("established-token-abc")
     client = await aiohttp_client(app)
     resp = await client.post(
         "/admin/config",
@@ -214,6 +215,35 @@ async def test_post_unresolved_secret_rejected(aiohttp_client, app):
     assert resp.status == 400
     body = await resp.json()
     assert "GITHUB_PAT" in body["error"]
+
+
+async def test_token_rotation_takes_effect_without_restart(aiohttp_client, app):
+    """Rewriting TOKEN_PATH mid-flight: the old value 401s on the next
+    request, the new value works -- no app restart required."""
+    client = await aiohttp_client(app)
+
+    resp = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"},
+        json=VALID_CONFIG,
+    )
+    assert resp.status == 200
+
+    admin.TOKEN_PATH.write_text("rotated")
+
+    resp = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"},
+        json=VALID_CONFIG,
+    )
+    assert resp.status == 401
+
+    resp = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer rotated"},
+        json=VALID_CONFIG,
+    )
+    assert resp.status == 200
 
 
 # ---- fetch_metadata_guard ----

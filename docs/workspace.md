@@ -69,9 +69,8 @@ The workspace cannot bind 39998 or 39999 on `0.0.0.0` or `127.0.0.1`
 non-loopback interface; in practice this never matters.
 
 `/admin/*` routes on the HTTP API require a bearer token the workspace
-does not have; they return 401 to the workspace. `/admin/state` is
-open and returns whether the proxy has been initialized. Bootstrap
-routes (`/health`, `/ca.crt`, `/bootstrap.sh`, `/env.sh`, `/setup`,
+does not have; they return 401 to the workspace. Bootstrap routes
+(`/health`, `/ca.crt`, `/bootstrap.sh`, `/env.sh`, `/setup`,
 `/domains`, `/tokens`, `/llms.txt`) are open by design.
 
 ## Egress shape

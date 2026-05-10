@@ -1,13 +1,10 @@
 #!/bin/sh
 # Proxy entrypoint. Runs as root: installs iptables rules in this netns
 # (which becomes the shared netns for the workspace container), then drops
-# to uid 31337 and execs the python supervisor.
+# to the mitmproxy uid and execs the python supervisor.
 set -eu
 
-MITMPROXY_UID=31337
-PROXY_PORT=39999
-HTTP_PORT=39998
-SENTINEL_IP=169.254.1.1
+. /opt/proxy/constants.sh
 
 echo "[entrypoint] installing iptables rules"
 
@@ -40,16 +37,13 @@ ip6tables -P OUTPUT  DROP 2>/dev/null || true
 ip6tables -P INPUT   DROP 2>/dev/null || true
 ip6tables -P FORWARD DROP 2>/dev/null || true
 
-# Stage the host-mounted token onto tmpfs with mitmuser ownership.
-# The host file is bind-mounted read-only at /run/secrets-ro/auth.token
-# (owned by the host user); copying gives us a uid 31337 readable copy
-# at the path the python process expects.
-if [ ! -r /run/secrets-ro/auth.token ]; then
-    echo "[entrypoint] /run/secrets-ro/auth.token missing or unreadable" >&2
+# Token is bind-mounted at /run/secrets-ro/auth.token (mode 0644 on the
+# host so uid 31337 can read it through the bind mount). Python reads
+# it fresh per request -- no staging copy needed.
+if [ ! -e /run/secrets-ro/auth.token ]; then
+    echo "[entrypoint] /run/secrets-ro/auth.token missing -- did you bind-mount the host token?" >&2
     exit 1
 fi
-install -m 0400 -o "$MITMPROXY_UID" -g "$MITMPROXY_UID" \
-    /run/secrets-ro/auth.token /run/secrets/auth.token
 
 echo "[entrypoint] dropping to uid $MITMPROXY_UID, exec supervisor"
 # setpriv preserves env, so HOME would still point at /root. mitmproxy reads

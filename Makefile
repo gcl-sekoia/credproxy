@@ -2,6 +2,10 @@ PROXY_NAME      := credproxy
 PROXY_IMAGE     := credproxy:dev
 WORKSPACE_IMAGE := python:3.12-slim
 
+# Pulls MITMPROXY_UID, HTTP_PORT, PROXY_PORT, SENTINEL_IP. Same file is
+# sourced by proxy/entrypoint.sh and mirrored in proxy/constants.py.
+include proxy/constants.sh
+
 .DEFAULT_GOAL := help
 
 .PHONY: help build up down restart logs reload shell workspace rebuild test set-config
@@ -26,21 +30,21 @@ help:
 	@echo "                   e.g. GITHUB_PAT=\$$(op read 'op://...') make set-config"
 
 build:
-	docker build -t $(PROXY_IMAGE) proxy/
+	docker build --build-arg MITMPROXY_UID=$(MITMPROXY_UID) -t $(PROXY_IMAGE) proxy/
 
 $(TOKEN_FILE):
 	@mkdir -p $(dir $@)
 	@python3 -c 'import secrets; print(secrets.token_hex(16))' > $@
-	@chmod 0600 $@
+	@chmod 0644 $@
 	@echo "generated $@"
 
 up: $(TOKEN_FILE)
 	docker run -d --rm \
 		--name $(PROXY_NAME) \
 		--cap-add NET_ADMIN \
-		--tmpfs /run/secrets:size=64k,uid=31337,mode=0700 \
+		--tmpfs /run/secrets:size=64k,uid=$(MITMPROXY_UID),mode=0700 \
 		--mount type=bind,source=$(CURDIR)/$(TOKEN_FILE),target=/run/secrets-ro/auth.token,readonly \
-		-p 127.0.0.1:39998:39998 \
+		-p 127.0.0.1:$(HTTP_PORT):$(HTTP_PORT) \
 		-v $(CURDIR)/proxy:/opt/proxy \
 		$(PROXY_IMAGE) >/dev/null
 	@echo "$(PROXY_NAME) started; run 'make set-config' to push config"
