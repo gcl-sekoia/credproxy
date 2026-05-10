@@ -1,7 +1,8 @@
 #!/bin/sh
 # Proxy entrypoint. Runs as root: installs iptables rules in this netns
 # (which becomes the shared netns for the workspace container), then drops
-# to the mitmproxy uid and execs the python supervisor.
+# to the mitmproxy uid and execs python directly. Python is PID 1 and
+# handles SIGHUP for in-place reload.
 set -eu
 
 . /opt/proxy/constants.sh
@@ -45,11 +46,13 @@ if [ ! -e /run/secrets-ro/auth.token ]; then
     exit 1
 fi
 
-echo "[entrypoint] dropping to uid $MITMPROXY_UID, exec supervisor"
+echo "[entrypoint] dropping to uid $MITMPROXY_UID, exec python"
 # setpriv preserves env, so HOME would still point at /root. mitmproxy reads
-# ~/.mitmproxy as its confdir; force it to mitmuser's home.
-exec env HOME=/home/mitmuser setpriv \
+# ~/.mitmproxy as its confdir; force it to mitmuser's home. Python is PID 1
+# inside the netns; SIGHUP triggers an in-place re-exec for `make reload`.
+# PYTHONDONTWRITEBYTECODE keeps .pyc out of the bind-mounted /opt/proxy.
+exec env HOME=/home/mitmuser PYTHONDONTWRITEBYTECODE=1 setpriv \
     --reuid="$MITMPROXY_UID" \
     --regid="$MITMPROXY_UID" \
     --clear-groups \
-    /opt/proxy/supervisor.sh
+    python -u /opt/proxy/main.py

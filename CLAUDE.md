@@ -19,7 +19,7 @@ The workspace container is **the user's** image — never modified, never grante
 
 Traffic flow: workspace egress → iptables OUTPUT in shared netns → REDIRECT to mitmproxy (or to the HTTP API for sentinel:80) → SNI peek → either substitute-placeholder-and-forward (terminate TLS) or passthrough (`client_hello.ignore_connection = True`).
 
-**Configuration flow**: `make up` generates `.run/auth.token` (mode 0644) on the host if absent, then bind-mounts it read-only into the proxy at `/run/secrets-ro/auth.token`. The python process reads it fresh on every `/admin/config` request — no staging copy, no in-memory snapshot — so rotating the host file takes effect on the next request without a proxy restart. Config lives on tmpfs at `/run/secrets/config.json`, written by `POST /admin/config`. Lifecycle: the token survives both python respawn and full container restart (host-owned); config survives python respawn only — the host CLI re-pushes after a container restart.
+**Configuration flow**: `make up` generates `.run/auth.token` (mode 0644) on the host if absent, then bind-mounts it read-only into the proxy at `/run/secrets-ro/auth.token`. The python process reads it fresh on every `/admin/config` request — no staging copy, no in-memory snapshot — so rotating the host file takes effect on the next request without a proxy restart. Config lives on tmpfs at `/run/secrets/config.json`, written by `POST /admin/config`. Lifecycle: the token survives both `make reload` and full container restart (host-owned); config survives `make reload` only (python re-execs in place, tmpfs persists) — the host CLI re-pushes after a container restart.
 
 ## Threat model (v1)
 
@@ -61,7 +61,7 @@ These were spelled out in `design-v0.md` ("Architecture decisions worth preservi
 - `make up` / `make down` / `make restart` — lifecycle. `make up` generates `.run/auth.token` if absent, then starts the proxy with that token bind-mounted. Config is empty until `make set-config`.
 - `make set-config` — resolve `proxy/config.yaml` `${secret:NAME}` refs from host env and POST via `/admin/config`. e.g. `GITHUB_PAT=$(op read 'op://...') make set-config`.
 - `make logs` — tail proxy logs.
-- `make reload` — hot-reload python code in the running proxy (kills the python child; the bash supervisor respawns it; state survives via tmpfs).
+- `make reload` — SIGHUP the proxy container; python re-execs itself in place, picking up edited source from the bind-mounted `proxy/`. The container, netns, iptables rules, and tmpfs all survive, so pushed config persists. A python crash takes the container down (no supervisor); recover via `make up` + `make set-config`.
 - `make shell` — root shell inside the proxy.
 - `make workspace` — run an interactive workspace container joined to the proxy netns.
 - `make rebuild` — `down + build + up`.

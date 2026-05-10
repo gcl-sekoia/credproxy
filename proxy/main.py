@@ -9,12 +9,16 @@ Two listeners on one asyncio loop:
 The auth token is bind-mounted at /run/secrets-ro/auth.token from the
 host; admin.py reads it fresh per request, so host-side rotation
 takes effect without a restart. Config lives on tmpfs at
-/run/secrets/config.json, written by POST /admin/config. Python
-respawns within the same container reload state from tmpfs; full
-container restart drops the config (host re-pushes via bin/credproxy
-push-config). The bash supervisor restarts python on death.
+/run/secrets/config.json, written by POST /admin/config. On SIGHUP
+(triggered by `make reload`) python re-execs itself in place; the
+container, its netns/iptables, and tmpfs survive, so pushed config
+persists across reloads. A python crash takes the container down
+(no supervisor) -- full container restart drops the config and the
+host re-pushes via bin/credproxy push-config.
 """
 import asyncio
+import os
+import signal
 import sys
 
 from aiohttp import web
@@ -37,7 +41,14 @@ def make_http_app(state: admin.AppState) -> web.Application:
     return app
 
 
+def _reload() -> None:
+    print("[main] SIGHUP -- re-execing", flush=True)
+    os.execv(sys.executable, [sys.executable, "-u", *sys.argv])
+
+
 async def run() -> None:
+    asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, _reload)
+
     state = admin.load_initial_state()
     print(
         f"[main] state: intercept_hosts={sorted(state.creds.intercept_hosts())}",

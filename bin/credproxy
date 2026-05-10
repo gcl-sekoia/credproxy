@@ -157,7 +157,7 @@ def main() -> None:
     push.add_argument(
         "--token-file",
         default=DEFAULT_TOKEN_FILE,
-        help=f"auth token cache (default: {DEFAULT_TOKEN_FILE})",
+        help=f"auth token file (default: {DEFAULT_TOKEN_FILE})",
     )
     push.add_argument(
         "--base-url",

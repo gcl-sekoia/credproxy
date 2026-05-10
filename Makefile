@@ -3,7 +3,7 @@ PROXY_IMAGE     := credproxy:dev
 WORKSPACE_IMAGE := python:3.12-slim
 
 # Pulls MITMPROXY_UID, HTTP_PORT, PROXY_PORT, SENTINEL_IP. Same file is
-# sourced by proxy/entrypoint.sh and mirrored in proxy/constants.py.
+# sourced by proxy/entrypoint.sh and parsed by proxy/constants.py.
 include proxy/constants.sh
 
 .DEFAULT_GOAL := help
@@ -20,13 +20,13 @@ help:
 	@echo "  make down        stop and remove the proxy container"
 	@echo "  make restart     down + up (no rebuild)"
 	@echo "  make logs        tail proxy logs"
-	@echo "  make reload      hot-reload python (re-reads /run/secrets/*)"
+	@echo "  make reload      SIGHUP -> python re-execs in place (config persists via tmpfs)"
 	@echo "  make shell       open a shell in the proxy (root)"
 	@echo "  make workspace   run a workspace container joined to the proxy netns"
 	@echo "  make rebuild     down + build + up"
 	@echo "  make test        run pytest in the proxy image"
-	@echo "  make set-config  init or update: resolve proxy/config.yaml \$${secret:NAME} refs"
-	@echo "                   from host env and POST via /admin/config."
+	@echo "  make set-config  resolve proxy/config.yaml \$${secret:NAME} refs from host env"
+	@echo "                   and POST via /admin/config."
 	@echo "                   e.g. GITHUB_PAT=\$$(op read 'op://...') make set-config"
 
 build:
@@ -58,7 +58,7 @@ logs:
 	docker logs -f $(PROXY_NAME)
 
 reload:
-	docker exec $(PROXY_NAME) /opt/proxy/reload.sh
+	docker kill --signal=HUP $(PROXY_NAME)
 
 shell:
 	docker exec -it --user 0 $(PROXY_NAME) bash
