@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-The product (codename "credproxy") is a transparent egress proxy for workspace containers — LLM-agent sandboxes, CI runners, dev shells, batch jobs. `design.md` is the v1 spec; read it before making architectural decisions. The repo also contains a working dev harness under `proxy/` plus a `Makefile` and `docs/workspace.md`.
+The product (codename "credproxy") is a transparent egress proxy for workspace containers — LLM-agent sandboxes, CI runners, dev shells, batch jobs. `design-v0.md` is the *initial* design sketch — useful background, but the implementation has diverged in places and that's fine; learn-by-building is expected. CLAUDE.md (this file) and the code are the living source of truth. The repo also contains a working dev harness under `proxy/` plus a `Makefile` and `docs/workspace.md`.
 
-When implementation continues, the v1 deliverables enumerated in `design.md` ("V1 deliverables" section) are the scope. Don't expand scope beyond that list without surfacing the tradeoff.
+When implementation continues, the v1 deliverables enumerated in `design-v0.md` ("V1 deliverables" section) are a reasonable starting scope, but treat the list as a starting point rather than a contract. Surface tradeoffs when scope shifts.
 
 ## Big-picture architecture
 
@@ -30,7 +30,7 @@ Traffic flow: workspace egress → iptables OUTPUT in shared netns → REDIRECT 
 
 ## Architecture decisions that should not be casually reversed
 
-These are spelled out in `design.md` ("Architecture decisions worth preserving") but worth surfacing because they will tempt reconsideration:
+These were spelled out in `design-v0.md` ("Architecture decisions worth preserving") and still apply — worth surfacing because they will tempt reconsideration:
 
 - **Two-container shape is forced**, not chosen — netfilter must run in the same kernel as the traffic, and on macOS/Windows that kernel is inside Docker Desktop's VM. A host process cannot install iptables there. Don't propose collapsing to a single host process.
 - **Transparent capture of all TCP**, not port-based selection. The product promise is "every tool works"; selective capture leaks edge cases.
