@@ -8,10 +8,11 @@ start, stop, reload, logs, shell, config, test) exist for keeping
 a proxy alive across multiple workspaces or for debugging.
 
 Mount-target paths and the published HTTP port are sourced from
-labels on the proxy image (`docker inspect`) rather than hardcoded
-here, so the image is the single source of truth for its own API.
-The CLI hardcodes only its own conventions (image tag, container
-name, host-side token path, default workspace image).
+the proxy image's `ENV` declarations (read via `docker inspect`'s
+`Config.Env`) rather than hardcoded here, so the image is the
+single source of truth for its own API. The CLI hardcodes only its
+own conventions (image tag, container name, host-side token path,
+default workspace image).
 """
 from __future__ import annotations
 
@@ -49,38 +50,41 @@ def _fail(msg: str) -> None:
     sys.exit(f"[credproxy] {msg}")
 
 
-# ---- Image labels ------------------------------------------------------
+# ---- Image env ---------------------------------------------------------
 #
-# The proxy image declares its API via Docker labels. The CLI reads them
-# at runtime instead of duplicating the values.
+# The proxy image declares its API via Dockerfile `ENV`. The CLI reads
+# the values via `docker inspect`'s `Config.Env` so the image is the
+# single source of truth -- the in-container code reads the same vars
+# from its inherited process environment.
 
 
 @dataclass(frozen=True)
-class ImageLabels:
+class ImageEnv:
     http_port: int
     tmpfs: str
     token: str
     source: str
 
     @classmethod
-    def load(cls, image: str = IMAGE_TAG) -> "ImageLabels":
+    def load(cls, image: str = IMAGE_TAG) -> "ImageEnv":
         try:
             out = subprocess.check_output(
                 ["docker", "inspect", image], stderr=subprocess.PIPE
             )
         except subprocess.CalledProcessError:
             _fail(f"image {image} not found; run `credproxy build` first")
-        labels = (json.loads(out)[0]["Config"].get("Labels") or {})
+        env_lines = json.loads(out)[0]["Config"].get("Env") or []
+        env = dict(line.split("=", 1) for line in env_lines if "=" in line)
         try:
             return cls(
-                http_port=int(labels["credproxy.port.http"]),
-                tmpfs=labels["credproxy.mount.tmpfs"],
-                token=labels["credproxy.mount.token"],
-                source=labels["credproxy.mount.source"],
+                http_port=int(env["CREDPROXY_HTTP_PORT"]),
+                tmpfs=env["CREDPROXY_TMPFS"],
+                token=env["CREDPROXY_TOKEN_PATH"],
+                source=env["CREDPROXY_SOURCE"],
             )
         except KeyError as e:
             _fail(
-                f"image {image} is missing label {e}; rebuild with the "
+                f"image {image} is missing env var {e}; rebuild with the "
                 f"current Dockerfile (`credproxy build`)"
             )
 
@@ -130,17 +134,17 @@ def _start_proxy() -> None:
             f"{CONTAINER_NAME} already running -- use `credproxy reload` for "
             f"code changes or `credproxy stop` first"
         )
-    labels = ImageLabels.load()
+    meta = ImageEnv.load()
     _ensure_token()
     cmd = [
         "docker", "run", "-d", "--rm",
         "--name", CONTAINER_NAME,
         "--cap-add", "NET_ADMIN",
-        "--tmpfs", f"{labels.tmpfs}:size=64k",
+        "--tmpfs", f"{meta.tmpfs}:size=64k",
         "--mount",
-        f"type=bind,source={TOKEN_FILE},target={labels.token},readonly",
-        "-v", f"{PROXY_DIR}:{labels.source}",
-        "-p", f"127.0.0.1:{labels.http_port}:{labels.http_port}",
+        f"type=bind,source={TOKEN_FILE},target={meta.token},readonly",
+        "-v", f"{PROXY_DIR}:{meta.source}",
+        "-p", f"127.0.0.1:{meta.http_port}:{meta.http_port}",
         IMAGE_TAG,
     ]
     subprocess.check_call(cmd, stdout=subprocess.DEVNULL)
@@ -195,10 +199,10 @@ def _push_config(file: Path) -> None:
         _fail(f"{file}: top level must be a mapping")
     resolved = resolve_config(raw)
 
-    labels = ImageLabels.load()
+    meta = ImageEnv.load()
     body = json.dumps(resolved).encode()
     status, payload = _http_post_json(
-        f"http://127.0.0.1:{labels.http_port}/admin/config", body, token
+        f"http://127.0.0.1:{meta.http_port}/admin/config", body, token
     )
 
     if status == 200:
@@ -220,7 +224,7 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 def cmd_start(args: argparse.Namespace) -> None:
     _start_proxy()
-    _wait_for_proxy_ready(ImageLabels.load().http_port)
+    _wait_for_proxy_ready(ImageEnv.load().http_port)
     print(f"{CONTAINER_NAME} started; run `credproxy config` to push config")
 
 
@@ -262,8 +266,8 @@ def cmd_workspace(args: argparse.Namespace) -> None:
             print("[credproxy] starting proxy...", file=sys.stderr, flush=True)
             _start_proxy()
             we_started_proxy = True
-            labels = ImageLabels.load()
-            _wait_for_proxy_ready(labels.http_port)
+            meta = ImageEnv.load()
+            _wait_for_proxy_ready(meta.http_port)
             print("[credproxy] pushing config...", file=sys.stderr, flush=True)
             _push_config(DEFAULT_CONFIG)
 
@@ -284,9 +288,10 @@ def cmd_workspace(args: argparse.Namespace) -> None:
 
 
 def cmd_test(args: argparse.Namespace) -> None:
+    meta = ImageEnv.load()
     cmd = [
         "docker", "run", "--rm",
-        "-v", f"{PROXY_DIR}:/opt/proxy",
+        "-v", f"{PROXY_DIR}:{meta.source}",
         "-v", f"{TESTS_DIR}:/opt/tests",
         "-w", "/opt",
         "--entrypoint", "python",

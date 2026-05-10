@@ -1,9 +1,9 @@
 """Bootstrap routes: workspace-facing endpoints on the merged HTTP API.
 
-Reached from the workspace via the iptables sentinel:80 -> HTTP_PORT
-redirect installed in entrypoint.sh. All routes are GET, all
-unauthenticated -- the data they expose is what the workspace needs to
-function (CA cert, env vars, placeholders).
+Reached from the workspace via the iptables sentinel:80 ->
+CREDPROXY_HTTP_PORT redirect installed in entrypoint.sh. All routes
+are GET, all unauthenticated -- the data they expose is what the
+workspace needs to function (CA cert, env vars, placeholders).
 """
 from pathlib import Path
 

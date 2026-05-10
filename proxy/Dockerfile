@@ -1,19 +1,21 @@
+# check=skip=SecretsUsedInArgOrEnv
+# (suppresses a false positive on CREDPROXY_TOKEN_PATH -- the value is a
+# filesystem path, not a secret. The lint matches any "TOKEN" substring.)
+
 FROM python:3.12-slim
 
-# Must match MITMPROXY_UID in proxy/constants.sh (drift would silently
-# break the iptables --uid-owner rule).
-ARG MITMPROXY_UID=31337
-
-# Image's published "API contract" with the host CLI: which port the
-# HTTP listener uses, and which paths the in-container code reads from
-# / writes to. The CLI reads these via `docker inspect` and uses them
-# to build `docker run --tmpfs / --mount / -p` flags. Values must
-# agree with proxy/constants.sh and the hardcoded paths in admin.py;
-# bumping any of them is a CLI/image API break.
-LABEL credproxy.port.http="39998"
-LABEL credproxy.mount.tmpfs="/run/secrets"
-LABEL credproxy.mount.token="/run/secrets-ro/auth.token"
-LABEL credproxy.mount.source="/opt/proxy"
+# Image constants -- single source of truth for both the in-container
+# code (via the inherited process environment) and the host CLI (via
+# `docker inspect`'s `Config.Env`). `ENV` is also visible to subsequent
+# `RUN`/`WORKDIR`/`COPY` steps, so build-time uses pull from the same
+# place. Bumping any value is an image/CLI API break -- rebuild after.
+ENV CREDPROXY_MITMPROXY_UID=31337 \
+    CREDPROXY_HTTP_PORT=39998 \
+    CREDPROXY_PROXY_PORT=39999 \
+    CREDPROXY_SENTINEL_IP=169.254.1.1 \
+    CREDPROXY_TMPFS=/run/secrets \
+    CREDPROXY_TOKEN_PATH=/run/secrets-ro/auth.token \
+    CREDPROXY_SOURCE=/opt/proxy
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         iptables \
@@ -21,15 +23,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         procps \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd --uid ${MITMPROXY_UID} --create-home --shell /bin/sh mitmuser
+RUN useradd --uid ${CREDPROXY_MITMPROXY_UID} --create-home --shell /bin/sh mitmuser
 
-WORKDIR /opt/proxy
+WORKDIR ${CREDPROXY_SOURCE}
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY entrypoint.sh main.py addon.py bootstrap.py \
-     admin.py config.py constants.sh constants.py ./
+     admin.py config.py constants.py ./
 RUN chmod 0755 entrypoint.sh
 
 ENTRYPOINT ["/opt/proxy/entrypoint.sh"]

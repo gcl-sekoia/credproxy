@@ -1,21 +1,13 @@
-"""Runtime constants -- parsed from constants.sh, the single source of truth.
+"""Runtime constants -- read from the inherited process environment.
 
-constants.sh is sourced by entrypoint.sh; this module parses it so Python
-sees the same values without manual sync. The shell file is restricted to
-plain `KEY=VALUE` lines (no `export`, no command substitution); this parser
-matches that contract.
+Values are declared as `ENV` in proxy/Dockerfile and inherited by the
+process. Casts to int here so callers don't have to. Path/string
+constants used elsewhere (CREDPROXY_TMPFS, CREDPROXY_TOKEN_PATH, ...) are
+read at their use site rather than centralized here.
 """
-from pathlib import Path
+import os
 
-_c: dict[str, str] = {}
-for _line in (Path(__file__).with_name("constants.sh")).read_text().splitlines():
-    _line = _line.strip()
-    if not _line or _line.startswith("#"):
-        continue
-    _k, _, _v = _line.partition("=")
-    _c[_k.strip()] = _v.strip()
-
-MITMPROXY_UID = int(_c["MITMPROXY_UID"])
-HTTP_PORT = int(_c["HTTP_PORT"])
-PROXY_PORT = int(_c["PROXY_PORT"])
-SENTINEL_IP = _c["SENTINEL_IP"]
+MITMPROXY_UID = int(os.environ["CREDPROXY_MITMPROXY_UID"])
+HTTP_PORT     = int(os.environ["CREDPROXY_HTTP_PORT"])
+PROXY_PORT    = int(os.environ["CREDPROXY_PROXY_PORT"])
+SENTINEL_IP   = os.environ["CREDPROXY_SENTINEL_IP"]

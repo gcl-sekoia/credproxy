@@ -13,7 +13,7 @@ When implementation continues, the v1 deliverables enumerated in `design-v0.md` 
 The product is **two containers that must stay separated**:
 
 1. **Proxy container** (Linux, requires `NET_ADMIN`): owns the netns, installs iptables rules, runs two listeners — mitmproxy on `127.0.0.1:39999` (transparent intercept) and a single aiohttp HTTP API on `0.0.0.0:39998` that serves both workspace-facing bootstrap routes and host-facing admin routes. iptables redirects sentinel-IP `:80` to the HTTP listener and everything-else-TCP to mitmproxy. The HTTP listener is port-published to the host as `127.0.0.1:39998`; workspace reaches it through the sentinel redirect or directly via `127.0.0.1:39998` in the shared netns.
-2. **Host CLI** (`bin/credproxy`, Python; Go later): full lifecycle harness. Primary command is `credproxy workspace`, which auto-starts the proxy + pushes config + runs the workspace container + tears the proxy down on exit (single-command session). Surgical commands (`build`, `start`, `stop`, `reload`, `logs`, `shell`, `config`, `test`) exist for keeping a proxy alive across multiple workspaces or for debugging. Mount-target paths and the published HTTP port are sourced from Docker labels on the proxy image (`docker inspect`), so the image is the single source of truth for its own API; the CLI hardcodes only its own conventions (image tag, container name, host-side token path, default workspace image).
+2. **Host CLI** (`bin/credproxy`, Python; Go later): full lifecycle harness. Primary command is `credproxy workspace`, which auto-starts the proxy + pushes config + runs the workspace container + tears the proxy down on exit (single-command session). Surgical commands (`build`, `start`, `stop`, `reload`, `logs`, `shell`, `config`, `test`) exist for keeping a proxy alive across multiple workspaces or for debugging. Mount-target paths and the published HTTP port are sourced from the proxy image's `ENV` declarations (read via `docker inspect`'s `Config.Env`), so the image is the single source of truth for its own API; the CLI hardcodes only its own conventions (image tag, container name, host-side token path, default workspace image).
 
 The workspace container is **the user's** image — never modified, never granted privilege. This "bring your own image" constraint is load-bearing for the whole design. See `docs/workspace.md` for the constraints joining the proxy's netns imposes.
 
@@ -50,20 +50,20 @@ These were spelled out in `design-v0.md` ("Architecture decisions worth preservi
 
 ## Key constants
 
-Image-internal (in `proxy/constants.sh`, sourced by `entrypoint.sh` and parsed by `constants.py`):
+All declared as `ENV` in `proxy/Dockerfile` — single source of truth for both the in-container code (via the inherited process environment) and the host CLI (via `docker inspect`'s `Config.Env`). Bumping any value is an image/CLI API break: rebuild after with `credproxy build`.
 
-- `MITMPROXY_UID=31337` — mitmproxy runs as this uid; the iptables `-m owner --uid-owner` rule depends on it (prevents redirect loop on mitmproxy's own outbound).
-- `PROXY_PORT=39999` — mitmproxy transparent-intercept bind port. Picked unusual to minimize collision with workspace-side dev tools.
-- `SENTINEL_IP=169.254.1.1` — link-local for the workspace-facing endpoint, resolved as `proxy.local` from the workspace side. iptables redirects `<sentinel>:80` to `HTTP_PORT`.
+In-container runtime values (read by `entrypoint.sh` and `constants.py`):
 
-Image-published API (Docker `LABEL`s on the proxy image, read by the CLI via `docker inspect`):
+- `CREDPROXY_MITMPROXY_UID=31337` — mitmproxy runs as this uid; `useradd` in the Dockerfile and the iptables `-m owner --uid-owner` rule depend on it (prevents redirect loop on mitmproxy's own outbound).
+- `CREDPROXY_PROXY_PORT=39999` — mitmproxy transparent-intercept bind port. Picked unusual to minimize collision with workspace-side dev tools.
+- `CREDPROXY_SENTINEL_IP=169.254.1.1` — link-local for the workspace-facing endpoint, resolved as `proxy.local` from the workspace side. iptables redirects `<sentinel>:80` to `CREDPROXY_HTTP_PORT`.
 
-- `credproxy.port.http` (`39998`) — merged HTTP API bind port (admin + bootstrap). CLI publishes it (`-p 127.0.0.1:39998:39998`) and POSTs to it for `config`.
-- `credproxy.mount.tmpfs` (`/run/secrets`) — CLI sets up `--tmpfs` here; `admin.py` writes `config.json` there.
-- `credproxy.mount.token` (`/run/secrets-ro/auth.token`) — CLI bind-mounts the host token here; `admin.py` reads from this exact path.
-- `credproxy.mount.source` (`/opt/proxy`) — CLI bind-mounts `proxy/` here for dev (live edits + `credproxy reload`).
+CLI/image contract (also read by `bin/credproxy` from `Config.Env`):
 
-If you change a label, update `proxy/Dockerfile` and re-`build`. If you change a value that *also* lives in `proxy/constants.sh` (e.g., `HTTP_PORT`), keep both in sync; drift would silently break the iptables redirect or the python bind.
+- `CREDPROXY_HTTP_PORT=39998` — merged HTTP API bind port (admin + bootstrap). CLI publishes it (`-p 127.0.0.1:39998:39998`) and POSTs to it for `config`.
+- `CREDPROXY_TMPFS=/run/secrets` — CLI sets up `--tmpfs` here; `admin.py` writes `config.json` to this directory.
+- `CREDPROXY_TOKEN_PATH=/run/secrets-ro/auth.token` — CLI bind-mounts the host token here; `admin.py` reads from this exact path.
+- `CREDPROXY_SOURCE=/opt/proxy` — CLI bind-mounts `proxy/` here for dev (live edits + `credproxy reload`); also the Dockerfile `WORKDIR`.
 
 ## Commands
 
