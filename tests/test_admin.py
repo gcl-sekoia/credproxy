@@ -290,6 +290,16 @@ async def test_health_route(aiohttp_client, app):
     assert body["ok"] is True
 
 
+async def test_index_route_map(aiohttp_client, app):
+    """Bare GET / returns a plain-text route map instead of a 404."""
+    client = await aiohttp_client(app)
+    resp = await client.get("/")
+    assert resp.status == 200
+    assert resp.content_type == "text/plain"
+    text = await resp.text()
+    assert "/setup" in text and "/bootstrap.sh" in text
+
+
 async def test_setup_static_fields(aiohttp_client, app):
     """Static fields present even with an empty credentials state."""
     client = await aiohttp_client(app)

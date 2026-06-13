@@ -168,7 +168,28 @@ async def llms_txt(_: web.Request) -> web.Response:
     return web.Response(body=LLMS_TXT, content_type="text/plain", charset="utf-8")
 
 
+async def index(_: web.Request) -> web.Response:
+    """Friendly route map for a bare GET / (e.g. `curl http://proxy.local`),
+    instead of a 404. Exposes only route names and the workspace name (already
+    public via /setup) -- nothing sensitive."""
+    ws = os.environ.get("CREDPROXY_WORKSPACE") or "?"
+    body = (
+        f"credproxy proxy — workspace '{ws}'\n\n"
+        "Bootstrap routes (open, no auth):\n"
+        "  GET /             this page\n"
+        "  GET /health       liveness\n"
+        "  GET /ca.crt       proxy CA certificate (PEM)\n"
+        "  GET /bootstrap.sh install CA + trust env  (curl -sSL proxy.local/bootstrap.sh | sh)\n"
+        "  GET /env.sh       CA-trust env exports\n"
+        "  GET /setup        bindings + workspace info (JSON)\n"
+        "  GET /llms.txt     guidance for agents\n\n"
+        "Admin routes (/admin/*) require a bearer token and are host-only.\n"
+    )
+    return web.Response(text=body, content_type="text/plain")
+
+
 bootstrap_routes = [
+    web.get("/", index),
     web.get("/health", health),
     web.get("/ca.crt", ca_crt),
     web.get("/bootstrap.sh", bootstrap_sh),
