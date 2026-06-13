@@ -307,11 +307,47 @@ def _logs_json(ws: Workspace) -> None:
 # ---- binding commands --------------------------------------------------------
 
 
+def _parse_secret_args(values: list[str] | None) -> str | dict[str, str] | None:
+    """Turn repeated --secret values into a single bare ref (single-slot) or a
+    slot->ref table (multi-slot). Mixing the two styles, or repeating a bare
+    ref, is an error."""
+    if not values:
+        return None
+    keyed = ["=" in v for v in values]
+    if all(keyed):
+        out: dict[str, str] = {}
+        for v in values:
+            slot, _, ref = v.partition("=")
+            if not slot or not ref:
+                fail(f"--secret '{v}' must be SLOT=REF")
+            if slot in out:
+                fail(f"--secret slot '{slot}' given more than once")
+            out[slot] = ref
+        return out
+    if any(keyed):
+        fail("mix of bare REF and SLOT=REF in --secret; use one style")
+    if len(values) > 1:
+        fail("multiple bare --secret refs; use SLOT=REF for a multi-slot secret")
+    return values[0]
+
+
 def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     from ..core import bindings as core_bindings
     from ..core.bindings import Binding
     from ..core.injectors import find_injector
     from ..core.providers import find_provider
+
+    if (a.preset is None) == (a.injector is None):
+        fail("`binding add` needs exactly one of --preset or --injector")
+    if a.preset is not None:
+        _do_binding_preset(ctx, name, a)
+        return
+
+    if not a.host:
+        fail("`binding add --injector` needs at least one --host")
+    secret = _parse_secret_args(a.secret)
+    if secret is None:
+        fail("`binding add` needs --secret")
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
@@ -332,7 +368,7 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         name=bname,
         injector=a.injector,
         provider=a.provider,
-        secret=a.secret,
+        secret=secret,
         hosts=tuple(a.host),
         placeholder=placeholder,
         env=env,
@@ -344,11 +380,49 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         "name": bname,
         "injector": binding.injector,
         "provider": binding.provider,
-        "secret": binding.secret,
+        "secret": core_bindings.secret_display(binding.secret),
         "hosts": list(binding.hosts),
         "placeholder": placeholder,
         "env": env,
     })
+
+
+def _do_binding_preset(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    """Generate a coordinated binding set from a preset (e.g. github) and
+    append all of them, sharing one placeholder."""
+    from ..core import bindings as core_bindings
+    from ..core.presets import build_preset
+    from ..core.providers import find_provider
+
+    if a.binding_name or a.placeholder or a.env or a.host:
+        fail("--preset manages name/placeholder/env/host itself; drop those flags")
+    secret = _parse_secret_args(a.secret)
+    if not isinstance(secret, str):
+        fail("`binding add --preset` needs a single --secret REF")
+    find_provider(a.provider)
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+
+    existing = core_bindings.load_bindings(ws)
+    taken = {b.name for b in existing}
+    new = build_preset(a.preset, a.provider, secret)
+    for b in new:
+        if b.name in taken:
+            fail(f"binding name '{b.name}' already exists in workspace '{ws.name}'")
+    core_bindings.validate(existing + new, str(ws.config_path))
+    for b in new:
+        core_bindings.append_binding(ws, b)
+    for b in new:
+        render.OUT.binding_added(b.name, ws.name, {
+            "name": b.name,
+            "injector": b.injector,
+            "provider": b.provider,
+            "secret": core_bindings.secret_display(b.secret),
+            "hosts": list(b.hosts),
+            "placeholder": b.placeholder,
+            "env": b.env,
+        })
 
 
 def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
@@ -373,7 +447,7 @@ def do_binding_list(ctx: Ctx, name: str | None) -> None:
             "name": b.name,
             "injector": b.injector,
             "provider": b.provider,
-            "secret": b.secret,
+            "secret": core_bindings.secret_display(b.secret),
             "hosts": list(b.hosts),
             "placeholder": b.placeholder,
             "env": b.env,
@@ -425,7 +499,8 @@ def _do_binding_test_adhoc(ctx: Ctx, name: str | None, a: argparse.Namespace) ->
     from ..core.injectors import find_injector
     from ..core.providers import find_provider
 
-    if not a.provider or not a.secret:
+    secret = _parse_secret_args(a.secret)
+    if not a.provider or secret is None:
         fail("ad-hoc `binding test` needs --provider and --secret")
     if a.binding_name is not None:
         fail("cannot combine a binding NAME with ad-hoc --provider/--secret")
@@ -438,7 +513,7 @@ def _do_binding_test_adhoc(ctx: Ctx, name: str | None, a: argparse.Namespace) ->
 
     probe = core_bindings.Binding(
         name=label, injector=a.injector or "", provider=a.provider,
-        secret=a.secret, hosts=(), placeholder=None, env=None,
+        secret=secret, hosts=(), placeholder=None, env=None,
     )
     r = core_bindings.test_binding(probe)
     render.OUT.binding_test([{
@@ -558,10 +633,16 @@ def do_dev_reload(ctx: Ctx, name: str | None) -> None:
 
 def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     p = parent.add_parser("add")
-    p.add_argument("--injector", required=True)
+    # --preset generates a coordinated binding set (e.g. github); --injector is
+    # the single-binding path. Exactly one is required (checked in the handler,
+    # so the error is a friendly message rather than argparse usage spew).
+    p.add_argument("--preset", default=None)
+    p.add_argument("--injector", default=None)
     p.add_argument("--provider", required=True)
-    p.add_argument("--secret", required=True)
-    p.add_argument("--host", required=True, action="append", metavar="HOST")
+    # Repeatable: a single bare REF is single-slot; one or more `slot=ref`
+    # values form a multi-slot secret table.
+    p.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
+    p.add_argument("--host", action="append", metavar="HOST")
     p.add_argument("--name", dest="binding_name", default=None)
     p.add_argument("--placeholder", default=None)
     p.add_argument("--env", default=None)
@@ -576,7 +657,7 @@ def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     # Ad-hoc mode: test a definition before it is bound (no workspace needed).
     p.add_argument("--injector", default=None)
     p.add_argument("--provider", default=None)
-    p.add_argument("--secret", default=None)
+    p.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
 
 
 def _build_leaf_parser() -> argparse.ArgumentParser:
