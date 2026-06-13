@@ -70,18 +70,6 @@ def container_status(name: str) -> str | None:
     return inspect(name, "{{.State.Status}}")
 
 
-def running_workspaces() -> list[str]:
-    """Names of workspaces with a running credproxy container."""
-    r = subprocess.run(
-        ["docker", "ps", "--filter", "label=credproxy.role",
-         "--format", '{{.Label "credproxy.workspace"}}'],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return sorted({line for line in r.stdout.split() if line})
-
-
 def resolve_host_port(container_name: str, container_port: int) -> int:
     """Return the host port Docker mapped to *container_port* for *container_name*.
 
