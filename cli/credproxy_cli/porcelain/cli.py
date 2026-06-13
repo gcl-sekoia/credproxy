@@ -119,6 +119,13 @@ def do_create(ctx: Ctx, name: str, image: str) -> None:
     ws = for_name(name)  # always explicit; reserved-name check happens here
     lifecycle.create_workspace_files(ws, image)
     render.OUT.created(ws.name, str(ws.config_path))
+    # Loose convenience: seed the default-workspace pointer when it is unset,
+    # so `credp enter` works immediately without a separate `use`. Only fills a
+    # vacuum -- never overrides an existing selection -- and is announced. The
+    # pointer is a loose-surface concept, so strict `create` never touches it.
+    if ctx.loose and pointer.read_default() is None:
+        pointer.set_default(ws)
+        say(f"set '{ws.name}' as the default workspace")
 
 
 def do_use(ctx: Ctx, name: str) -> None:
@@ -599,7 +606,7 @@ _LOOSE_HELP = (
     "Workspaces (omit NAME to act on the default):\n"
     "  credp use NAME                  set the default workspace\n"
     "  credp current                   print the default workspace\n"
-    "  credp create NAME [--image IMG]\n"
+    "  credp create NAME [--image IMG] (becomes the default if none is set yet)\n"
     "  credp list [FILTER]\n"
     "  credp enter|start|stop|delete|apply|inspect|logs [NAME]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"

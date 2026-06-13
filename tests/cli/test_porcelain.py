@@ -379,6 +379,55 @@ def test_no_args_exits_zero(xdg):
     assert ec == 0
 
 
+# ---- loose create seeds the default pointer when empty -----------------------
+
+
+def test_loose_create_seeds_default_when_unset(xdg, workspaces_dir):
+    """In loose mode, creating a workspace with no default set makes it the
+    default (announced), so `credp enter` works immediately."""
+    from credproxy_cli.core.pointer import read_default
+    assert read_default() is None
+
+    ec, out, err = _run_loose(["create", "alpha"])
+    assert ec == 0
+    assert read_default() == "alpha"
+    assert "default workspace" in err  # announced on stderr
+
+
+def test_loose_create_does_not_override_existing_default(xdg, workspaces_dir):
+    """The seed only fills a vacuum -- a second create never changes an
+    already-selected default."""
+    from credproxy_cli.core.pointer import read_default
+
+    _run_loose(["create", "alpha"])            # alpha becomes default
+    ec, out, err = _run_loose(["create", "beta"])
+    assert ec == 0
+    assert read_default() == "alpha"           # unchanged
+    assert "default workspace" not in err      # nothing announced
+
+
+def test_strict_create_never_sets_default(xdg, workspaces_dir):
+    """Strict `create` has no default-workspace behavior -- the pointer stays
+    unset."""
+    from credproxy_cli.core.pointer import read_default
+
+    ec, out, err = _run(["workspace", "create", "alpha"])
+    assert ec == 0
+    assert read_default() is None
+
+
+def test_loose_create_reseeds_after_default_cleared(xdg, workspaces_dir):
+    """Deleting the default clears the pointer; the next loose create re-seeds
+    it (the vacuum is real again)."""
+    from credproxy_cli.core.pointer import read_default, clear_default
+
+    _run_loose(["create", "alpha"])
+    clear_default()                            # simulate delete-of-default
+    assert read_default() is None
+    _run_loose(["create", "beta"])
+    assert read_default() == "beta"
+
+
 def test_strict_help_is_strict(xdg):
     """Bare `credproxy` help describes the strict surface and points to credp."""
     ec, out, err = _run([])

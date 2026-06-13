@@ -105,7 +105,7 @@ Two entry points:
 
 **Workspace commands (canonical):**
 
-- `credproxy workspace create NAME [--image IMG]` — scaffold `<name>.toml` + `auth.token`. Does not start anything.
+- `credproxy workspace create NAME [--image IMG]` — scaffold `<name>.toml` + `auth.token`. Does not start anything. On the loose surface only, if no default workspace is set yet, the new one becomes the default (announced); it never overrides an existing default.
 - `credproxy workspace use NAME` — set the default workspace pointer (loose surface only).
 - `credproxy current` — print the default workspace pointer (`{"default": ...}` under `--json`); the read-only companion to `use`.
 - `credproxy workspace list [FILTER]` (or `credproxy list`) — workspaces with running status and image; current default marked.
