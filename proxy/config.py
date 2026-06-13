@@ -126,6 +126,8 @@ def _location_key(scheme_name: str, params: dict) -> tuple:
     Mirrors core/schemes.location_key on the CLI side."""
     if scheme_name in ("bearer", "basic"):
         return ("header", params.get("header", "Authorization"))
+    if scheme_name == "sigv4":
+        return ("header", "Authorization")
     if scheme_name == "body":
         return ("body",)
     return (scheme_name,)

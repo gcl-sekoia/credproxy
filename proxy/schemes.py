@@ -31,7 +31,10 @@ plus a matching `SchemeSpec` in the CLI's `core/schemes.py` catalog.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 from typing import Protocol
+from urllib.parse import unquote
 
 
 class RequestCtx:
@@ -58,12 +61,30 @@ class RequestCtx:
         except KeyError:
             raise KeyError(f"no secret slot {slot!r} (have {sorted(self._secrets)})")
 
+    # -- request line / host (read-only; sign schemes canonicalize over these) --
+    @property
+    def method(self) -> str:
+        return self._req.method
+
+    @property
+    def path(self) -> str:
+        """The request target as sent: path plus `?query` if present."""
+        return self._req.path
+
+    @property
+    def host(self) -> str:
+        return self._req.host
+
     # -- header primitives --
     def header_get(self, name: str) -> str | None:
         return self._req.headers.get(name)
 
     def header_set(self, name: str, value: str) -> None:
         self._req.headers[name] = value
+
+    # -- raw body bytes (sign schemes hash the entity body) --
+    def body_bytes(self) -> bytes:
+        return self._req.content or b""
 
     # -- body primitives (text view handles content-encoding transparently) --
     def body_text(self) -> str | None:
@@ -172,6 +193,183 @@ class BodyScheme(_SubstituteScheme):
         return True
 
 
+# --------------------------------------------------------------------------
+# Sign family
+# --------------------------------------------------------------------------
+#
+# The crypto lives here, owned and trusted; the scheme orchestrates it. AWS
+# SigV4 (https://docs.aws.amazon.com/general/latest/gr/sigv4-create-string-to-sign.html).
+
+_SIGV4_ALGORITHM = "AWS4-HMAC-SHA256"
+_UNRESERVED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
+)
+
+
+def _uri_encode(s: str, *, encode_slash: bool = True) -> str:
+    """AWS URI-encode: unreserved chars verbatim, everything else %XX (upper
+    hex) over the UTF-8 bytes. `/` is preserved when encode_slash is False."""
+    out: list[str] = []
+    for ch in s:
+        if ch in _UNRESERVED:
+            out.append(ch)
+        elif ch == "/" and not encode_slash:
+            out.append("/")
+        else:
+            out.extend(f"%{b:02X}" for b in ch.encode("utf-8"))
+    return "".join(out)
+
+
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _hmac(key: bytes, msg: str) -> bytes:
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+
+def _signing_key(secret: str, date: str, region: str, service: str) -> bytes:
+    k = _hmac(("AWS4" + secret).encode("utf-8"), date)
+    k = _hmac(k, region)
+    k = _hmac(k, service)
+    return _hmac(k, "aws4_request")
+
+
+def _parse_sigv4_authorization(auth: str) -> dict | None:
+    """Pull the credential scope and signed-header list out of an incoming
+    `Authorization: AWS4-HMAC-SHA256 Credential=.../date/region/service/
+    aws4_request, SignedHeaders=h;..., Signature=...` header. Returns None if
+    the header is not a SigV4 header we understand."""
+    prefix = _SIGV4_ALGORITHM + " "
+    if not auth.startswith(prefix):
+        return None
+    fields: dict[str, str] = {}
+    for seg in auth[len(prefix):].split(","):
+        key, _, val = seg.strip().partition("=")
+        fields[key.strip()] = val.strip()
+    cred = fields.get("Credential", "").split("/")
+    if "SignedHeaders" not in fields or len(cred) < 5:
+        return None
+    return {
+        "date": cred[1],
+        "region": cred[2],
+        "service": cred[3],
+        "signed_headers": [h for h in fields["SignedHeaders"].split(";") if h],
+    }
+
+
+def sigv4_resign(
+    *,
+    method: str,
+    path: str,
+    host: str,
+    header_get,
+    body: bytes,
+    scope: dict,
+    access_key_id: str,
+    secret_access_key: str,
+) -> str:
+    """Recompute the SigV4 canonical request from the live request and the
+    incoming credential scope, then return a fresh `Authorization` value signed
+    with the real key. The workspace's SDK already chose the SignedHeaders and
+    payload hash (signing with throwaway creds); we reproduce its canonical
+    request byte-for-byte and only swap the access key id + signature."""
+    date, region, service = scope["date"], scope["region"], scope["service"]
+    signed = sorted(h.lower() for h in scope["signed_headers"])
+    signed_headers_str = ";".join(signed)
+
+    # X-Amz-Date carries the full timestamp the StringToSign is keyed to.
+    amz_date = header_get("x-amz-date") or header_get("X-Amz-Date") or ""
+
+    # Canonical URI: the wire path is already encoded once. Non-S3 services
+    # encode it again (the notorious double-encode); S3 takes it as-is.
+    raw_path = path.split("?", 1)[0] or "/"
+    canonical_uri = raw_path if service == "s3" \
+        else _uri_encode(raw_path, encode_slash=False)
+
+    # Canonical query string: decode then canonically re-encode each pair,
+    # sort by encoded key (then value).
+    query = path.split("?", 1)[1] if "?" in path else ""
+    pairs = []
+    for part in query.split("&"):
+        if not part:
+            continue
+        k, _, v = part.partition("=")
+        pairs.append((_uri_encode(unquote(k)), _uri_encode(unquote(v))))
+    pairs.sort()
+    canonical_query = "&".join(f"{k}={v}" for k, v in pairs)
+
+    # Canonical headers: each signed header, lowercased name, trimmed+collapsed
+    # value. `host` falls back to the request host if not a real header.
+    header_lines = []
+    for h in signed:
+        val = header_get(h)
+        if val is None and h == "host":
+            val = host
+        val = " ".join((val or "").split())
+        header_lines.append(f"{h}:{val}\n")
+    canonical_headers = "".join(header_lines)
+
+    # Payload hash: the value the SDK used -- the x-amz-content-sha256 header if
+    # it set one (S3, or UNSIGNED-PAYLOAD), else the SHA256 of the body.
+    payload_hash = header_get("x-amz-content-sha256") \
+        or header_get("X-Amz-Content-Sha256") or _sha256_hex(body)
+
+    canonical_request = "\n".join([
+        method, canonical_uri, canonical_query,
+        canonical_headers, signed_headers_str, payload_hash,
+    ])
+
+    credential_scope = f"{date}/{region}/{service}/aws4_request"
+    string_to_sign = "\n".join([
+        _SIGV4_ALGORITHM, amz_date, credential_scope,
+        _sha256_hex(canonical_request.encode("utf-8")),
+    ])
+
+    key = _signing_key(secret_access_key, date, region, service)
+    signature = hmac.new(key, string_to_sign.encode("utf-8"),
+                         hashlib.sha256).hexdigest()
+    return (
+        f"{_SIGV4_ALGORITHM} Credential={access_key_id}/{credential_scope}, "
+        f"SignedHeaders={signed_headers_str}, Signature={signature}"
+    )
+
+
+class SigV4Scheme:
+    """AWS Signature Version 4 (sign family). The workspace signs with throwaway
+    creds so its SDK produces a SigV4 request; the proxy parses the scope it
+    chose, recomputes the canonical request, and re-signs with the real key --
+    so the real access/secret key never enters the workspace. region + service
+    are read from the request, so no params are needed."""
+
+    name = "sigv4"
+    family = "sign"
+    slots = ("access_key_id", "secret_access_key")
+
+    def on_request(self, ctx: RequestCtx) -> bool:
+        auth = ctx.header_get("Authorization")
+        if not auth:
+            return False
+        scope = _parse_sigv4_authorization(auth)
+        if scope is None:
+            return False
+        ctx.header_set("Authorization", sigv4_resign(
+            method=ctx.method,
+            path=ctx.path,
+            host=ctx.host,
+            header_get=ctx.header_get,
+            body=ctx.body_bytes(),
+            scope=scope,
+            access_key_id=ctx.secret("access_key_id"),
+            secret_access_key=ctx.secret("secret_access_key"),
+        ))
+        return True
+
+    def on_response(self, ctx: RequestCtx) -> bool:  # noqa: D401 - no-op seam
+        return False
+
+
 SCHEMES: dict[str, Scheme] = {
-    s.name: s for s in (BearerScheme(), BasicScheme(), BodyScheme())
+    s.name: s for s in (BearerScheme(), BasicScheme(), BodyScheme(),
+                        SigV4Scheme())
 }
