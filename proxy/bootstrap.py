@@ -79,11 +79,13 @@ to find out which placeholders to use and where:
     curl -s http://proxy.local/setup | jq .bindings
 
 Each binding entry has:
-  name        -- a handle for this credential (e.g. "github-env")
-  placeholder -- the inert sentinel to use as the credential value
+  name        -- a handle for this credential (e.g. "github-api")
+  placeholder -- the inert sentinel to use as the credential value (may be null
+                 for sign-family schemes that need no static placeholder)
   env         -- suggested env var name to export the placeholder as (may be null)
-  header      -- the HTTP header the proxy watches for substitution
-  hosts       -- the hostnames for which this placeholder is active
+  scheme      -- how the proxy injects: bearer/basic/body (substitute), ...
+  params      -- scheme-specific settings (e.g. {"header": "Authorization"})
+  hosts       -- the hostnames for which this binding is active
 
 Example: if a binding has env "GITHUB_TOKEN" and placeholder "ghp_xxx...",
 set GITHUB_TOKEN=ghp_xxx... in your environment. The proxy will substitute
@@ -109,16 +111,17 @@ def workspace_bindings(creds: Credentials) -> list[dict]:
     """JSON shape for /setup's `bindings` field.
 
     Returns only the workspace-safe binding fields: name, placeholder,
-    env, header, hosts. Real credential values are intentionally absent
-    (least disclosure). This data is safe to expose because placeholders
-    are inert sentinels.
+    env, scheme, params, hosts. Real credential values are intentionally
+    absent (least disclosure). This data is safe to expose because
+    placeholders are inert sentinels and params carry no secret.
     """
     return [
         {
             "name": b.name,
             "placeholder": b.placeholder,
             "env": b.env,
-            "header": b.header,
+            "scheme": b.scheme,
+            "params": b.params,
             "hosts": b.hosts,
         }
         for b in creds.inward_bindings()

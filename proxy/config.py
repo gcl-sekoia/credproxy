@@ -1,84 +1,112 @@
-"""Proxy configuration: intercept set + per-host placeholder substitution.
+"""Proxy configuration: intercept set + per-host injection transforms.
 
-The proxy receives an already-resolved config (literal `real:` values,
-no template references) via POST /admin/config. The host CLI
-`bin/credproxy config` is the supported producer; it fetches each
-binding's secret from its provider before posting.
+The proxy receives an already-resolved config (literal secret values, no
+template references) via POST /admin/config. The host CLI is the supported
+producer; it resolves each binding's secret from its provider before posting.
 
 This module validates the parsed dict and produces a BindingCredentials
-instance. Schema:
+instance. Wire schema (design-v3, scheme-aware):
 
     {
       "bindings": [
         {
-          "name":        "github-env",          # non-empty, unique across bindings
-          "hosts":       ["api.github.com"],     # non-empty list of strings
-          "header":      "Authorization",        # non-empty string
-          "placeholder": "ghp_xxx...",           # non-empty string; no ${secret:...}
-          "real":        "<resolved secret>",    # non-empty string; no ${secret:...}
-          "env":         "GITHUB_TOKEN"          # optional; suggested env var or null/absent
+          "name":        "github-git",            # non-empty, unique
+          "hosts":       ["github.com"],           # non-empty list of strings
+          "scheme":      "basic",                  # a key in schemes.SCHEMES
+          "params":      {"header": "Authorization"},  # optional, scheme-defined
+          "secret":      {"value": "<real>"},      # slot -> resolved value
+          "placeholder": "ghp_xxx...",             # substitute schemes; the
+                                                   #   inert token to find/swap
+          "env":         "GITHUB_TOKEN"            # optional; null/absent ok
         }
       ]
     }
 
+`secret` is a slot->value table (single-slot substitute schemes use the
+`value` slot). The proxy dispatches on `scheme`; the placeholder, params, and
+resolved secrets are bundled into a Transform the scheme's `on_request` acts
+through.
+
 Uniqueness constraints:
-  - `name` is unique across bindings (non-empty string).
-  - `(host, header)` pair is unique across all bindings.
+  - `name` is unique across bindings.
+  - the (host, wire-location) pair is unique — two bindings can't both write
+    the same header (or both write the body) on the same host.
 
-Credentials class API:
-  - `intercept_hosts()` -> set[str]: union of all bindings' hosts.
-  - `substitutions_for(host)` -> list[Substitution]: substitutions for that host.
-
-Inward API / least-disclosure: `inward_bindings()` returns the
-workspace-facing binding metadata (name, placeholder, env, header,
-hosts) with `real` excluded. This is the source for /setup.
+Credentials API:
+  - `intercept_hosts()`  -> set[str]: union of all bindings' hosts.
+  - `transforms_for(host)` -> list[Transform]: transforms active for a host,
+    static (pushed) layer plus a runtime-augmentable layer (the re-seal seam;
+    empty today).
+  - `inward_bindings()`  -> list[InwardBinding]: least-disclosure descriptors
+    for /setup (no secret values, no provider/secret-id).
 """
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+import schemes
+from schemes import Scheme
 
 _SECRET_REF = re.compile(r"\$\{secret:([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 @dataclass(frozen=True)
-class Substitution:
-    header: str
-    placeholder: str
-    real: str
+class Transform:
+    """A compiled, ready-to-run injection for one binding: the scheme object,
+    its params, the inert placeholder (substitute family), and the resolved
+    secret slots the scheme reads via ctx.secret()."""
+    name: str
+    scheme: Scheme
+    params: dict
+    placeholder: str | None
+    secrets: dict[str, str]
 
 
 @dataclass(frozen=True)
 class InwardBinding:
-    """Workspace-safe binding descriptor: no real credential, no provider/secret-id."""
+    """Workspace-safe binding descriptor: no secret value, no provider/secret-id."""
     name: str
-    placeholder: str
+    placeholder: str | None
     env: str | None
-    header: str
+    scheme: str
+    params: dict
     hosts: list[str]
 
 
 class Credentials(Protocol):
     def intercept_hosts(self) -> set[str]: ...
-    def substitutions_for(self, host: str) -> list[Substitution]: ...
+    def transforms_for(self, host: str) -> list[Transform]: ...
     def inward_bindings(self) -> list[InwardBinding]: ...
 
 
 class BindingCredentials:
-    """Credentials built from the bindings wire format."""
+    """Credentials built from the bindings wire format.
+
+    The host->transforms map is the *static* layer pushed via /admin/config.
+    `transforms_for` overlays a *runtime* layer (re-seal seam, design-v3): the
+    substitution set must be a function over (static + runtime-augmentable),
+    never baked immutable at push time, so dynamically-minted placeholders can
+    be registered later. The runtime layer is empty until re-seal lands.
+    """
 
     def __init__(
         self,
-        hosts: dict[str, list[Substitution]],
+        hosts: dict[str, list[Transform]],
         bindings: list[InwardBinding] | None = None,
     ):
         self._hosts = hosts
+        self._runtime: dict[str, list[Transform]] = {}
         self._bindings: list[InwardBinding] = bindings or []
 
     def intercept_hosts(self) -> set[str]:
-        return set(self._hosts)
+        return set(self._hosts) | set(self._runtime)
 
-    def substitutions_for(self, host: str) -> list[Substitution]:
-        return list(self._hosts.get(host, []))
+    def transforms_for(self, host: str) -> list[Transform]:
+        return list(self._hosts.get(host, [])) + list(self._runtime.get(host, []))
+
+    def register_runtime(self, host: str, transform: Transform) -> None:
+        """Add a runtime transform (re-seal seam; unused today)."""
+        self._runtime.setdefault(host, []).append(transform)
 
     def inward_bindings(self) -> list[InwardBinding]:
         return list(self._bindings)
@@ -93,13 +121,31 @@ def _fail(msg: str) -> None:
     raise ConfigError(f"[config] {msg}")
 
 
+def _location_key(scheme_name: str, params: dict) -> tuple:
+    """Where on the wire this scheme writes — for host collision detection.
+    Mirrors core/schemes.location_key on the CLI side."""
+    if scheme_name in ("bearer", "basic"):
+        return ("header", params.get("header", "Authorization"))
+    if scheme_name == "body":
+        return ("body",)
+    return (scheme_name,)
+
+
+def _check_unresolved(value: str, source: str, where: str) -> None:
+    m = _SECRET_REF.search(value)
+    if m:
+        _fail(
+            f"{source}: {where} contains unresolved ${{secret:{m.group(1)}}} "
+            f"-- the caller is expected to resolve before posting"
+        )
+
+
 def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
     """Build credentials from a parsed dict (already-resolved values).
 
-    `raw` must conform to the bindings schema documented at the top of
-    this module. Any remaining `${...}` template-looking text in `real`
-    or `placeholder` causes a validation error -- secret resolution is
-    the caller's responsibility.
+    `raw` must conform to the bindings schema at the top of this module. Any
+    remaining `${secret:...}` text in a placeholder or secret value is a
+    validation error -- secret resolution is the caller's responsibility.
     """
     if not isinstance(raw, dict) or "bindings" not in raw:
         _fail(f"{source}: missing top-level `bindings:` key")
@@ -109,8 +155,8 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
         _fail(f"{source}: `bindings` must be an array")
 
     names_seen: set[str] = set()
-    host_header_seen: dict[tuple[str, str], str] = {}  # (host, header) -> binding name
-    hosts: dict[str, list[Substitution]] = {}
+    loc_seen: dict[tuple, str] = {}  # (host, location) -> binding name
+    hosts: dict[str, list[Transform]] = {}
     inward: list[InwardBinding] = []
 
     for i, entry in enumerate(bindings_raw):
@@ -132,59 +178,76 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
                 or not all(isinstance(h, str) and h for h in binding_hosts):
             _fail(f"{source}: {where}.hosts must be a non-empty array of strings")
 
-        # --- header ---
-        header = entry.get("header")
-        if not isinstance(header, str) or not header:
-            _fail(f"{source}: {where}.header must be a non-empty string")
+        # --- scheme ---
+        scheme_name = entry.get("scheme")
+        if not isinstance(scheme_name, str) or scheme_name not in schemes.SCHEMES:
+            _fail(
+                f"{source}: {where}.scheme must be one of "
+                f"{', '.join(sorted(schemes.SCHEMES))} (got {scheme_name!r})"
+            )
+        scheme = schemes.SCHEMES[scheme_name]
 
-        # --- placeholder ---
+        # --- params (optional) ---
+        params = entry.get("params", {})
+        if not isinstance(params, dict):
+            _fail(f"{source}: {where}.params must be an object")
+
+        # --- secret (slot -> value) ---
+        secret = entry.get("secret")
+        if not isinstance(secret, dict) or not secret:
+            _fail(f"{source}: {where}.secret must be a non-empty object of slot->value")
+        for slot, val in secret.items():
+            if not isinstance(val, str) or not val:
+                _fail(f"{source}: {where}.secret['{slot}'] must be a non-empty string")
+            _check_unresolved(val, source, f"{where}.secret['{slot}']")
+        missing = [s for s in scheme.slots if s not in secret]
+        if missing:
+            _fail(
+                f"{source}: {where} scheme '{scheme_name}' needs secret slot(s) "
+                f"{', '.join(missing)}"
+            )
+
+        # --- placeholder (required for the substitute family) ---
         placeholder = entry.get("placeholder")
-        if not isinstance(placeholder, str) or not placeholder:
-            _fail(f"{source}: {where}.placeholder must be a non-empty string")
-        unresolved_ph = _SECRET_REF.search(placeholder)
-        if unresolved_ph:
-            _fail(
-                f"{source}: {where}.placeholder contains "
-                f"unresolved ${{secret:{unresolved_ph.group(1)}}} -- "
-                f"the caller is expected to resolve before posting"
-            )
-
-        # --- real ---
-        real = entry.get("real")
-        if not isinstance(real, str) or not real:
-            _fail(f"{source}: {where}.real must be a non-empty string")
-        unresolved_real = _SECRET_REF.search(real)
-        if unresolved_real:
-            _fail(
-                f"{source}: {where}.real contains "
-                f"unresolved ${{secret:{unresolved_real.group(1)}}} -- "
-                f"the caller is expected to resolve before posting"
-            )
+        if scheme.family == "substitute":
+            if not isinstance(placeholder, str) or not placeholder:
+                _fail(f"{source}: {where}.placeholder must be a non-empty string")
+            _check_unresolved(placeholder, source, f"{where}.placeholder")
+        elif placeholder is not None and (not isinstance(placeholder, str) or not placeholder):
+            _fail(f"{source}: {where}.placeholder must be a non-empty string or absent")
 
         # --- env (optional) ---
         env = entry.get("env")
         if env is not None and (not isinstance(env, str) or not env):
             _fail(f"{source}: {where}.env must be a non-empty string or absent/null")
 
-        # --- (host, header) uniqueness across bindings ---
+        # --- (host, location) uniqueness ---
+        loc = _location_key(scheme_name, params)
         for host in binding_hosts:
-            key = (host, header)
-            if key in host_header_seen:
+            key = (host, loc)
+            if key in loc_seen:
                 _fail(
-                    f"{source}: bindings '{host_header_seen[key]}' and '{name}' "
-                    f"both claim header '{header}' on host '{host}'"
+                    f"{source}: bindings '{loc_seen[key]}' and '{name}' both "
+                    f"write {loc[0]} on host '{host}'"
                 )
-            host_header_seen[key] = name
+            loc_seen[key] = name
 
-        sub = Substitution(header=header, placeholder=placeholder, real=real)
+        transform = Transform(
+            name=name,
+            scheme=scheme,
+            params=params,
+            placeholder=placeholder,
+            secrets=dict(secret),
+        )
         for host in binding_hosts:
-            hosts.setdefault(host, []).append(sub)
+            hosts.setdefault(host, []).append(transform)
 
         inward.append(InwardBinding(
             name=name,
             placeholder=placeholder,
             env=env,
-            header=header,
+            scheme=scheme_name,
+            params=params,
             hosts=list(binding_hosts),
         ))
 
