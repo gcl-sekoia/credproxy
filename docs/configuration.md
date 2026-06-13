@@ -126,12 +126,14 @@ file. You can always skip the command and edit the TOML directly.
 | `credproxy workspace NAME binding list` | Read and print the bindings (materializing any missing `name`/`placeholder` first). Shows name, injector, provider, secret-id, hosts, env, and placeholder. |
 | `credproxy workspace NAME binding test [BINDING_NAME]` | Dry-run: fetch each binding's secret through its provider and report success and **value length only** (never the value). Exit 1 if any fail. |
 | `credproxy workspace binding test --provider P --secret REF [--injector I]` | Ad-hoc variant: test a provider/injector combination **before** binding it. No workspace is required. |
+| `credproxy workspace NAME edit` | Open `<name>.toml` in `$VISUAL`/`$EDITOR` (default `vi`), then validate it: warns if the edit left it invalid (without reverting), otherwise hints `apply`/`start`. Pure sugar over opening the file yourself. |
 | `credproxy workspace NAME inspect` | Read-only: print the parsed config, container state, resolved host port, binding summary, and **itemized drift** between the file and what is currently applied. |
 | `credproxy workspace NAME apply` | Reconcile a running workspace to the edited file (see below). |
 
-There is intentionally **no** `config show` / `config edit` command: the file
-is a first-class path you open in `$EDITOR`, and `inspect` is the read-and-diff
-view.
+There is intentionally **no** `config show` command — the file is a first-class
+path and `inspect` is the read-and-diff view. `edit` is the one editor
+convenience: it just opens that same file in `$EDITOR` and validates the result,
+adding no state of its own.
 
 ### Applying changes
 

@@ -51,7 +51,7 @@ from .render import fail, say
 
 # Workspace-scoped verbs (the `workspace NAME <verb>` tail).
 _WS_VERBS = {
-    "enter", "start", "stop", "delete", "apply", "inspect", "logs", "binding",
+    "enter", "edit", "start", "stop", "delete", "apply", "inspect", "logs", "binding",
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
@@ -160,6 +160,41 @@ def do_enter(ctx: Ctx, name: str | None, trailing: list[str]) -> None:
     cmd = trailing or ["bash"]
     exit_code = lifecycle.enter_workspace(ws, cmd, notify=say)
     sys.exit(exit_code)
+
+
+def do_edit(ctx: Ctx, name: str | None) -> None:
+    """Open the workspace's config file in $EDITOR, then validate it. The file
+    is the source of truth; this is sugar over editing it directly."""
+    import shlex
+    import subprocess
+
+    if ctx.json:
+        fail("edit does not support --json (it opens an interactive editor)")
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    cmd = shlex.split(editor) + [str(ws.config_path)]
+    try:
+        rc = subprocess.run(cmd).returncode
+    except FileNotFoundError:
+        fail(f"could not launch editor '{editor}' (set $EDITOR or $VISUAL)")
+    if rc != 0:
+        fail(f"editor exited with status {rc}; config left as-is")
+
+    # Post-edit validation: report problems but never revert -- it's the
+    # user's file. load_config/load_bindings parse and validate without writing.
+    from ..core import bindings as core_bindings
+    from ..core import config as core_config
+    try:
+        core_config.load_config(ws)
+        core_bindings.load_bindings(ws)
+    except CredproxyError as e:
+        say(f"warning: config is invalid — {e}")
+        say("fix it before `start`/`apply`, or the workspace won't update cleanly.")
+        return
+    say("edited. changes are not live yet: `apply` (bindings) or "
+        "`start` (image/home/mounts/env/setup).")
 
 
 def do_start(ctx: Ctx, name: str | None) -> None:
@@ -548,6 +583,7 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="verb", required=True)
 
     sub.add_parser("enter")
+    sub.add_parser("edit")
     sub.add_parser("start")
     sub.add_parser("stop")
     sub.add_parser("delete")
@@ -582,7 +618,7 @@ _STRICT_HELP = (
     "  credproxy workspace use NAME\n"
     "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
     "  credproxy current                   (print the default workspace)\n"
-    "  credproxy workspace NAME enter|start|stop|delete|apply|inspect|logs\n"
+    "  credproxy workspace NAME enter|edit|start|stop|delete|apply|inspect|logs\n"
     "  credproxy workspace NAME binding add|remove|list|test ...\n"
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
@@ -608,7 +644,7 @@ _LOOSE_HELP = (
     "  credp current                   print the default workspace\n"
     "  credp create NAME [--image IMG] (becomes the default if none is set yet)\n"
     "  credp list [FILTER]\n"
-    "  credp enter|start|stop|delete|apply|inspect|logs [NAME]\n"
+    "  credp enter|edit|start|stop|delete|apply|inspect|logs [NAME]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
     "  credp binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
@@ -697,6 +733,8 @@ def _run_ws_verb(
     verb = a.verb
     if verb == "enter":
         do_enter(ctx, name, trailing)
+    elif verb == "edit":
+        do_edit(ctx, name)
     elif verb == "start":
         do_start(ctx, name)
     elif verb == "stop":
@@ -734,7 +772,7 @@ def _parse_create(argv: list[str]) -> argparse.Namespace:
 # independent behavior. They simply translate to the workspace dispatcher.
 
 _ALIAS_TO_WS_VERB = {
-    "enter", "start", "stop", "delete", "apply", "inspect", "logs", "binding",
+    "enter", "edit", "start", "stop", "delete", "apply", "inspect", "logs", "binding",
 }
 
 
@@ -767,7 +805,7 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
         verb_rest = rest
         # For verbs that take no further positional args, a lone trailing
         # token is an explicit workspace name (`credp enter myproj`).
-        if head in {"enter", "start", "stop", "delete", "apply", "inspect", "logs"}:
+        if head in {"enter", "edit", "start", "stop", "delete", "apply", "inspect", "logs"}:
             if rest:
                 name = rest[0]
         _run_ws_verb(ctx, name, [head], trailing)

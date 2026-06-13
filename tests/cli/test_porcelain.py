@@ -428,6 +428,42 @@ def test_loose_create_reseeds_after_default_cleared(xdg, workspaces_dir):
     assert read_default() == "beta"
 
 
+def test_edit_rejects_json(xdg, ws_factory):
+    ws_factory("a")
+    ec, out, err = _run(["--json", "workspace", "a", "edit"])
+    assert ec != 0
+    assert "json" in (out + err).lower()
+
+
+def test_edit_missing_workspace_fails(xdg):
+    ec, out, err = _run(["workspace", "nope", "edit"])
+    assert ec != 0
+
+
+def test_edit_valid_config_hints_apply(xdg, ws_factory, monkeypatch):
+    """A clean edit (no-op editor) validates and hints that changes aren't live."""
+    ws_factory("a")
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("EDITOR", "true")  # no-op editor, leaves file valid
+    ec, out, err = _run(["workspace", "a", "edit"])
+    assert ec == 0
+    assert "apply" in err or "not live" in err
+
+
+def test_edit_invalid_config_warns(xdg, ws_factory, tmp_path, monkeypatch):
+    """If the edit leaves the config invalid, edit succeeds but warns (it never
+    reverts the user's file)."""
+    ws_factory("a")
+    ed = tmp_path / "corrupting_editor.sh"
+    ed.write_text('#!/bin/sh\nprintf "this is not valid toml\\n" >> "$1"\n')
+    ed.chmod(0o755)
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("EDITOR", str(ed))
+    ec, out, err = _run(["workspace", "a", "edit"])
+    assert ec == 0  # editing succeeded; validation only warns
+    assert "invalid" in err.lower()
+
+
 def test_strict_help_is_strict(xdg):
     """Bare `credproxy` help describes the strict surface and points to credp."""
     ec, out, err = _run([])
