@@ -302,11 +302,14 @@ def materialize_bindings(ws: Workspace, notify: Notify = _noop) -> list[Binding]
             changed = True
         if orig.placeholder is None:
             injector = find_injector(res.injector)
-            ph = injector.placeholder.generate()
-            text = _insert_line_in_block(text, idx, f'placeholder = "{ph}"')
-            resolved[idx] = replace(res, placeholder=ph)
-            notify(f"materialized placeholder for binding '{res.name}'")
-            changed = True
+            # Only the substitute family holds an inert placeholder; sign
+            # schemes (sigv4, ...) compute auth material and have none.
+            if get_scheme(injector.scheme).family == "substitute":
+                ph = injector.placeholder.generate()
+                text = _insert_line_in_block(text, idx, f'placeholder = "{ph}"')
+                resolved[idx] = replace(res, placeholder=ph)
+                notify(f"materialized placeholder for binding '{res.name}'")
+                changed = True
 
     if changed:
         ws.config_path.write_text(text)

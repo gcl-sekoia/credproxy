@@ -352,6 +352,8 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
 
+    from ..core.schemes import get_scheme
+
     injector = find_injector(a.injector)
     find_provider(a.provider)
 
@@ -361,7 +363,12 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     if bname in taken:
         fail(f"binding name '{bname}' already exists in workspace '{ws.name}'")
 
-    placeholder = a.placeholder or injector.placeholder.generate()
+    # Sign schemes (sigv4, ...) hold no inert placeholder; only substitute
+    # schemes do, and only those get one auto-generated.
+    if get_scheme(injector.scheme).family == "substitute":
+        placeholder = a.placeholder or injector.placeholder.generate()
+    else:
+        placeholder = a.placeholder
     env = a.env or injector.env
 
     binding = Binding(

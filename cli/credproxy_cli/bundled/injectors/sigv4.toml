@@ -1,0 +1,20 @@
+# credproxy bundled injector: sigv4
+#
+# AWS Signature Version 4 (sign family). The credential is a *signing key* that
+# never transits the wire, so there is no placeholder to swap: the workspace's
+# AWS SDK signs each request with throwaway credentials, and the proxy parses
+# the scope the SDK chose, recomputes the canonical request, and re-signs it
+# with the real key before forwarding. Region and service are read from the
+# request, so no params are needed.
+#
+# This is a MULTI-SLOT scheme: bind it with a `secret` table mapping the slots
+# to provider refs. In the workspace, configure any throwaway AWS credentials
+# (e.g. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY set to dummy values) so the
+# SDK produces a signed request for the proxy to re-sign.
+#
+#   credproxy workspace NAME binding add --injector sigv4 --provider env \
+#       --secret access_key_id=AWS_ACCESS_KEY_ID \
+#       --secret secret_access_key=AWS_SECRET_ACCESS_KEY \
+#       --host sts.amazonaws.com
+
+scheme = "sigv4"                # proxy mechanism: re-sign AWS SigV4 requests

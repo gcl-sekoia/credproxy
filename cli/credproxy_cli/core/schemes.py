@@ -36,6 +36,9 @@ CATALOG: dict[str, SchemeSpec] = {
     "basic":  SchemeSpec("basic",  "substitute", ("value",),
                          {"header": "Authorization"}),
     "body":   SchemeSpec("body",   "substitute", ("value",), {}),
+    # Sign family: AWS SigV4. region/service are read from the request, so no
+    # params; the workspace holds throwaway creds and the proxy re-signs.
+    "sigv4":  SchemeSpec("sigv4",  "sign", ("access_key_id", "secret_access_key"), {}),
 }
 
 
@@ -66,6 +69,10 @@ def location_key(spec: SchemeSpec, params: dict) -> tuple:
     Sign schemes get their own keys as they land."""
     if spec.name in ("bearer", "basic"):
         return ("header", params.get("header", "Authorization"))
+    if spec.name == "sigv4":
+        # sigv4 rewrites the Authorization header, so it collides with a
+        # bearer/basic binding on the same host.
+        return ("header", "Authorization")
     if spec.name == "body":
         return ("body",)
     return (spec.name,)
