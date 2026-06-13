@@ -465,6 +465,51 @@ def test_wire_config_multi_slot_secret(xdg, workspaces_dir):
     assert result["bindings"][0]["secret"] == {"value": "val-of-AWS_KEY"}
 
 
+def test_wire_config_sign_scheme_multi_slot_no_placeholder(xdg, workspaces_dir):
+    """A sigv4 binding resolves both slots and carries no placeholder."""
+    from credproxy_cli.core.bindings import Binding, wire_config
+
+    b = Binding(
+        name="aws", injector="sigv4", provider="env",
+        secret={"access_key_id": "AKID_REF", "secret_access_key": "SAK_REF"},
+        hosts=("sts.amazonaws.com",), placeholder=None, env=None,
+    )
+    result = wire_config([b], fetch_many=lambda p, refs: {r: f"v-{r}" for r in refs})
+    entry = result["bindings"][0]
+    assert entry["scheme"] == "sigv4"
+    assert entry["secret"] == {"access_key_id": "v-AKID_REF",
+                               "secret_access_key": "v-SAK_REF"}
+    assert "placeholder" not in entry
+
+
+def test_validate_sign_scheme_requires_both_slots(xdg, workspaces_dir):
+    from credproxy_cli.core.bindings import Binding, validate
+    from credproxy_cli.core.errors import ConfigError
+
+    b = Binding(name="aws", injector="sigv4", provider="env",
+                secret="LONE_REF", hosts=("sts.amazonaws.com",),
+                placeholder=None, env=None)
+    with pytest.raises(ConfigError, match="needs secret slot"):
+        validate([b], "test")
+
+
+def test_materialize_sign_scheme_adds_no_placeholder(xdg, workspaces_dir):
+    ws = _write_ws(workspaces_dir, "awsmat", """\
+        image = "x"
+
+        [[binding]]
+        injector = "sigv4"
+        provider = "env"
+        secret   = { access_key_id = "AKID", secret_access_key = "SAK" }
+        hosts    = ["sts.amazonaws.com"]
+    """)
+    from credproxy_cli.core.bindings import materialize_bindings
+
+    bs = materialize_bindings(ws)
+    assert bs[0].placeholder is None
+    assert "placeholder" not in ws.config_path.read_text()
+
+
 def test_wire_config_no_env_field_when_absent(xdg, workspaces_dir):
     """wire_config omits `env` key when neither binding nor injector has one."""
     from credproxy_cli.core.bindings import Binding, wire_config

@@ -37,6 +37,14 @@ def test_find_bundled_body(xdg):
     assert inj.source == "bundled"
 
 
+def test_find_bundled_sigv4(xdg):
+    from credproxy_cli.core.injectors import find_injector
+
+    inj = find_injector("sigv4")
+    assert inj.scheme == "sigv4"
+    assert inj.source == "bundled"
+
+
 def test_find_injector_not_found(xdg):
     from credproxy_cli.core.errors import InjectorError
     from credproxy_cli.core.injectors import find_injector
@@ -188,6 +196,7 @@ def test_list_injectors_includes_bundled(xdg):
     assert "bearer" in names
     assert "basic" in names
     assert "body" in names
+    assert "sigv4" in names
 
 
 def test_list_injectors_user_shadows(xdg):
