@@ -55,13 +55,17 @@ auto_stop = true
 
 # Credential bindings — zero or more. See "Bindings" below.
 [[binding]]
-name        = "github-env"        # auto-generated if omitted
-injector    = "github"
+name        = "github-api"        # auto-generated if omitted
+injector    = "bearer"
 provider    = "env"
-secret      = "GITHUB_TOKEN"
+secret      = "GITHUB_TOKEN"      # single-slot: a bare ref
 hosts       = ["api.github.com"]
 placeholder = "ghp_…"             # auto-generated if omitted
 env         = "GITHUB_TOKEN"      # defaults to the injector's hint
+
+# A multi-slot secret uses an inline table (slot -> provider ref) instead of a
+# bare string; the scheme declares which slots it needs:
+#   secret = { access_key_id = "AWS_ACCESS_KEY_ID", secret_access_key = "AWS_SECRET_ACCESS_KEY" }
 ```
 
 ### Container settings
@@ -83,19 +87,19 @@ require a recreate — see below.
 ### Bindings
 
 A `[[binding]]` block ties an **injector** (how a credential is shaped into a
-request) to a **provider** (where its value comes from), scoped to a set of
-hosts. The real secret never enters the workspace: the workspace holds only the
-inert `placeholder`, and the proxy swaps it for the real value on requests to
-the scoped hosts.
+request — which typed scheme the proxy runs) to a **provider** (where its value
+comes from), scoped to a set of hosts. The real secret never enters the
+workspace: the workspace holds only the inert `placeholder`, and the proxy swaps
+it for the real value on requests to the scoped hosts.
 
 | Field | Required | Notes |
 |---|---|---|
-| `injector` | yes | Name of an injector definition (`$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml`, falling back to bundled). Determines the request header and the placeholder shape. Bundled: `github`, `bearer`. |
+| `injector` | yes | Name of an injector definition (`$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml`, falling back to bundled). Selects the scheme, its params, and the placeholder shape. Bundled: `bearer`, `basic`, `body`. |
 | `provider` | yes | Name of a provider executable (`$XDG_CONFIG_HOME/credproxy/providers/<name>`, falling back to bundled). Bundled: `env`. |
-| `secret` | yes | Opaque reference the provider interprets — an env-var name, a vault path, an item id. Meaningful only to that provider. |
+| `secret` | yes | Either a bare ref string (single-slot), or an inline table mapping the scheme's slot names to refs (multi-slot). A ref is opaque to credproxy and meaningful only to the provider — an env-var name, a vault path, an item id. |
 | `hosts` | yes | Non-empty list of hostnames the credential may be injected on. This is the security scope: a request to any other host never sees the real value. |
 | `name` | no | Handle used to address the binding (`binding remove`, `binding test NAME`). Auto-generated as `<injector>-<provider>`, with a `-2`, `-3`, … suffix on collision. |
-| `placeholder` | no | The inert sentinel the workspace sends. Auto-generated once from the injector's placeholder pattern (format-valid for the service), then written back to the file so it never drifts. Override only if you need a specific value. |
+| `placeholder` | no | The inert sentinel the workspace sends (substitute schemes). Auto-generated once from the injector's placeholder pattern (format-valid for the service), then written back to the file so it never drifts. Override only if you need a specific value. |
 | `env` | no | Suggested env var name surfaced to the workspace via `/setup`. Defaults to the injector's `env` hint. |
 
 **Materialization.** When the tool loads a binding that omits `name` or
@@ -105,11 +109,20 @@ are static — the file stays the single source of truth, with nothing held only
 in memory.
 
 **Validation.** Binding names must be unique within the workspace, and no two
-bindings may claim the same `(host, header)` pair (the header comes from the
-injector). The referenced injector and provider must resolve. Violations are
-reported as a config error naming the file and the offending field.
+bindings may write the same wire location on the same host (e.g. both into the
+`Authorization` header on `api.github.com`). The binding's secret slots must
+match the scheme's declared slots. The referenced injector and provider must
+resolve. Violations are reported as a config error naming the file and the
+offending field.
 
-Injector definitions are a separate declarative file type (header, format,
+**Presets.** Some credentials need several coordinated bindings — a GitHub PAT
+is `bearer` on `api.github.com` but HTTP `basic` on `github.com`/`ghcr.io`.
+`binding add --preset github --provider env --secret GITHUB_TOKEN` generates the
+whole set, all sharing one bare-token placeholder, so there is no hand-computed
+base64 and no fragile coupling. The result is ordinary `[[binding]]` blocks you
+can edit or remove individually.
+
+Injector definitions are a separate declarative file type (scheme, params,
 placeholder pattern, env hint) — see [`injectors.md`](injectors.md). Providers
 are host-side executables — see [`providers.md`](providers.md).
 
@@ -121,7 +134,8 @@ file. You can always skip the command and edit the TOML directly.
 | Command | Effect on the config |
 |---|---|
 | `credproxy workspace create NAME [--image IMG]` | Scaffold `<name>.toml` (and the state dir + `auth.token`). Does not start anything. |
-| `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E]` | Append a `[[binding]]` block, materializing `name`/`placeholder` immediately. Validates the whole set before writing, so a rejected binding never lands in the file. |
+| `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E]` | Append a `[[binding]]` block, materializing `name`/`placeholder` immediately. Validates the whole set before writing, so a rejected binding never lands in the file. Repeat `--secret SLOT=REF` for a multi-slot secret. |
+| `credproxy workspace NAME binding add --preset PRESET --provider P --secret REF` | Generate a coordinated binding set from a preset (e.g. `github`), all sharing one placeholder. The preset manages name/placeholder/env/host. |
 | `credproxy workspace NAME binding remove BINDING_NAME` | Remove that binding's block (surgical text edit). Reversible in principle, but loses tuning — gated by confirmation when targeting the default workspace on the loose surface. |
 | `credproxy workspace NAME binding list` | Read and print the bindings (materializing any missing `name`/`placeholder` first). Shows name, injector, provider, secret-id, hosts, env, and placeholder. |
 | `credproxy workspace NAME binding test [BINDING_NAME]` | Dry-run: fetch each binding's secret through its provider and report success and **value length only** (never the value). Exit 1 if any fail. |

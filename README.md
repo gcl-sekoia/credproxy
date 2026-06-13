@@ -11,10 +11,10 @@ credproxy runs a persistent, named workspace (container) whose outbound network 
 # 2. Create a workspace (scaffolds a config file; edit it for image/mounts/env)
 ./bin/credproxy workspace create myproj
 
-# 3. Add a credential binding
+# 3. Add a credential binding (a GitHub PAT spans bearer + basic hosts, so use
+#    the preset; for a single host/scheme use `--injector bearer --host H`)
 ./bin/credproxy workspace myproj binding add \
-    --injector github --provider env \
-    --secret GITHUB_TOKEN --host api.github.com
+    --preset github --provider env --secret GITHUB_TOKEN
 
 # 4. Start the workspace (resolves secrets, pushes config, starts containers)
 ./bin/credproxy workspace myproj start

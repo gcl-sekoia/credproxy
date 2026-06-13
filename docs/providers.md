@@ -25,31 +25,36 @@ user definition shadows a bundled one of the same name):
 
 ## Request (stdin)
 
-A single JSON object on stdin:
+A single JSON object on stdin. The protocol is **batch-native**: one invocation
+carries a list of refs, so a binding's whole (possibly multi-slot) credential
+resolves in a single exec — an interactive provider prompts **once**, and a
+vault provider can coalesce same-item refs into one fetch.
 
 ```json
-{"version": 1, "op": "get", "secret": "<opaque provider-interpreted ref>"}
+{"version": 1, "op": "get", "secrets": ["<ref>", "<ref>", ...]}
 ```
 
 - `version` — protocol version. Currently `1`. A provider that does not
   understand the version must exit `3`.
-- `op` — the operation. Currently only `get` (fetch one secret by id). The
+- `op` — the operation. Currently only `get` (fetch the listed secrets). The
   field exists so future operations (`list`, `describe`, …) can be added; an
   unknown `op` must exit `3`.
-- `secret` — the opaque secret reference, interpreted entirely by the provider
-  (a vault path, an env-var name, an item ref, …). credproxy never parses it.
+- `secrets` — a list of opaque secret references, each interpreted entirely by
+  the provider (a vault path, an env-var name, an item ref, …). credproxy never
+  parses them. A single value is just a list of one.
 
 ## Response (stdout)
 
-On success, **stdout must contain nothing but** a single JSON object, and the
-process must exit `0`:
+On success, **stdout must contain nothing but** a single JSON object mapping
+**every requested ref** to its value, and the process must exit `0`:
 
 ```json
-{"value": "<secret>"}
+{"values": {"<ref>": "<secret>", ...}}
 ```
 
-Anything else on stdout (banners, debug logging, prompts) corrupts the
-response — see the note on interactive tools below.
+Every ref in the request must appear in `values` as a string, or the CLI treats
+it as a protocol error. Anything else on stdout (banners, debug logging,
+prompts) corrupts the response — see the note on interactive tools below.
 
 ## Failure
 
@@ -64,9 +69,9 @@ secret reference).
 
 | code | meaning |
 |------|---------|
-| `0`  | success; a `{"value": ...}` object is on stdout |
+| `0`  | success; a `{"values": {...}}` object covering every requested ref is on stdout |
 | `1`  | generic failure (backend unreachable, auth error, malformed request, …) |
-| `2`  | secret not found (the `secret` ref does not resolve) |
+| `2`  | secret not found (a requested ref does not resolve) |
 | `3`  | unsupported `op` or `version` |
 
 The CLI maps `2` and `3` to specific diagnostics; any other nonzero code is a
@@ -84,13 +89,14 @@ time to be answered.
 
 ## Example: the bundled `env` provider
 
-The simplest possible provider reads a host environment variable named by the
-`secret` ref:
+The simplest possible provider reads host environment variables named by the
+request's `secrets` refs:
 
 ```sh
 #!/bin/sh
-# Request JSON on stdin: {"version":1,"op":"get","secret":"GITHUB_TOKEN"}
-# Emits {"value":"<$GITHUB_TOKEN>"} on stdout, or exits 2 if unset.
+# Request JSON on stdin: {"version":1,"op":"get","secrets":["GITHUB_TOKEN",...]}
+# Emits {"values":{"GITHUB_TOKEN":"<$GITHUB_TOKEN>",...}}, or exits 2 if any
+# var is unset.
 # NB: use `python3 -c`, not a `<<HEREDOC` -- a heredoc would consume the
 # stdin the request is delivered on.
 exec python3 -c '
@@ -98,11 +104,13 @@ import json, os, sys
 req = json.load(sys.stdin)
 if req.get("version") != 1 or req.get("op") != "get":
     sys.exit(3)
-name = req.get("secret") or ""
-val = os.environ.get(name)
-if val is None:
-    print(f"env provider: ${name} is not set", file=sys.stderr)
-    sys.exit(2)
-json.dump({"value": val}, sys.stdout)
+values = {}
+for name in req.get("secrets") or []:
+    val = os.environ.get(name)
+    if val is None:
+        print(f"env provider: ${name} is not set", file=sys.stderr)
+        sys.exit(2)
+    values[name] = val
+json.dump({"values": values}, sys.stdout)
 '
 ```

@@ -1,19 +1,40 @@
 # Injectors
 
 An **injector** defines *how* a credential is shaped into a request for a
-service: which header it rides in, how the value is formatted, and the shape of
-the inert placeholder the workspace holds. It is the passive, service-specific
-counterpart to a [provider](providers.md) (which defines *where* the value comes
-from). A [binding](configuration.md#bindings) ties the two together.
+service: which typed **scheme** the proxy runs, the scheme's params, and the
+shape of the inert placeholder the workspace holds. It is the passive,
+service-specific counterpart to a [provider](providers.md) (which defines
+*where* the value comes from). A [binding](configuration.md#bindings) ties the
+two together.
 
 Unlike providers — which are executables — injectors are **declarative TOML
 files**: passive, reusable, drop-in. The filesystem is the registry; there is
 nothing to install.
 
-> **Status.** The injector authoring contract is provisional (it is listed as a
-> deferred sub-design in `design-v2.md`). The schema below is what the tool
-> implements today; the `format` field in particular is not yet load-bearing on
-> the wire — see [The `format` field](#the-format-field).
+## Schemes
+
+The proxy implements a small, fixed set of typed **schemes** (design-v3). An
+injector picks one and parameterizes it; the explosion of services rides on top
+as configuration, not code. Schemes fall into two families:
+
+- **substitute** — the workspace holds an inert placeholder and sends it; the
+  proxy finds it in the scheme's wire location and swaps in the real value,
+  decoding/re-encoding as needed.
+- **sign** — no usable static value on the wire; the proxy holds a signing key
+  and computes the auth material per request. *(Added in a later wave.)*
+
+| Scheme | Family | Params | Covers |
+|---|---|---|---|
+| `bearer` | substitute | `header` (default `Authorization`) | most REST APIs (PATs, OpenAI, Stripe, …) |
+| `basic` | substitute | `header` (default `Authorization`) | git-over-HTTPS, registries, any HTTP Basic |
+| `body` | substitute | — | OAuth2 client-credentials, key-in-body APIs |
+
+`bearer` substring-swaps the placeholder for the real value inside the named
+header (any `Bearer `/`token ` prefix the client sent is left intact). `basic`
+decodes the `Authorization: Basic` blob, swaps the component equal to the
+placeholder (password by default, or username), and re-encodes — so the
+placeholder is a **bare token**, never hand-computed base64. `body` swaps the
+placeholder anywhere in the request body.
 
 ## Discovery
 
@@ -30,9 +51,11 @@ definition shadows a bundled one of the same name):
 ## Schema
 
 ```toml
-header = "Authorization"      # required: header carrying the credential
-format = "Bearer {value}"     # optional, default "{value}"
+scheme = "bearer"             # required: a scheme name from the table above
 env    = "GITHUB_TOKEN"       # optional: suggested workspace env var
+
+[params]                      # optional; scheme-specific (defaults merged in)
+header = "Authorization"      #   bearer/basic: the header the credential rides in
 
 [placeholder]                 # optional; pattern for the inert sentinel
 prefix  = "ghp_"
@@ -42,12 +65,12 @@ charset = "alnumeric"         # alnumeric | hex | base64url
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `header` | string | — (required) | The request header the credential rides in (e.g. `Authorization`, `X-Api-Key`). Non-empty. This is what the proxy watches, and what `(host, header)` binding-uniqueness is enforced on. |
-| `format` | string | `"{value}"` | How the credential appears inside the header value. Must contain the literal `{value}`. See the note below — currently informational. |
-| `env` | string | none | Suggested workspace-side env var name, surfaced to the workspace via `/setup` and used as a binding's `env` default. |
+| `scheme` | string | — (required) | The typed scheme the proxy runs. Must be a known scheme. |
+| `[params]` | table | scheme defaults | Scheme-specific settings, merged onto the scheme's defaults and passed to the proxy verbatim. For `bearer`/`basic`, `header` selects the header. |
+| `env` | string | none | Suggested workspace-side env var name, surfaced via `/setup` and used as a binding's `env` default. |
 | `[placeholder]` | table | the default pattern | Shape of the generated sentinel. Omit to use `prefix = "credproxy_"`, `length = 40`, `charset = "alnumeric"`. |
 | `placeholder.prefix` | string | `"credproxy_"` | Literal leading characters. |
-| `placeholder.length` | integer | `40` | Total length **including** the prefix. Must be greater than the prefix length. |
+| `placeholder.length` | integer | `40` | Total length **including** the prefix. Must exceed the prefix length. |
 | `placeholder.charset` | string | `"alnumeric"` | Alphabet for the random body. One of the charsets below. |
 
 ### Charsets
@@ -58,7 +81,7 @@ charset = "alnumeric"         # alnumeric | hex | base64url
 | `hex` | `0–9`, `a–f` |
 | `base64url` | `A–Z`, `a–z`, `0–9`, `-`, `_` |
 
-Validation errors (missing `header`, a `format` without `{value}`, an unknown
+Validation errors (missing/unknown `scheme`, a non-table `[params]`, an unknown
 `charset`, a `length` not exceeding the prefix, a non-string `env`, …) are
 reported as an injector error naming the file and field.
 
@@ -77,29 +100,25 @@ the proxy's expectation can never drift. The injector only supplies the
 *pattern*; the concrete value lives on the binding. See
 [materialization](configuration.md#bindings).
 
-## The `format` field
-
-The proxy's substitution is a literal **substring replace** of the placeholder
-with the real value, *inside whatever header value the client sent*. So the wire
-config the proxy needs is just `placeholder → real`; the surrounding format
-(`Bearer `, etc.) is already present in the request the workspace made.
-
-That means `format` is, today, **documentation and an env-var hint** — it
-describes what the workspace is expected to send (and so what the placeholder is
-embedded in). It is kept in the schema because the authoring contract is
-expected to evolve so the proxy applies the full format itself; until then,
-treat it as informational. Practically: send the credential the way `format`
-says (e.g. `Authorization: Bearer <placeholder>`), and the proxy swaps the
-placeholder for the real token in transit.
+Because injection is now scheme-aware, you send the credential the natural way
+for the service (e.g. `Authorization: Bearer <placeholder>`, or a
+`base64(user:<placeholder>)` Basic blob your git client builds itself) and the
+scheme does the right transform in transit. There is no `format` field — the
+scheme owns the wire shape.
 
 ## Bundled injectors
 
-| Name | Header | Format | Placeholder | env hint |
+| Name | Scheme | Params | Placeholder | env hint |
 |---|---|---|---|---|
-| `github` | `Authorization` | `Bearer {value}` | `ghp_` + 36 alnum (40 total), mimics a classic PAT | `GITHUB_TOKEN` |
-| `bearer` | `Authorization` | `Bearer {value}` | default (`credproxy_` + 30 alnum, 40 total) | none |
+| `bearer` | `bearer` | `header = Authorization` | default (`credproxy_` + 30 alnum, 40 total) | none |
+| `basic` | `basic` | `header = Authorization` | default | none |
+| `body` | `body` | — | default | none |
 
-`bearer` doubles as the scaffold template for new injectors.
+`bearer` doubles as the scaffold template for new injectors. A GitHub PAT, which
+is `bearer` on `api.github.com` but HTTP `basic` on `github.com`/`ghcr.io`, is
+generated as a coordinated set by `binding add --preset github` (the three
+bindings share one bare-token placeholder) — see
+[configuration.md](configuration.md#bindings).
 
 ## Authoring your own
 
@@ -119,9 +138,11 @@ with service-shaped placeholders:
 
 ```toml
 # ~/.config/credproxy/injectors/acme.toml
-header = "X-Acme-Key"
-format = "{value}"          # the key is sent verbatim, no prefix
+scheme = "bearer"           # substring-swap in a header
 env    = "ACME_API_KEY"
+
+[params]
+header = "X-Acme-Key"       # the key rides here, sent verbatim
 
 [placeholder]
 prefix  = "acme_"
