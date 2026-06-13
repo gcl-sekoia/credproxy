@@ -295,6 +295,10 @@ async def test_setup_static_fields(aiohttp_client, app):
     client = await aiohttp_client(app)
     resp = await client.get("/setup")
     assert resp.status == 200
+    # Pretty-printed with a trailing newline for clean `curl` output.
+    text = await resp.text()
+    assert text.endswith("\n")
+    assert "\n  " in text  # indented
     body = await resp.json()
     assert body["ca_url"] == "http://proxy.local/ca.crt"
     assert body["version"] == bootstrap.VERSION

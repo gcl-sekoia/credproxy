@@ -11,6 +11,7 @@ only the fields the workspace needs for self-configuration:
 It does NOT expose provider, secret-id, or real credential values --
 those never reach the proxy from the push model anyway.
 """
+import json
 import os
 from pathlib import Path
 
@@ -124,8 +125,15 @@ def workspace_bindings(creds: Credentials) -> list[dict]:
     ]
 
 
+def _json(obj) -> web.Response:
+    """JSON response, pretty-printed with a trailing newline so a bare `curl`
+    of a bootstrap route reads cleanly. Insertion order is preserved (no key
+    sorting). `jq` and parsers are unaffected by the whitespace."""
+    return web.json_response(obj, dumps=lambda o: json.dumps(o, indent=2) + "\n")
+
+
 async def health(_: web.Request) -> web.Response:
-    return web.json_response({"ok": True, "version": VERSION})
+    return _json({"ok": True, "version": VERSION})
 
 
 async def ca_crt(_: web.Request) -> web.Response:
@@ -146,7 +154,7 @@ async def env_sh(_: web.Request) -> web.Response:
 
 async def setup(request: web.Request) -> web.Response:
     state = request.app[STATE_KEY]
-    return web.json_response({
+    return _json({
         "version": VERSION,
         "workspace": os.environ.get("CREDPROXY_WORKSPACE") or None,
         "ca_url": "http://proxy.local/ca.crt",
