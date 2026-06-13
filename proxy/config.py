@@ -2,22 +2,36 @@
 
 The proxy receives an already-resolved config (literal `real:` values,
 no template references) via POST /admin/config. The host CLI
-`bin/credproxy config` is the supported producer; it reads a YAML
-config and resolves `${secret:NAME}` references against host
-environment variables before posting.
+`bin/credproxy config` is the supported producer; it fetches each
+binding's secret from its provider before posting.
 
-This module validates the parsed dict and produces a Credentials
+This module validates the parsed dict and produces a BindingCredentials
 instance. Schema:
 
-    hosts:
-      api.github.com:
-        headers:
-          Authorization:
-            placeholder: "credproxy_test"   # what workspace sends
-            real: "<literal value>"          # what proxy substitutes
+    {
+      "bindings": [
+        {
+          "name":        "github-env",          # non-empty, unique across bindings
+          "hosts":       ["api.github.com"],     # non-empty list of strings
+          "header":      "Authorization",        # non-empty string
+          "placeholder": "ghp_xxx...",           # non-empty string; no ${secret:...}
+          "real":        "<resolved secret>",    # non-empty string; no ${secret:...}
+          "env":         "GITHUB_TOKEN"          # optional; suggested env var or null/absent
+        }
+      ]
+    }
 
-A host listed under `hosts:` is intercepted (TLS terminated). `headers:`
-may be omitted or empty — intercept and log, no substitution.
+Uniqueness constraints:
+  - `name` is unique across bindings (non-empty string).
+  - `(host, header)` pair is unique across all bindings.
+
+Credentials class API:
+  - `intercept_hosts()` -> set[str]: union of all bindings' hosts.
+  - `substitutions_for(host)` -> list[Substitution]: substitutions for that host.
+
+Inward API / least-disclosure: `inward_bindings()` returns the
+workspace-facing binding metadata (name, placeholder, env, header,
+hosts) with `real` excluded. This is the source for /setup.
 """
 import re
 from dataclasses import dataclass
@@ -33,20 +47,41 @@ class Substitution:
     real: str
 
 
+@dataclass(frozen=True)
+class InwardBinding:
+    """Workspace-safe binding descriptor: no real credential, no provider/secret-id."""
+    name: str
+    placeholder: str
+    env: str | None
+    header: str
+    hosts: list[str]
+
+
 class Credentials(Protocol):
     def intercept_hosts(self) -> set[str]: ...
     def substitutions_for(self, host: str) -> list[Substitution]: ...
+    def inward_bindings(self) -> list[InwardBinding]: ...
 
 
-class YamlCredentials:
-    def __init__(self, hosts: dict[str, list[Substitution]]):
+class BindingCredentials:
+    """Credentials built from the bindings wire format."""
+
+    def __init__(
+        self,
+        hosts: dict[str, list[Substitution]],
+        bindings: list[InwardBinding] | None = None,
+    ):
         self._hosts = hosts
+        self._bindings: list[InwardBinding] = bindings or []
 
     def intercept_hosts(self) -> set[str]:
         return set(self._hosts)
 
     def substitutions_for(self, host: str) -> list[Substitution]:
         return list(self._hosts.get(host, []))
+
+    def inward_bindings(self) -> list[InwardBinding]:
+        return list(self._bindings)
 
 
 class ConfigError(Exception):
@@ -58,54 +93,99 @@ def _fail(msg: str) -> None:
     raise ConfigError(f"[config] {msg}")
 
 
-def load_resolved(raw: Any, source: str = "<resolved>") -> YamlCredentials:
+def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
     """Build credentials from a parsed dict (already-resolved values).
 
-    `raw` should be the deserialized form of the schema documented at
-    the top of this module. Any remaining `${...}` template-looking
-    text is left as-is — substitution is the caller's responsibility.
+    `raw` must conform to the bindings schema documented at the top of
+    this module. Any remaining `${...}` template-looking text in `real`
+    or `placeholder` causes a validation error -- secret resolution is
+    the caller's responsibility.
     """
-    if not isinstance(raw, dict) or "hosts" not in raw:
-        _fail(f"{source}: missing top-level `hosts:` key")
-    hosts_raw = raw["hosts"] or {}
-    if not isinstance(hosts_raw, dict):
-        _fail(f"{source}: `hosts:` must be a mapping")
+    if not isinstance(raw, dict) or "bindings" not in raw:
+        _fail(f"{source}: missing top-level `bindings:` key")
 
+    bindings_raw = raw["bindings"]
+    if not isinstance(bindings_raw, list):
+        _fail(f"{source}: `bindings` must be an array")
+
+    names_seen: set[str] = set()
+    host_header_seen: dict[tuple[str, str], str] = {}  # (host, header) -> binding name
     hosts: dict[str, list[Substitution]] = {}
-    for host, entry in hosts_raw.items():
-        entry = entry or {}
-        if not isinstance(entry, dict):
-            _fail(f"{source}: hosts.{host} must be a mapping")
-        headers = entry.get("headers") or {}
-        if not isinstance(headers, dict):
-            _fail(f"{source}: hosts.{host}.headers must be a mapping")
+    inward: list[InwardBinding] = []
 
-        subs: list[Substitution] = []
-        for header, hentry in headers.items():
-            if not isinstance(hentry, dict):
+    for i, entry in enumerate(bindings_raw):
+        where = f"bindings[{i}]"
+        if not isinstance(entry, dict):
+            _fail(f"{source}: {where} must be an object")
+
+        # --- name ---
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            _fail(f"{source}: {where}.name must be a non-empty string")
+        if name in names_seen:
+            _fail(f"{source}: duplicate binding name '{name}'")
+        names_seen.add(name)
+
+        # --- hosts ---
+        binding_hosts = entry.get("hosts")
+        if not isinstance(binding_hosts, list) or not binding_hosts \
+                or not all(isinstance(h, str) and h for h in binding_hosts):
+            _fail(f"{source}: {where}.hosts must be a non-empty array of strings")
+
+        # --- header ---
+        header = entry.get("header")
+        if not isinstance(header, str) or not header:
+            _fail(f"{source}: {where}.header must be a non-empty string")
+
+        # --- placeholder ---
+        placeholder = entry.get("placeholder")
+        if not isinstance(placeholder, str) or not placeholder:
+            _fail(f"{source}: {where}.placeholder must be a non-empty string")
+        unresolved_ph = _SECRET_REF.search(placeholder)
+        if unresolved_ph:
+            _fail(
+                f"{source}: {where}.placeholder contains "
+                f"unresolved ${{secret:{unresolved_ph.group(1)}}} -- "
+                f"the caller is expected to resolve before posting"
+            )
+
+        # --- real ---
+        real = entry.get("real")
+        if not isinstance(real, str) or not real:
+            _fail(f"{source}: {where}.real must be a non-empty string")
+        unresolved_real = _SECRET_REF.search(real)
+        if unresolved_real:
+            _fail(
+                f"{source}: {where}.real contains "
+                f"unresolved ${{secret:{unresolved_real.group(1)}}} -- "
+                f"the caller is expected to resolve before posting"
+            )
+
+        # --- env (optional) ---
+        env = entry.get("env")
+        if env is not None and (not isinstance(env, str) or not env):
+            _fail(f"{source}: {where}.env must be a non-empty string or absent/null")
+
+        # --- (host, header) uniqueness across bindings ---
+        for host in binding_hosts:
+            key = (host, header)
+            if key in host_header_seen:
                 _fail(
-                    f"{source}: hosts.{host}.headers.{header} must be a mapping "
-                    f"with `placeholder` and `real`"
+                    f"{source}: bindings '{host_header_seen[key]}' and '{name}' "
+                    f"both claim header '{header}' on host '{host}'"
                 )
-            placeholder = hentry.get("placeholder")
-            real = hentry.get("real")
-            if not isinstance(placeholder, str) or not placeholder:
-                _fail(
-                    f"{source}: hosts.{host}.headers.{header}.placeholder "
-                    f"must be a non-empty string"
-                )
-            if not isinstance(real, str) or not real:
-                _fail(
-                    f"{source}: hosts.{host}.headers.{header}.real "
-                    f"must be a non-empty string"
-                )
-            unresolved = _SECRET_REF.search(real)
-            if unresolved:
-                _fail(
-                    f"{source}: hosts.{host}.headers.{header}.real contains "
-                    f"unresolved ${{secret:{unresolved.group(1)}}} -- "
-                    f"the caller is expected to resolve before posting"
-                )
-            subs.append(Substitution(header=header, placeholder=placeholder, real=real))
-        hosts[host] = subs
-    return YamlCredentials(hosts)
+            host_header_seen[key] = name
+
+        sub = Substitution(header=header, placeholder=placeholder, real=real)
+        for host in binding_hosts:
+            hosts.setdefault(host, []).append(sub)
+
+        inward.append(InwardBinding(
+            name=name,
+            placeholder=placeholder,
+            env=env,
+            header=header,
+            hosts=list(binding_hosts),
+        ))
+
+    return BindingCredentials(hosts, inward)

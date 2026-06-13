@@ -30,7 +30,7 @@ from pathlib import Path
 from aiohttp import web
 
 import config
-from config import Credentials, YamlCredentials
+from config import BindingCredentials, Credentials
 
 TOKEN_PATH = Path(os.environ["CREDPROXY_TOKEN_PATH"])
 CONFIG_PATH = Path(os.environ["CREDPROXY_TMPFS"]) / "config.json"
@@ -38,7 +38,7 @@ CONFIG_PATH = Path(os.environ["CREDPROXY_TMPFS"]) / "config.json"
 
 @dataclass
 class AppState:
-    creds: Credentials = field(default_factory=lambda: YamlCredentials({}))
+    creds: Credentials = field(default_factory=lambda: BindingCredentials({}))
 
 
 STATE_KEY: web.AppKey[AppState] = web.AppKey("state", AppState)

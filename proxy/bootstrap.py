@@ -4,6 +4,12 @@ Reached from the workspace via the iptables sentinel:80 ->
 CREDPROXY_HTTP_PORT redirect installed in entrypoint.sh. All routes
 are GET, all unauthenticated -- the data they expose is what the
 workspace needs to function (CA cert, env vars, placeholders).
+
+Inward API / least-disclosure: /setup returns the `bindings` list with
+only the fields the workspace needs for self-configuration:
+  name, placeholder, env, header, hosts.
+It does NOT expose provider, secret-id, or real credential values --
+those never reach the proxy from the push model anyway.
 """
 from pathlib import Path
 
@@ -64,12 +70,26 @@ That installs the proxy CA system-wide and writes env vars to
 /etc/profile.d/credproxy.sh. HTTPS to configured hosts is intercepted;
 everything else is byte-passthrough.
 
-For intercepted hosts, the proxy publishes placeholder tokens under
-/setup's `tokens` field. Use those placeholders as you would real
-credentials (in env vars, tool config files, request headers); the
-proxy substitutes them for real secrets on the way upstream. You will
-not see the real values. A request to an intercepted host with no
-placeholder is forwarded as-is and logged.
+For intercepted hosts, the proxy injects credentials automatically by
+substituting placeholder tokens. Fetch the current bindings from /setup
+to find out which placeholders to use and where:
+
+    curl -s http://proxy.local/setup | jq .bindings
+
+Each binding entry has:
+  name        -- a handle for this credential (e.g. "github-env")
+  placeholder -- the inert sentinel to use as the credential value
+  env         -- suggested env var name to export the placeholder as (may be null)
+  header      -- the HTTP header the proxy watches for substitution
+  hosts       -- the hostnames for which this placeholder is active
+
+Example: if a binding has env "GITHUB_TOKEN" and placeholder "ghp_xxx...",
+set GITHUB_TOKEN=ghp_xxx... in your environment. The proxy will substitute
+the real credential on requests to the binding's hosts.
+
+You will never see the real credential value -- the proxy holds it.
+A request to an intercepted host with no matching placeholder is forwarded
+as-is and logged.
 
 If proxy.local does not resolve, use 169.254.1.1 directly.
 
@@ -78,22 +98,29 @@ Endpoints (all GET):
   /ca.crt        CA certificate (PEM)
   /bootstrap.sh  one-shot setup: install CA + write /etc/profile.d
   /env.sh        env-var exports only (for `eval` use)
-  /setup         JSON: ca_url, env, version, intercept_hosts, tokens
+  /setup         JSON: ca_url, env, version, intercept_hosts, bindings
   /llms.txt      this file
 """
 
 
-def workspace_tokens(creds: Credentials) -> dict[str, dict[str, str]]:
-    """JSON shape for /setup's `tokens` field: {host: {header: placeholder}}.
+def workspace_bindings(creds: Credentials) -> list[dict]:
+    """JSON shape for /setup's `bindings` field.
 
-    Derived from the Credentials Protocol's two lookup primitives;
-    lives here because the shape is a bootstrap-API contract, not a
-    credential-lookup concern.
+    Returns only the workspace-safe binding fields: name, placeholder,
+    env, header, hosts. Real credential values are intentionally absent
+    (least disclosure). This data is safe to expose because placeholders
+    are inert sentinels.
     """
-    return {
-        host: {sub.header: sub.placeholder for sub in creds.substitutions_for(host)}
-        for host in creds.intercept_hosts()
-    }
+    return [
+        {
+            "name": b.name,
+            "placeholder": b.placeholder,
+            "env": b.env,
+            "header": b.header,
+            "hosts": b.hosts,
+        }
+        for b in creds.inward_bindings()
+    ]
 
 
 async def health(_: web.Request) -> web.Response:
@@ -123,7 +150,7 @@ async def setup(request: web.Request) -> web.Response:
         "ca_url": "http://proxy.local/ca.crt",
         "env": CA_ENV,
         "intercept_hosts": sorted(state.creds.intercept_hosts()),
-        "tokens": workspace_tokens(state.creds),
+        "bindings": workspace_bindings(state.creds),
     })
 
 

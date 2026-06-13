@@ -19,6 +19,9 @@ class FakeCreds:
     def substitutions_for(self, host: str) -> list[Substitution]:
         return list(self._hosts.get(host, []))
 
+    def inward_bindings(self) -> list:
+        return []
+
 
 def make_state(hosts):
     """HostnameLogger reads `state.creds` fresh on each call; tests mimic that

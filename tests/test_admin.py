@@ -6,7 +6,7 @@ from aiohttp import web
 
 import admin
 import bootstrap
-from config import Substitution, YamlCredentials
+from config import BindingCredentials, InwardBinding, Substitution
 
 
 @pytest.fixture
@@ -32,16 +32,16 @@ def app(state):
 
 
 VALID_CONFIG = {
-    "hosts": {
-        "api.github.com": {
-            "headers": {
-                "Authorization": {
-                    "placeholder": "credproxy_test",
-                    "real": "github_pat_real",
-                }
-            }
+    "bindings": [
+        {
+            "name": "github-env",
+            "hosts": ["api.github.com"],
+            "header": "Authorization",
+            "placeholder": "credproxy_test",
+            "real": "github_pat_real",
+            "env": "GITHUB_TOKEN",
         }
-    }
+    ]
 }
 
 
@@ -84,7 +84,7 @@ def test_load_initial_state_invalid_config_exits(monkeypatch, tmp_path):
     monkeypatch.setattr(admin, "TOKEN_PATH", tmp_path / "auth.token")
     monkeypatch.setattr(admin, "CONFIG_PATH", tmp_path / "config.json")
     (tmp_path / "auth.token").write_text("xyz")
-    (tmp_path / "config.json").write_text(json.dumps({"not-hosts": {}}))
+    (tmp_path / "config.json").write_text(json.dumps({"not-bindings": {}}))
     with pytest.raises(SystemExit, match="persisted config invalid"):
         admin.load_initial_state()
 
@@ -160,7 +160,7 @@ async def test_post_wrong_token_beats_bad_body(aiohttp_client, app):
     resp2 = await client.post(
         "/admin/config",
         headers={"Authorization": "Bearer wrong"},
-        json={"not-hosts": {}},
+        json={"not-bindings": {}},
     )
     assert resp2.status == 401
 
@@ -186,7 +186,7 @@ async def test_post_invalid_config_does_not_overwrite(aiohttp_client, app, state
     resp = await client.post(
         "/admin/config",
         headers={"Authorization": "Bearer established"},
-        json={"not-hosts": {}},
+        json={"not-bindings": {}},
     )
     assert resp.status == 400
     assert json.loads(admin.CONFIG_PATH.read_text()) == VALID_CONFIG
@@ -194,18 +194,10 @@ async def test_post_invalid_config_does_not_overwrite(aiohttp_client, app, state
 
 
 async def test_post_unresolved_secret_rejected(aiohttp_client, app):
-    bad = {
-        "hosts": {
-            "api.github.com": {
-                "headers": {
-                    "Authorization": {
-                        "placeholder": "ph",
-                        "real": "${secret:GITHUB_PAT}",
-                    }
-                }
-            }
-        }
-    }
+    bad = {"bindings": [
+        {"name": "b", "hosts": ["api.github.com"], "header": "Authorization",
+         "placeholder": "ph", "real": "${secret:GITHUB_PAT}"}
+    ]}
     client = await aiohttp_client(app)
     resp = await client.post(
         "/admin/config",
@@ -308,38 +300,73 @@ async def test_setup_static_fields(aiohttp_client, app):
     assert body["version"] == bootstrap.VERSION
     assert body["env"] == bootstrap.CA_ENV
     assert body["intercept_hosts"] == []
-    assert body["tokens"] == {}
+    assert body["bindings"] == []
 
 
 async def test_setup_reflects_state(aiohttp_client, app, state):
-    state.creds = YamlCredentials(
-        {"api.github.com": [Substitution("Authorization", "ph", "real")]}
+    """After a config push, /setup returns the inward bindings shape."""
+    state.creds = BindingCredentials(
+        {"api.github.com": [Substitution("Authorization", "ph", "real")]},
+        [InwardBinding(name="gh", placeholder="ph", env="GH_TOKEN",
+                       header="Authorization", hosts=["api.github.com"])],
     )
     client = await aiohttp_client(app)
     resp = await client.get("/setup")
     assert resp.status == 200
     body = await resp.json()
     assert body["intercept_hosts"] == ["api.github.com"]
-    assert body["tokens"] == {"api.github.com": {"Authorization": "ph"}}
+    bindings = body["bindings"]
+    assert len(bindings) == 1
+    b = bindings[0]
+    assert b["name"] == "gh"
+    assert b["placeholder"] == "ph"
+    assert b["env"] == "GH_TOKEN"
+    assert b["header"] == "Authorization"
+    assert b["hosts"] == ["api.github.com"]
 
 
-def test_workspace_tokens_function():
-    """Unit test for the bootstrap.workspace_tokens free function."""
-    creds = YamlCredentials({
-        "api.github.com": [
-            Substitution("Authorization", "ph1", "r1"),
-            Substitution("X-Custom", "ph2", "r2"),
+async def test_setup_least_disclosure(aiohttp_client, app, state):
+    """Inward API: real credential values must NOT appear in /setup response."""
+    state.creds = BindingCredentials(
+        {"api.github.com": [Substitution("Authorization", "ph_sentinel", "super_secret_real")]},
+        [InwardBinding(name="gh", placeholder="ph_sentinel", env=None,
+                       header="Authorization", hosts=["api.github.com"])],
+    )
+    client = await aiohttp_client(app)
+    resp = await client.get("/setup")
+    body_text = await resp.text()
+    assert "super_secret_real" not in body_text
+    # provider and secret-id are CLI-side only; confirm they also can't appear
+    # (they are never sent to the proxy in the push model).
+
+
+def test_workspace_bindings_function():
+    """Unit test for the bootstrap.workspace_bindings free function."""
+    creds = BindingCredentials(
+        {
+            "api.github.com": [Substitution("Authorization", "ph1", "r1")],
+            "api.example.com": [Substitution("X-API-Key", "ph2", "r2")],
+        },
+        [
+            InwardBinding(name="gh", placeholder="ph1", env="GH_TOKEN",
+                          header="Authorization", hosts=["api.github.com"]),
+            InwardBinding(name="ex", placeholder="ph2", env=None,
+                          header="X-API-Key", hosts=["api.example.com"]),
         ],
-        "api.example.com": [Substitution("X-API-Key", "ph3", "r3")],
-    })
-    assert bootstrap.workspace_tokens(creds) == {
-        "api.github.com": {"Authorization": "ph1", "X-Custom": "ph2"},
-        "api.example.com": {"X-API-Key": "ph3"},
-    }
+    )
+    result = bootstrap.workspace_bindings(creds)
+    assert len(result) == 2
+    by_name = {b["name"]: b for b in result}
+    assert by_name["gh"]["placeholder"] == "ph1"
+    assert by_name["gh"]["env"] == "GH_TOKEN"
+    assert by_name["gh"]["header"] == "Authorization"
+    assert by_name["gh"]["hosts"] == ["api.github.com"]
+    assert "real" not in by_name["gh"]
+    assert by_name["ex"]["env"] is None
 
 
-def test_workspace_tokens_empty():
-    assert bootstrap.workspace_tokens(YamlCredentials({})) == {}
+def test_workspace_bindings_empty():
+    assert bootstrap.workspace_bindings(BindingCredentials({})) == []
 
 
 async def test_no_store_header_present(aiohttp_client, app):
