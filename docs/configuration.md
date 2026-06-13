@@ -109,10 +109,9 @@ bindings may claim the same `(host, header)` pair (the header comes from the
 injector). The referenced injector and provider must resolve. Violations are
 reported as a config error naming the file and the offending field.
 
-Injector definitions (`header`, `format`, `env`, and a `[placeholder]` pattern
-of `prefix` / `length` / `charset`) are a separate file type; copy a bundled
-one to author your own with `credproxy injector scaffold NAME`. Providers are
-host-side executables — see [`providers.md`](providers.md).
+Injector definitions are a separate declarative file type (header, format,
+placeholder pattern, env hint) — see [`injectors.md`](injectors.md). Providers
+are host-side executables — see [`providers.md`](providers.md).
 
 ## The CLI path
 
