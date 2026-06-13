@@ -55,6 +55,10 @@ _WS_VERBS = {
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
+# Top-level meta commands: no workspace argument. Every token in the three
+# command sets above and here must be in core's RESERVED_NAMES (a workspace
+# can't take a colliding name) -- guarded by test_reserved_names_cover_all_cli_verbs.
+_META_COMMANDS = {"list", "current"}
 
 
 # ---- a parsed invocation ----------------------------------------------------
@@ -836,10 +840,8 @@ def main(loose_default: bool = False) -> None:
     try:
         if head == "workspace":
             _dispatch_workspace(ctx, rest, trailing)
-        elif head == "list":
-            do_list(ctx, rest[0] if rest else None)
-        elif head == "current":
-            do_current(ctx)
+        elif head in _META_COMMANDS:
+            _dispatch_meta(ctx, head, rest)
         elif head in ("injector", "provider"):
             _dispatch_def(ctx, head, rest)
         elif head == "dev":
@@ -854,6 +856,14 @@ def main(loose_default: bool = False) -> None:
             )
     except CredproxyError as e:
         fail(e)
+
+
+def _dispatch_meta(ctx: Ctx, head: str, rest: list[str]) -> None:
+    """Top-level meta commands (no workspace argument)."""
+    if head == "list":
+        do_list(ctx, rest[0] if rest else None)
+    elif head == "current":
+        do_current(ctx)
 
 
 def _dispatch_def(ctx: Ctx, kind: str, rest: list[str]) -> None:

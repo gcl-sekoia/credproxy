@@ -29,12 +29,18 @@ _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*$")
 # may not be named one of these, or `credproxy workspace <name> <verb>` would
 # be ambiguous (is the token a name or a verb?). Enforced in `for_name` so a
 # reserved name is a typed error wherever it enters the core.
+# Must contain every CLI verb and top-level meta command, or a workspace could
+# take a name the dispatcher reads as a verb (and become unaddressable). This
+# duplicates the porcelain command sets because core must not import porcelain;
+# `test_reserved_names_cover_all_cli_verbs` guards the two against drift.
 RESERVED_NAMES = frozenset({
     # workspace-level verbs (used both name-before-verb and as bare verbs)
-    "create", "use", "list", "enter", "start", "stop", "delete",
+    "create", "use", "list", "enter", "edit", "start", "stop", "delete",
     "apply", "inspect", "logs",
     # sub-noun
     "binding",
+    # top-level meta commands (no workspace argument)
+    "current",
 })
 
 

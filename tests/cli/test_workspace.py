@@ -41,6 +41,19 @@ def test_reserved_names_rejected(xdg):
             for_name(name)
 
 
+def test_reserved_names_cover_all_cli_verbs():
+    """Guard against drift: every CLI verb and top-level meta command must be
+    in RESERVED_NAMES, or a workspace could take a name the dispatcher reads as
+    a verb (and become unaddressable). core can't import porcelain, so the two
+    are maintained separately -- this test is what keeps them in sync."""
+    from credproxy_cli.core.workspace import RESERVED_NAMES
+    from credproxy_cli.porcelain import cli
+
+    cli_tokens = cli._WS_VERBS | cli._WS_NOUN_VERBS | cli._META_COMMANDS
+    missing = cli_tokens - RESERVED_NAMES
+    assert not missing, f"CLI verbs/commands missing from RESERVED_NAMES: {missing}"
+
+
 # ---- workspace paths ---------------------------------------------------------
 
 
