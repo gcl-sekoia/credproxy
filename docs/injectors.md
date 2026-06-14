@@ -179,6 +179,62 @@ creating bindings that use it; existing bindings keep their already-materialized
 values (the file stays the source of truth). To re-shape an existing binding,
 edit or clear its `placeholder` in the workspace config.
 
+## Scripted injectors (the escape hatch)
+
+When the built-in schemes can't express a service's auth (a bespoke signature, a
+multi-step token mint), an injector can run a **Starlark script** in the proxy
+instead. The injector TOML stays declarative — it sets `scheme = "script"`,
+names a `.star` file, and declares the metadata the host CLI can't infer by
+reading Starlark (`family`, `slots`, and the wire `location_kind`). The script
+carries only the logic: `on_request(ctx)` (and optionally `on_response(ctx)`).
+
+```toml
+# ~/.config/credproxy/injectors/acme.toml
+scheme = "script"
+script = "acme"              # resolves acme.star (user dir, then bundled)
+family = "sign"              # "substitute" (placeholder) | "sign" (no placeholder)
+slots  = ["value"]           # secret slot names the script reads
+location_kind = "header"     # where it writes, for host-collision detection
+env    = "ACME_TOKEN"
+
+[params]                      # passed to the script verbatim (ctx via param())
+header = "X-Acme-Auth"
+```
+
+```python
+# ~/.config/credproxy/scripts/acme.star
+# This API wants base64(token) in a custom header -- the proxy constructs the
+# value directly (sign family, so no placeholder rides in the workspace).
+def on_request(ctx):
+    header = param(ctx, "header", "Authorization")
+    header_set(ctx, header, "Basic " + b64encode(secret(ctx)))
+    return True
+```
+
+The script discovery mirrors injectors/providers (`$XDG_CONFIG_HOME/credproxy/
+scripts/<name>.star`, then the bundled set). At `start`/`apply`/`binding test`
+the CLI reads the `.star` **source** and pushes it to the proxy with the config
+(the push model — the proxy stays stateless and compiles what it's given, so
+your scripts work with no mounts or image rebuilds).
+
+**Sandbox.** The script runs in the proxy with access to the real credential via
+`secret()`, so it is sandboxed: only the trusted primitives are callable (header
+get/set, body read/replace, `b64encode`/`b64decode`, `secret`, `placeholder`,
+`param`, and the crypto primitives the proxy owns); there is no `print`, I/O,
+filesystem, network, `import`, or `load()`. A script can only shape the request
+bound for the binding's already-fixed host, so even a shared third-party script
+can't choose a destination or exfiltrate the secret. Errors fail closed (the
+request is forwarded unmodified). See `proxy/starlark_runtime.py`.
+
+> **Status (design-v3 phase 3b).** The runtime, sandbox, and the contract above
+> are implemented; bundled `bearer`/`basic`/`body` scripts ship as authoring
+> templates (they re-implement the built-ins). The crypto primitives for the
+> sign-family long tail (`hmac_sha256_hex`, `jwt_sign`, request introspection)
+> and worked `jwt-bearer`/OVH examples are the next increment. Enforced runaway
+> deadlines activate once starlark-pyo3's `check_cancelled` lands on the call
+> path (until then a non-terminating script hangs the proxy — scripts are
+> trusted host config).
+
 ## See also
 
 - [`configuration.md`](configuration.md) — the workspace config and `[[binding]]` blocks that reference injectors
