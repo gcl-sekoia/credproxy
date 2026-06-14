@@ -59,6 +59,35 @@ def test_parse_secret_multi_duplicate_slot():
         _parse_secret_args(["k=A", "k=B"])
 
 
+# ---- single named slot (#6): `--secret SLOT=REF` for one non-`value` slot ----
+
+
+def test_parse_secret_single_named_slot():
+    """A lone SLOT=REF whose SLOT is a declared slot -> that named slot."""
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    assert _parse_secret_args(["private_key=PK_REF"], ("private_key",)) == {
+        "private_key": "PK_REF"}
+
+
+def test_parse_secret_single_named_slot_ref_with_equals():
+    """REF after the slot name keeps any further '=' (split on the first only)."""
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    assert _parse_secret_args(["private_key=op://v/i?ver=2"], ("private_key",)) == {
+        "private_key": "op://v/i?ver=2"}
+
+
+def test_parse_secret_single_unknown_slot_stays_bare_ref():
+    """A lone ref containing '=' whose prefix is NOT a declared slot stays a bare
+    ref -- the disambiguation that keeps vault-path refs working."""
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    assert _parse_secret_args(["op://v/i?ver=2"], ("value",)) == "op://v/i?ver=2"
+
+
+def test_parse_secret_single_value_slot_explicit():
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    assert _parse_secret_args(["value=REF"], ("value",)) == {"value": "REF"}
+
+
 # ---- current -----------------------------------------------------------------
 
 

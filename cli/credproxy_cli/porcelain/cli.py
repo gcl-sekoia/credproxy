@@ -307,19 +307,27 @@ def _logs_json(ws: Workspace) -> None:
 # ---- binding commands --------------------------------------------------------
 
 
-def _parse_secret_args(values: list[str] | None) -> str | dict[str, str] | None:
+def _parse_secret_args(
+    values: list[str] | None, slots: tuple[str, ...] = (),
+) -> str | dict[str, str] | None:
     """Turn repeated --secret values into a single bare ref (single-slot) or a
     slot->ref table (multi-slot).
 
-    A single --secret is always a bare ref, kept verbatim even if it contains
-    '=' (e.g. a vault path with a query string). Multi-slot requires two or more
-    SLOT=REF flags; each is split on its first '=', so a REF may itself contain
-    '='. This sidesteps the ambiguity of a lone ref that happens to contain
-    '='."""
+    A lone --secret is a bare ref kept verbatim even if it contains '=' (e.g. a
+    vault path with a query string) -- UNLESS it is written `SLOT=REF` and SLOT
+    is one of the injector's declared `slots`, in which case it is that named
+    slot (so `--secret private_key=REF` works for a single non-`value` slot like
+    jwt-bearer's). Multi-slot requires two or more SLOT=REF flags; each is split
+    on its first '=', so a REF may itself contain '='. Splitting on a declared
+    slot name (not just any '=') is what keeps a lone `=`-containing ref
+    unambiguous."""
     if not values:
         return None
     if len(values) == 1:
-        return values[0]
+        slot, sep, ref = values[0].partition("=")
+        if sep and ref and slot in slots:
+            return {slot: ref}        # a single, explicitly-named slot
+        return values[0]              # bare ref (the single-slot `value` sugar)
     out: dict[str, str] = {}
     for v in values:
         slot, sep, ref = v.partition("=")
@@ -345,15 +353,19 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     if not a.host:
         fail("`binding add --injector` needs at least one --host")
-    secret = _parse_secret_args(a.secret)
-    if secret is None:
-        fail("`binding add` needs --secret")
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
 
     injector = find_injector(a.injector)
     find_provider(a.provider)
+
+    # Parse --secret with the injector's declared slots, so a lone
+    # `--secret SLOT=REF` for a single named slot (e.g. jwt-bearer's
+    # private_key) is recognized rather than swallowed as a bare `value` ref.
+    secret = _parse_secret_args(a.secret, injector.spec.slots)
+    if secret is None:
+        fail("`binding add` needs --secret")
 
     existing = core_bindings.load_bindings(ws)
     taken = {b.name for b in existing}
@@ -503,17 +515,22 @@ def _do_binding_test_adhoc(ctx: Ctx, name: str | None, a: argparse.Namespace) ->
     from ..core.injectors import find_injector
     from ..core.providers import find_provider
 
-    secret = _parse_secret_args(a.secret)
-    if not a.provider or secret is None:
-        fail("ad-hoc `binding test` needs --provider and --secret")
     if a.binding_name is not None:
         fail("cannot combine a binding NAME with ad-hoc --provider/--secret")
 
-    find_provider(a.provider)  # raises ProviderError if it doesn't resolve
+    # Resolve the injector first (if any) so its declared slots disambiguate a
+    # lone `--secret SLOT=REF` for a single named slot (parity with binding add).
+    slots: tuple[str, ...] = ()
     label = a.provider
     if a.injector is not None:
-        find_injector(a.injector)  # raises InjectorError if it doesn't resolve
+        slots = find_injector(a.injector).spec.slots  # raises InjectorError
         label = f"{a.injector}-{a.provider}"
+
+    secret = _parse_secret_args(a.secret, slots)
+    if not a.provider or secret is None:
+        fail("ad-hoc `binding test` needs --provider and --secret")
+
+    find_provider(a.provider)  # raises ProviderError if it doesn't resolve
 
     probe = core_bindings.Binding(
         name=label, injector=a.injector or "", provider=a.provider,
