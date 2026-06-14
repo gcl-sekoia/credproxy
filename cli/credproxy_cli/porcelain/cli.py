@@ -756,7 +756,7 @@ _STRICT_HELP = (
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
-    "  credproxy injector scaffold NAME [--script] | injector list | check NAME\n"
+    "  credproxy injector scaffold NAME [--script] | list | check NAME | api\n"
     "  credproxy provider scaffold NAME | provider list\n"
     "  credproxy preset list               (coordinated multi-binding sets)\n"
     "Dev harness:\n"
@@ -783,7 +783,7 @@ _LOOSE_HELP = (
     "  credp binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
-    "  credp injector scaffold NAME [--script] | injector list | check NAME\n"
+    "  credp injector scaffold NAME [--script] | list | check NAME | api\n"
     "  credp provider scaffold NAME | provider list\n"
     "  credp preset list               (coordinated multi-binding sets)\n"
     "Dev harness:\n"
@@ -856,9 +856,14 @@ def _scaffold_help(kind: str) -> str:
     if kind == "injector":
         s += (
             "\n\n--script [sign|substitute]  instead emit a SCRIPTED (custom) "
-            "injector:\n  a manifest + a .star carrying the primitive-API "
-            "reference inline.\n  Use this when no built-in scheme fits; check "
-            "it with `injector check NAME`."
+            "injector\n  (a manifest + a .star with the primitive-API reference "
+            "inline) -- use\n  this when no built-in scheme fits. Pick the family:\n"
+            "    sign        compute auth material on every request (e.g. an HMAC\n"
+            "                signature); no placeholder. [default]\n"
+            "    substitute  swap an inert placeholder the workspace holds for the\n"
+            "                real secret value.\n"
+            "  See `injector api` for the full reference; check it with "
+            "`injector check NAME`."
         )
     s += f"\nThen `credproxy {kind} list` shows it."
     return s
@@ -1174,13 +1179,22 @@ def _dispatch_def(ctx: Ctx, kind: str, rest: list[str]) -> None:
         do_injector_check(ctx, names[0], "--compile" in flags)
         return
 
+    if sub == "api" and kind == "injector":
+        if _wants_help(rest[1:]):
+            say("usage: credproxy injector api\n"
+                "Print the scripted-injector authoring reference (manifest fields\n"
+                "+ the Starlark primitive API) without scaffolding anything.")
+            return
+        do_injector_api(ctx)
+        return
+
     if sub == "list":
         do_def_list(ctx, kind)
         return
 
     usage = (
         "usage: credproxy injector {scaffold NAME [--script [sign|substitute]]"
-        "|list|check NAME}"
+        "|list|check NAME|api}"
         if kind == "injector"
         else f"usage: credproxy {kind} {{scaffold NAME|list}}"
     )
@@ -1225,6 +1239,12 @@ def do_scaffold_script(ctx: Ctx, name: str, family: str) -> None:
     r = scaffold_script(name, family)
     render.OUT.scaffolded_script(
         r.name, str(r.injector_path), str(r.script_path), r.family)
+
+
+def do_injector_api(ctx: Ctx) -> None:
+    from ..core.scaffold import script_api_reference
+
+    render.OUT.injector_api(script_api_reference())
 
 
 def do_injector_check(ctx: Ctx, name: str, do_compile: bool) -> None:

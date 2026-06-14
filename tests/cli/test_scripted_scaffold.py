@@ -167,6 +167,35 @@ def test_injector_check_builtin(xdg):
     assert "built-in" in (out + err)
 
 
+# ---- injector api (preview the authoring reference, no scaffold) --------------
+
+
+def test_injector_api_human():
+    code, out, err = _run(["injector", "api"])
+    assert code == 0
+    blob = out + err
+    # manifest fields + the primitive API, and the sign/substitute distinction.
+    assert 'scheme        = "script"' in blob
+    assert "hmac_sha256_hex" in blob and "req_set_header" in blob
+    assert "sign:" in blob and "substitute:" in blob
+
+
+def test_injector_api_json():
+    code, out, err = _run(["--json", "injector", "api"])
+    assert code == 0
+    ref = json.loads(out)["reference"]
+    assert "Primitive API" in ref and "secret(" in ref
+
+
+def test_scaffold_help_explains_families():
+    code, out, err = _run(["injector", "scaffold", "--help"])
+    assert code == 0
+    blob = out + err
+    assert "sign" in blob and "substitute" in blob
+    # the distinction itself, not just the token list
+    assert "placeholder" in blob and "injector api" in blob
+
+
 def test_injector_check_missing_script(xdg):
     from credproxy_cli.core.paths import injectors_config_dir
     d = injectors_config_dir()

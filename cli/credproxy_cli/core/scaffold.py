@@ -154,6 +154,34 @@ def on_request():
 }
 
 
+_MANIFEST_REF = """\
+Scripted injectors (scheme = "script") let you author custom injection logic.
+
+Manifest fields (a TOML injector; generate with `injector scaffold NAME --script`):
+  scheme        = "script"
+  script        = "NAME"        # the .star file, resolved from the script registry
+  api           = 1             # primitive-API version the script targets
+  family        = "sign"        # sign: compute auth material every request (no
+                                #   placeholder); substitute: swap an inert
+                                #   placeholder the workspace holds for the value
+  slots         = ["key"]       # named secret inputs; bind with --secret slot=REF
+  location_kind = "header"      # "header" or "body"
+
+Script (.star) contract and primitives:
+"""
+
+
+def script_api_reference() -> str:
+    """The scripted-injector authoring reference (manifest fields + the Starlark
+    primitive API). Shown by `injector api`; the same primitive list is embedded
+    as comments in every scaffolded script, so there is one source of truth."""
+    body = "\n".join(
+        line[2:] if line.startswith("# ") else line[1:] if line.startswith("#") else line
+        for line in _STAR_API_REF.splitlines()
+    )
+    return _MANIFEST_REF + body + "\n"
+
+
 @dataclass(frozen=True)
 class ScriptScaffoldResult:
     name: str

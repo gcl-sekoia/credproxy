@@ -235,6 +235,9 @@ class Renderer:
         print(f"  script    {script_path}")
         print(f"edit the script, then: credproxy injector check {name}")
 
+    def injector_api(self, text: str) -> None:
+        print(text, end="" if text.endswith("\n") else "\n")
+
     def injector_check(self, name: str, info: dict) -> None:
         status = "ok  " if info["ok"] else "FAIL"
         print(f"{status}  injector '{name}': {info['detail']}")
@@ -338,6 +341,9 @@ class JsonRenderer(Renderer):
                           script_path: str, family: str) -> None:
         self._emit({"name": name, "injector_path": injector_path,
                     "script_path": script_path, "family": family})
+
+    def injector_api(self, text: str) -> None:
+        self._emit({"reference": text})
 
     def injector_check(self, name: str, info: dict) -> None:
         self._emit({"name": name, **info})
