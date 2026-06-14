@@ -1,15 +1,24 @@
 """Sandboxed Starlark runtime for scripted injection schemes (design-v3).
 
 A *scripted scheme* is the escape hatch for the long tail: a `.star` file that
-defines `on_request(ctx)` (and optionally `on_response(ctx)`) and composes the
-trusted primitives the proxy provides. It runs IN the proxy, with access to the
-real credential via `secret()`, so it is sandboxed -- unlike providers, which
-run on the host in the user's own context.
+defines `on_request()` (and optionally `on_response()`) and composes the trusted
+primitives the proxy provides. It runs IN the proxy, with access to the real
+credential via `secret()`, so it is sandboxed -- unlike providers, which run on
+the host in the user's own context.
+
+The API shape (design-v4, "option B"): primitives are FLAT top-level functions
+with the ctx passed IMPLICITLY. A hook is zero-arg (`def on_request():`); the
+runtime binds the current ctx to a contextvar around the call and the primitives
+read it. So a script never threads or even holds a ctx handle -- it just calls
+`req_header(name)`, `secret()`, `req_set_header(name, value)`. Request-scoped
+primitives are prefixed `req_`/`resp_`; the prefix also encodes the phase
+(calling `resp_*` in `on_request` raises). Pure helpers (`b64encode`, `crypto`,
+`jwt_*`, `json_*`) take no ctx.
 
 Why this is safe (the door model):
-- The script can only act through the registered primitives; it receives the
-  request as an `OpaquePythonObject` it cannot introspect (it reappears as the
-  real ctx only when handed back to a primitive).
+- The script has NO handle to the request at all -- it can only act through the
+  registered primitives, which reach the real ctx via a contextvar the runtime
+  controls. There is nothing to introspect or smuggle out.
 - `Globals.standard()` is the entire global surface -- the Starlark language has
   no I/O, no filesystem, no network, no `import`/`exec`. `load()` is neutralized
   (no FileLoader is passed), so a script can't pull in other files.
@@ -20,32 +29,32 @@ Why this is safe (the door model):
 
 Non-exfiltration, concretely: `Globals.standard()` has no `print`, and a script
 error message is NEVER logged (only the exception type is) -- otherwise a script
-could `fail(secret(ctx))` and leak the value to proxy stdout. The only data
-channel a script has is the request itself, which is already host-scoped to the
-binding's destination.
+could `fail(secret())` and leak the value to proxy stdout. The only data channel
+a script has is the request itself, which is already host-scoped to the binding's
+destination.
 
 **Runaway scripts (the real resource-bounds gap).** A Python-thread timeout
 CANNOT preempt a CPU-bound script: starlark-pyo3 holds the GIL for the whole
-evaluation (and exposes no step limit on `FrozenModule.call`), so a thread join
-can't return until the script releases the GIL -- which a sandboxed (I/O-free)
-script never does mid-compute. The correct mechanism is cooperative
-cancellation: `check_cancelled` (starlark-pyo3 PR #51) fires a callback every
-~1000 bytecode instructions and aborts when it returns True, so a deadline can
-actually interrupt a runaway. PR #51 adds it to `eval()` but not yet to
-`FrozenModule.call` (which our hot path uses). We therefore FEATURE-DETECT
-support on `.call` (see `_CALL_SUPPORTS_CANCEL`) and pass a deadline cancel when
-present; until that lands+releases, a non-terminating script hangs the proxy
-until the container is restarted. That DoS is accepted: scripts are trusted
-host-authored control-plane config (like provider executables), and it does not
-weaken the sandbox's non-exfiltration / no-I/O guarantees.
+evaluation, so a thread join can't return until the script releases the GIL --
+which a sandboxed (I/O-free) script never does mid-compute. The correct mechanism
+is cooperative cancellation: `check_cancelled` (starlark-pyo3 PR #51) fires a
+callback every ~1000 bytecode instructions and aborts when it returns True, so a
+deadline can actually interrupt a runaway. PR #51 adds it to `eval()` but not yet
+to `FrozenModule.call` (our hot path). We therefore FEATURE-DETECT support on
+`.call` (see `_CALL_SUPPORTS_CANCEL`) and pass a deadline cancel when present;
+until that lands+releases, a non-terminating script hangs the proxy until the
+container is restarted. That DoS is accepted: scripts are trusted host-authored
+control-plane config (like provider executables), and it does not weaken the
+sandbox's non-exfiltration / no-I/O guarantees.
 
 This module is proxy-only (it imports `starlark`, present only in the proxy
-image). It is not wired into config dispatch yet; design-v3 phase 3b adds the
-scripted-injector authoring contract that builds ScriptedScheme from a binding.
+image). `config.load_resolved` builds a ScriptedScheme for each `scheme="script"`
+binding from the pushed source + declared metadata.
 """
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import hmac
 import json
@@ -54,12 +63,41 @@ import time
 
 import starlark
 
+# The primitive API version this runtime implements. A scripted injector's
+# manifest declares `api = N`; config rejects a binding whose version this
+# runtime does not support. Bump on any breaking change to the primitive set.
+API_VERSION = 1
+SUPPORTED_API_VERSIONS = frozenset({1})
+
 # A real credential injection is sub-millisecond; this is a generous deadline
 # that bounds a runaway script ONCE check_cancelled is available on the call
 # path (see module docstring).
 DEFAULT_TIMEOUT = 2.0
 
 _GLOBALS = starlark.Globals.standard()
+
+# The current ctx (a RequestCtx or ResponseCtx), bound by `_invoke` for the
+# duration of one hook call and read by the stateful primitives. A contextvar
+# (not a bare global) so the binding is correct even if calls ever interleave;
+# the eval holds the GIL and runs inline on this thread, so a value set here is
+# visible to every primitive the script calls and gone again afterwards.
+_ctx_var: contextvars.ContextVar = contextvars.ContextVar("scripted_ctx")
+
+
+def _ctx():
+    try:
+        return _ctx_var.get()
+    except LookupError:
+        # A request/response primitive called at module top-level (during load),
+        # not inside a hook. Fail loudly rather than silently.
+        raise RuntimeError("request primitive called outside on_request/on_response")
+
+
+def _require(phase: str, fn: str):
+    c = _ctx()
+    if c.phase != phase:
+        raise RuntimeError(f"{fn}() is {phase}-phase only")
+    return c
 
 
 class make_deadline_cancel:
@@ -96,9 +134,8 @@ def _detect_call_cancel() -> bool:
     try:
         m = starlark.Module()
         starlark.eval(m, starlark.parse("probe.star",
-                                        "def probe(c):\n    return True\n"), _GLOBALS)
-        m.freeze().call("probe", starlark.OpaquePythonObject(object()),
-                        check_cancelled=lambda: False)
+                                        "def probe():\n    return True\n"), _GLOBALS)
+        m.freeze().call("probe", check_cancelled=lambda: False)
         return True
     except TypeError:
         return False  # no check_cancelled kwarg -> unsupported
@@ -111,38 +148,102 @@ _CALL_SUPPORTS_CANCEL = _detect_call_cancel()
 
 # ---- trusted primitives ------------------------------------------------------
 #
-# Each primitive takes the ctx (a RequestCtx, passed by the script as the
-# OpaquePythonObject it received) as its first argument, except the pure
-# encoding helpers. `secret()` is the only door to the resolved value.
+# Stateful primitives read the implicit ctx (a RequestCtx/ResponseCtx) bound to
+# `_ctx_var` for the current hook. Request reads (`req_*` getters) work in both
+# phases (the live request in on_request, the answered request in on_response);
+# request mutation is request-phase only; `resp_*` is response-phase only. Pure
+# helpers take no ctx. `secret()` is the only door to the resolved value.
 
-def _header_get(ctx, name):
-    return ctx.header_get(name)
-
-
-def _header_set(ctx, name, value):
-    ctx.header_set(name, value)
-
-
-def _body_text(ctx):
-    return ctx.body_text()
+# -- credential / binding (both phases) --
+def _secret(slot="value"):
+    return _ctx().secret(slot)
 
 
-def _set_body_text(ctx, text):
-    ctx.set_body_text(text)
+def _param(key, default=None):
+    return _ctx().params.get(key, default)
 
 
-def _secret(ctx, slot="value"):
-    return ctx.secret(slot)
+def _placeholder():
+    return _ctx().placeholder
 
 
-def _placeholder(ctx):
-    return ctx.placeholder
+# -- request reads (both phases) --
+def _req_method():
+    c = _ctx()
+    return c.method if c.phase == "request" else c.request_method
 
 
-def _param(ctx, key, default=None):
-    return ctx.params.get(key, default)
+def _req_path():
+    c = _ctx()
+    return c.path if c.phase == "request" else c.request_path
 
 
+def _req_host():
+    c = _ctx()
+    return c.host if c.phase == "request" else c.request_host
+
+
+def _req_header(name):
+    c = _ctx()
+    return c.header_get(name) if c.phase == "request" else c.request_header_get(name)
+
+
+def _req_body():
+    c = _ctx()
+    return c.body_text() if c.phase == "request" else c.request_body_text()
+
+
+def _req_body_b64():
+    c = _ctx()
+    raw = c.body_bytes() if c.phase == "request" else c.request_body_bytes()
+    return base64.b64encode(raw).decode("ascii")
+
+
+# -- request mutation (request phase only) --
+def _req_set_header(name, value):
+    _require("request", "req_set_header").header_set(name, value)
+
+
+def _req_set_body(text):
+    _require("request", "req_set_body").set_body_text(text)
+
+
+# -- response (response phase only) --
+def _resp_status():
+    return _require("response", "resp_status").status_code
+
+
+def _resp_header(name):
+    return _require("response", "resp_header").header_get(name)
+
+
+def _resp_set_header(name, value):
+    _require("response", "resp_set_header").header_set(name, value)
+
+
+def _resp_body():
+    return _require("response", "resp_body").body_text()
+
+
+def _resp_set_body(text):
+    _require("response", "resp_set_body").set_body_text(text)
+
+
+def _resp_json():
+    """The response body parsed as JSON, or None if the body is absent or not
+    valid JSON (the common "is this the token endpoint?" branch -- total, so the
+    script can test it with `== None` rather than needing try/except)."""
+    c = _require("response", "resp_json")
+    text = c.body_text()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+# -- encoding (text <-> encoding; every encode has a decode) --
 def _b64encode(s):
     """Base64-encode a str (UTF-8) -> str."""
     return base64.b64encode(s.encode("utf-8")).decode("ascii")
@@ -159,36 +260,47 @@ def _b64url_encode(s):
     return base64.urlsafe_b64encode(s.encode("utf-8")).rstrip(b"=").decode("ascii")
 
 
-# -- request introspection (request phase only; read-only) --
-def _method(ctx):
-    return ctx.method
+def _b64url_decode(s):
+    """Inverse of b64url_encode: accepts unpadded URL-safe base64 -> str."""
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode("utf-8")
 
 
-def _path(ctx):
-    return ctx.path
+# -- carrier transcode: re-encode raw bytes between base64 and hex without a
+#    UTF-8 round-trip. The bridge that lets carrier-form crypto (below) end in a
+#    hex signature, e.g. AWS SigV4's `hex(hmac(signing_key, string_to_sign))`. --
+def _b64_to_hex(b64):
+    return base64.b64decode(b64).hex()
 
 
-def _host(ctx):
-    return ctx.host
+def _hex_to_b64(h):
+    return base64.b64encode(bytes.fromhex(h)).decode("ascii")
 
 
-# -- hashing / signing (the crypto the proxy owns; scripts orchestrate it) --
-def _hex_sha1(s):
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+# -- hashing / MAC. hmac_sha256 is CARRIER form: the key is base64 of raw key
+#    bytes and the output is base64 of the raw MAC, so multi-round key
+#    derivations (AWS SigV4) can chain output -> next key. The *_hex helpers
+#    cover the common single-shot case (OVH sha1, simple HMAC). Crypto stays
+#    host-owned; scripts only assemble the signing input. --
+def _hmac_sha256(key_b64, msg):
+    key = base64.b64decode(key_b64)
+    return base64.b64encode(hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()).decode("ascii")
 
 
-def _hex_sha256(s):
+def _sha256_hex(s):
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _sha1_hex(s):
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
 def _hmac_sha256_hex(key, msg):
     return hmac.new(key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _rs256_sign_b64url(private_key_pem, msg):
+def _rs256_sign(private_key_pem, msg):
     """RS256 (RSASSA-PKCS1-v1_5 over SHA-256): sign `msg` with the PEM RSA
-    private key, return the signature as unpadded base64url (the JWT/JWS form).
-    Crypto stays host-owned; scripts only assemble the signing input."""
+    private key, return the signature as unpadded base64url (the JWT/JWS form)."""
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -197,41 +309,96 @@ def _rs256_sign_b64url(private_key_pem, msg):
     return base64.urlsafe_b64encode(sig).rstrip(b"=").decode("ascii")
 
 
+# -- JWT/JWS: assembling the three segments (header.claims.signature) by hand is
+#    the classic footgun (segment order, padding, signing the right bytes), so
+#    the proxy owns it. --
+def _jwt_encode_sign(header, claims, private_key_pem):
+    """Build a signed RS256 JWS compact token from header/claims dicts."""
+    seg = (_b64url_encode(json.dumps(header, separators=(",", ":"))) + "."
+           + _b64url_encode(json.dumps(claims, separators=(",", ":"))))
+    return seg + "." + _rs256_sign(private_key_pem, seg)
+
+
+def _jwt_decode_or_none(token):
+    """The JWT claims (middle segment) as a dict, or None if `token` is not a
+    well-formed JWT. Does NOT verify the signature -- for reading a token the
+    proxy is re-sealing, not trusting."""
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        return json.loads(_b64url_decode(parts[1]))
+    except Exception:
+        return None
+
+
+# -- JSON --
 def _json_encode(value):
     """Compact, deterministic JSON for a Starlark value (dict/list/str/int/bool/
     None) -- e.g. building a JWT header/claims set. Keys keep insertion order."""
     return json.dumps(value, separators=(",", ":"))
 
 
+def _json_decode(s):
+    """Parse a JSON string to a Starlark value. Raises on invalid input (the
+    caller turns that into a fail-closed skip)."""
+    return json.loads(s)
+
+
+# -- time --
 def _now():
     """Current Unix time (seconds). A trusted primitive because the sandbox has
     no clock -- needed by time-bound signatures (OVH timestamp, JWT iat/exp)."""
     return int(time.time())
 
 
+def _now_ms():
+    """Current Unix time in milliseconds."""
+    return int(time.time() * 1000)
+
+
 PRIMITIVES = {
-    "header_get": _header_get,
-    "header_set": _header_set,
-    "body_text": _body_text,
-    "set_body_text": _set_body_text,
+    # credential / binding
     "secret": _secret,
-    "placeholder": _placeholder,
     "param": _param,
+    "placeholder": _placeholder,
+    # request reads (both phases)
+    "req_method": _req_method,
+    "req_path": _req_path,
+    "req_host": _req_host,
+    "req_header": _req_header,
+    "req_body": _req_body,
+    "req_body_b64": _req_body_b64,
+    # request mutation (request phase)
+    "req_set_header": _req_set_header,
+    "req_set_body": _req_set_body,
+    # response (response phase)
+    "resp_status": _resp_status,
+    "resp_header": _resp_header,
+    "resp_set_header": _resp_set_header,
+    "resp_body": _resp_body,
+    "resp_set_body": _resp_set_body,
+    "resp_json": _resp_json,
+    # encoding
     "b64encode": _b64encode,
     "b64decode": _b64decode,
     "b64url_encode": _b64url_encode,
-    # request introspection (request phase)
-    "method": _method,
-    "path": _path,
-    "host": _host,
+    "b64url_decode": _b64url_decode,
+    "b64_to_hex": _b64_to_hex,
+    "hex_to_b64": _hex_to_b64,
     # hashing / signing
-    "hex_sha1": _hex_sha1,
-    "hex_sha256": _hex_sha256,
+    "hmac_sha256": _hmac_sha256,
+    "sha256_hex": _sha256_hex,
+    "sha1_hex": _sha1_hex,
     "hmac_sha256_hex": _hmac_sha256_hex,
-    "rs256_sign_b64url": _rs256_sign_b64url,
-    # misc
+    "rs256_sign": _rs256_sign,
+    "jwt_encode_sign": _jwt_encode_sign,
+    "jwt_decode_or_none": _jwt_decode_or_none,
+    # json / time
     "json_encode": _json_encode,
+    "json_decode": _json_decode,
     "now": _now,
+    "now_ms": _now_ms,
 }
 
 
@@ -285,28 +452,33 @@ class ScriptedScheme:
         return self._invoke("on_response", ctx)
 
     def _invoke(self, fn_name: str, ctx) -> bool:
-        """Run the script function, failing CLOSED on any error (return False,
-        log). When the call path supports check_cancelled, a wall-clock deadline
-        aborts a runaway; otherwise a non-terminating script hangs the proxy
-        (documented ceiling -- a Python-thread timeout can't preempt the GIL).
+        """Run the script hook, failing CLOSED on any error (return False, log).
+        Binds `ctx` to the contextvar for the duration of the call so the flat
+        primitives can reach it, then always unbinds. When the call path supports
+        check_cancelled, a wall-clock deadline aborts a runaway; otherwise a
+        non-terminating script hangs the proxy (documented ceiling -- a
+        Python-thread timeout can't preempt the GIL).
 
         The error is logged by EXCEPTION TYPE ONLY -- never its message --
-        because a script could `fail(secret(ctx))` and the message would carry
-        the real credential to stdout, defeating the non-exfiltration guarantee.
+        because a script could `fail(secret())` and the message would carry the
+        real credential to stdout, defeating the non-exfiltration guarantee.
         """
-        opaque = starlark.OpaquePythonObject(ctx)
         cancel = make_deadline_cancel(self._timeout) if _CALL_SUPPORTS_CANCEL else None
+        token = _ctx_var.set(ctx)
         try:
-            if cancel is not None:
-                result = self._frozen.call(fn_name, opaque, check_cancelled=cancel)
-            else:
-                result = self._frozen.call(fn_name, opaque)
-        except Exception as e:  # StarlarkError / primitive error / deadline abort
-            if cancel is not None and cancel.fired:
-                print(f"[script] {self.name}.{fn_name} exceeded {self._timeout}s "
-                      f"deadline; failing closed", flush=True)
-            else:
-                print(f"[script] {self.name}.{fn_name} raised {type(e).__name__}; "
-                      f"failing closed", flush=True)
-            return False
-        return bool(result)
+            try:
+                if cancel is not None:
+                    result = self._frozen.call(fn_name, check_cancelled=cancel)
+                else:
+                    result = self._frozen.call(fn_name)
+            except Exception as e:  # StarlarkError / primitive error / deadline abort
+                if cancel is not None and cancel.fired:
+                    print(f"[script] {self.name}.{fn_name} exceeded {self._timeout}s "
+                          f"deadline; failing closed", flush=True)
+                else:
+                    print(f"[script] {self.name}.{fn_name} raised {type(e).__name__}; "
+                          f"failing closed", flush=True)
+                return False
+            return bool(result)
+        finally:
+            _ctx_var.reset(token)

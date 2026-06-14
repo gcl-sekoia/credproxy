@@ -41,8 +41,9 @@ class _Ctx:
     """Shared context base: the secret door + encoding primitives.
 
     A scheme reaches the real value only via `secret()` and never sees the
-    mitmproxy objects directly (this mirrors the OpaquePythonObject the Starlark
-    escape hatch will hand scripts later)."""
+    mitmproxy objects directly. The Starlark escape hatch goes further: a script
+    has no ctx handle at all -- it calls flat primitives that read an implicit
+    ctx the runtime binds for the call (see starlark_runtime)."""
 
     def __init__(self, secrets: dict[str, str], params: dict,
                  placeholder: str | None):
@@ -74,6 +75,8 @@ class RequestCtx(_Ctx):
     scheme params; a scheme reads/modifies the request only through these
     primitives.
     """
+
+    phase = "request"
 
     def __init__(self, request, secrets: dict[str, str], params: dict,
                  placeholder: str | None):
@@ -124,6 +127,8 @@ class ResponseCtx(_Ctx):
     primitives act on the response, not the request.
     """
 
+    phase = "response"
+
     def __init__(self, flow, secrets: dict[str, str], params: dict,
                  placeholder: str | None):
         super().__init__(secrets, params, placeholder)
@@ -144,6 +149,12 @@ class ResponseCtx(_Ctx):
 
     def request_header_get(self, name: str) -> str | None:
         return self._flow.request.headers.get(name)
+
+    def request_body_text(self) -> str | None:
+        return self._flow.request.text
+
+    def request_body_bytes(self) -> bytes:
+        return self._flow.request.content or b""
 
     # -- the response (read / mutate) --
     @property
