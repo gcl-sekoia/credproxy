@@ -46,6 +46,16 @@ image = "{image}"
 # Where the persistent home volume mounts inside the workspace.
 # home = "/root"
 
+# User that `enter` runs as (docker exec -u). The user must exist in the
+# image -- built in, or created by `setup` (which always runs as root, so it
+# can `useradd` + chown the home volume). Exec-only: changing it never
+# recreates the container, and `enter --user NAME` overrides it per session.
+# user = "dev"
+
+# Escape hatch: extra flags spliced into `docker exec` for `enter`
+# (e.g. a working dir or env). credproxy keeps control of -i/-t/-d. Exec-only.
+# exec_flags = ["--workdir", "/srv"]
+
 # Host paths bind-mounted into the workspace. Each entry is
 # "SRC:DST" or "SRC:DST:ro"; ~ is expanded on SRC.
 # mounts = [
@@ -166,12 +176,30 @@ def load_config(ws: Workspace) -> dict:
                 f"{ws.config_path}: setup[{i}] must be a string"
             )
 
+    # user: optional user that `enter` execs as (docker exec -u). Exec-only, so
+    # NOT part of the spec hash -- changing it never recreates the container; it
+    # takes effect on the next `enter`. The user must exist in the image (built
+    # in or created by `setup`, which always runs as root).
+    user = raw.get("user")
+    if user is not None and (not isinstance(user, str) or not user):
+        raise ConfigError(f"{ws.config_path}: `user` must be a non-empty string")
+
+    # exec_flags: escape hatch -- extra flags spliced into `docker exec` for
+    # `enter` (e.g. ["--workdir", "/srv"], ["--env", "FOO=bar"]). credproxy keeps
+    # ownership of the session-control flags (-i/-t/-d), so these can't break
+    # session tracking. Exec-only, like `user`; not part of the spec.
+    exec_flags = raw.get("exec_flags") or []
+    if not isinstance(exec_flags, list) or not all(isinstance(f, str) for f in exec_flags):
+        raise ConfigError(f"{ws.config_path}: `exec_flags` must be an array of strings")
+
     return {
         "image": image,
         "home": home,
         "mounts": mounts,
         "env": env,
         "setup": setup,
+        "user": user,
+        "exec_flags": exec_flags,
     }
 
 

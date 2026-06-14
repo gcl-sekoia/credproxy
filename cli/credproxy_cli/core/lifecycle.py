@@ -691,7 +691,30 @@ def _count_live_sessions(ws: Workspace, exclude_pid: int | None = None) -> int:
     return count
 
 
-def enter_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop) -> int:
+def _enter_exec_cmd(cfg: dict, container: str, cmd: list[str], *,
+                    user_override: str | None, isatty: bool) -> list[str]:
+    """Assemble the `docker exec` argv for `enter`.
+
+    Ordering exploits docker's last-wins flag parsing to keep credproxy in
+    control of session behaviour while still honouring `user` + the `exec_flags`
+    escape hatch: config `user`, then `exec_flags` (may override -u or add
+    -w/-e), then the per-session `user_override`, then credproxy's session-control
+    flags as EXPLICIT booleans last -- so a stray -d/-t/-i in `exec_flags` can't
+    detach the session or break pidfile/auto-stop tracking."""
+    out = ["docker", "exec"]
+    if cfg.get("user") and not user_override:
+        out += ["-u", cfg["user"]]
+    out += cfg.get("exec_flags") or []
+    if user_override:
+        out += ["-u", user_override]
+    out += ["--interactive=true", f"--tty={'true' if isatty else 'false'}", "--detach=false"]
+    out.append(container)
+    out += cmd
+    return out
+
+
+def enter_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop,
+                    user_override: str | None = None) -> int:
     """Start the workspace (if not running), run `cmd` inside it, and handle
     auto-stop when the session ends.
 
@@ -701,9 +724,12 @@ def enter_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop) -> in
     running. This uses subprocess.run (not os.execvp) so we can clean up and
     check auto-stop after the command exits.
 
-    TTY forwarding: -t is passed when sys.stdin is a TTY. -i is always passed
-    so stdin is wired even in non-interactive use (consistent with the old
-    os.execvp path).
+    User: the config `user` runs the exec as that user (`docker exec -u`);
+    `user_override` (from `enter --user`) beats it for one session. The escape
+    hatch `exec_flags` is spliced in too. Ordering exploits docker's last-wins
+    parsing: config user, then exec_flags (may override -u or add -w/-e), then
+    the override, then credproxy's session-control flags as EXPLICIT booleans
+    last -- so a stray -d/-t/-i in exec_flags can't break session tracking.
 
     Signal handling: subprocess.run propagates SIGINT to the subprocess via
     the normal terminal signal delivery; we do NOT set up SIGINT forwarding
@@ -713,13 +739,12 @@ def enter_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop) -> in
     import sys
 
     start_workspace(ws, notify)
+    cfg = load_config(ws)
 
-    # Build the docker exec command.
-    exec_cmd = ["docker", "exec", "-i"]
-    if sys.stdin.isatty():
-        exec_cmd.append("-t")
-    exec_cmd.append(ws.ws_container)
-    exec_cmd += cmd
+    exec_cmd = _enter_exec_cmd(
+        cfg, ws.ws_container, cmd,
+        user_override=user_override, isatty=sys.stdin.isatty(),
+    )
 
     # Register session pidfile.
     pid = os.getpid()

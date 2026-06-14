@@ -36,6 +36,14 @@ image = "python:3.12-slim"
 # Where the persistent home volume mounts inside the workspace.
 home = "/root"
 
+# User that `enter` runs as (docker exec -u). Must exist in the image or be
+# created by `setup` (which runs as root). Exec-only — no recreate.
+user = "dev"
+
+# Escape hatch: extra flags spliced into `docker exec` for `enter`.
+# credproxy keeps control of -i/-t/-d. Exec-only.
+exec_flags = ["--workdir", "/srv"]
+
 # Host paths bind-mounted in. Each entry is "SRC:DST" or "SRC:DST:ro".
 mounts = [
   "~/code:/code",
@@ -89,6 +97,20 @@ drift**: it requires recreating the workspace container, which happens on the
 next `start` (the home volume is preserved). Editing bindings does **not**
 require a recreate — see below.
 
+### Exec settings
+
+These shape how `enter` runs commands in the container; they are **exec-only**
+(not part of the container spec), so changing them takes effect on the next
+`enter` with **no recreate**.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `user` | string | image default (root) | Runs `enter` (and `enter -- cmd`) as this user via `docker exec -u`. The user must exist in the image — built in, or created by `setup`, which always runs as **root** (so it can `useradd`, add sudoers, and `chown` the home volume to the user). `enter --user NAME` overrides it for one session (e.g. `enter --user root` for a debug shell). |
+| `exec_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the `docker exec` for `enter` (e.g. `["--workdir", "/srv"]`, `["--env", "FOO=bar"]`). credproxy keeps ownership of the session-control flags (`-i`/`-t`/`-d`), so these can't detach the session or break auto-stop. |
+
+`setup` runs as root regardless of `user`, so it is the place to provision a
+non-root user (create it, grant sudo, chown its home).
+
 ### Bindings
 
 A `[[binding]]` block ties an **injector** (how a credential is shaped into a
@@ -139,7 +161,7 @@ file. You can always skip the command and edit the TOML directly.
 | Command | Effect on the config |
 |---|---|
 | `credproxy workspace create NAME [--image IMG]` | Scaffold `<name>.toml` (and the state dir + `auth.token`). Does not start anything. |
-| `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E]` | Append a `[[binding]]` block, materializing `name`/`placeholder` immediately. Validates the whole set before writing, so a rejected binding never lands in the file. Repeat `--secret SLOT=REF` for a multi-slot secret. |
+| `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E]` | Append a `[[binding]]` block, materializing `name`/`placeholder` immediately. Validates the whole set before writing, so a rejected binding never lands in the file. Repeat `--secret SLOT=REF` for a multi-slot secret; a single `--secret SLOT=REF` works too when `SLOT` is the scheme's slot name (e.g. `jwt-bearer`'s `private_key`). |
 | `credproxy workspace NAME binding add --preset PRESET --provider P --secret REF` | Generate a coordinated binding set from a preset (e.g. `github`), all sharing one placeholder. The preset manages name/placeholder/env/host. |
 | `credproxy workspace NAME binding remove BINDING_NAME` | Remove that binding's block (surgical text edit). Reversible in principle, but loses tuning — gated by confirmation when targeting the default workspace on the loose surface. |
 | `credproxy workspace NAME binding list` | Read and print the bindings (materializing any missing `name`/`placeholder` first). Shows name, injector, provider, secret-id, hosts, env, and placeholder. |

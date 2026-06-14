@@ -157,12 +157,13 @@ def do_list(ctx: Ctx, filter_: str | None) -> None:
     render.OUT.workspace_list(rows)
 
 
-def do_enter(ctx: Ctx, name: str | None, trailing: list[str]) -> None:
+def do_enter(ctx: Ctx, name: str | None, trailing: list[str],
+             user_override: str | None = None) -> None:
     if ctx.json:
         fail("enter does not support --json (it execs an interactive shell)")
     ws = _resolve_ws(ctx, name)
     cmd = trailing or ["bash"]
-    exit_code = lifecycle.enter_workspace(ws, cmd, notify=say)
+    exit_code = lifecycle.enter_workspace(ws, cmd, notify=say, user_override=user_override)
     sys.exit(exit_code)
 
 
@@ -692,7 +693,10 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="credproxy workspace", add_help=False)
     sub = parser.add_subparsers(dest="verb", required=True)
 
-    sub.add_parser("enter")
+    p_enter = sub.add_parser("enter")
+    # One-session override of the config `user` (e.g. `enter --user root` for a
+    # debug shell in a non-root workspace) without editing the config file.
+    p_enter.add_argument("--user", dest="enter_user", default=None)
     sub.add_parser("edit")
     sub.add_parser("start")
     sub.add_parser("stop")
@@ -842,7 +846,7 @@ def _run_ws_verb(
     a = _build_leaf_parser().parse_args(verb_argv)
     verb = a.verb
     if verb == "enter":
-        do_enter(ctx, name, trailing)
+        do_enter(ctx, name, trailing, a.enter_user)
     elif verb == "edit":
         do_edit(ctx, name)
     elif verb == "start":
@@ -910,15 +914,14 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
         return
 
     if head in _ALIAS_TO_WS_VERB:
-        # Optional trailing NAME overrides the default.
+        # A leading non-flag token overrides the default workspace
+        # (`credp enter myproj`); flags are forwarded to the verb parser
+        # (`credp enter --user root`, optionally `credp enter myproj --user root`).
         name = None
-        verb_rest = rest
-        # For verbs that take no further positional args, a lone trailing
-        # token is an explicit workspace name (`credp enter myproj`).
-        if head in {"enter", "edit", "start", "stop", "delete", "apply", "inspect", "logs"}:
-            if rest:
-                name = rest[0]
-        _run_ws_verb(ctx, name, [head], trailing)
+        verb_args = list(rest)
+        if verb_args and not verb_args[0].startswith("-"):
+            name = verb_args.pop(0)
+        _run_ws_verb(ctx, name, [head, *verb_args], trailing)
         return
 
     fail(f"unknown command '{head}'")

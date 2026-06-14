@@ -320,3 +320,58 @@ def test_spec_hash_changes_on_proxy_id(xdg):
 
     cfg = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     assert workspace_spec_hash(cfg, "a") != workspace_spec_hash(cfg, "b")
+
+
+def test_spec_hash_ignores_user_and_exec_flags(xdg):
+    """user/exec_flags are exec-only -> changing them must NOT change the spec
+    hash (no container recreate)."""
+    from credproxy_cli.core.config import workspace_spec_hash
+
+    base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
+    withuser = {**base, "user": "dev", "exec_flags": ["--workdir", "/srv"]}
+    assert workspace_spec_hash(base, "p") == workspace_spec_hash(withuser, "p")
+
+
+# ---- user / exec_flags -------------------------------------------------------
+
+
+def test_load_config_user_and_exec_flags(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "u", """
+        image = "alpine:3"
+        user = "dev"
+        exec_flags = ["--workdir", "/srv"]
+    """)
+    cfg = load_config(Workspace("u"))
+    assert cfg["user"] == "dev"
+    assert cfg["exec_flags"] == ["--workdir", "/srv"]
+
+
+def test_load_config_user_exec_flags_default(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "d", 'image = "alpine:3"\n')
+    cfg = load_config(Workspace("d"))
+    assert cfg["user"] is None
+    assert cfg["exec_flags"] == []
+
+
+def test_load_config_user_not_string(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nuser = 5\n')
+    with pytest.raises(ConfigError, match="`user` must be a non-empty string"):
+        load_config(Workspace("b"))
+
+
+def test_load_config_exec_flags_not_list_of_strings(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nexec_flags = [1, 2]\n')
+    with pytest.raises(ConfigError, match="`exec_flags` must be an array of strings"):
+        load_config(Workspace("b"))
