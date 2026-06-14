@@ -59,24 +59,27 @@ DEFAULT_TIMEOUT = 2.0
 _GLOBALS = starlark.Globals.standard()
 
 
-def make_deadline_cancel(timeout_seconds: float, check_every: int = 256):
-    """A `check_cancelled` callback that aborts evaluation after a wall-clock
-    deadline. starlark-pyo3 fires it every ~1000 instructions; to keep the
-    clock read cheap it only samples `time.monotonic()` every `check_every`
-    fires (a power of two -- larger = coarser but cheaper; 256 ≈ 25-40ms
-    response). Once the deadline passes, every subsequent fire returns True."""
-    mask = check_every - 1
-    end = time.monotonic() + timeout_seconds
-    n = [0]
-    cancelled = [False]
+class make_deadline_cancel:
+    """A `check_cancelled` callback (callable) that aborts evaluation after a
+    wall-clock deadline. starlark-pyo3 fires it every ~1000 instructions; to
+    keep the clock read cheap it only samples `time.monotonic()` every
+    `check_every` fires (a power of two -- larger = coarser but cheaper; 256 ≈
+    25-40ms response). Once the deadline passes, every subsequent fire returns
+    True. `.fired` records whether the deadline tripped, so the caller can tell
+    a timeout abort from an ordinary script error (both surface as
+    StarlarkError)."""
 
-    def cancel() -> bool:
-        n[0] += 1
-        if n[0] & mask == 0:
-            cancelled[0] = time.monotonic() >= end
-        return cancelled[0]
+    def __init__(self, timeout_seconds: float, check_every: int = 256):
+        self._mask = check_every - 1
+        self._end = time.monotonic() + timeout_seconds
+        self._n = 0
+        self.fired = False
 
-    return cancel
+    def __call__(self) -> bool:
+        self._n += 1
+        if self._n & self._mask == 0 and time.monotonic() >= self._end:
+            self.fired = True
+        return self.fired
 
 
 def _detect_call_cancel() -> bool:
@@ -217,16 +220,18 @@ class ScriptedScheme:
         the real credential to stdout, defeating the non-exfiltration guarantee.
         """
         opaque = starlark.OpaquePythonObject(ctx)
+        cancel = make_deadline_cancel(self._timeout) if _CALL_SUPPORTS_CANCEL else None
         try:
-            if _CALL_SUPPORTS_CANCEL:
-                result = self._frozen.call(
-                    fn_name, opaque,
-                    check_cancelled=make_deadline_cancel(self._timeout),
-                )
+            if cancel is not None:
+                result = self._frozen.call(fn_name, opaque, check_cancelled=cancel)
             else:
                 result = self._frozen.call(fn_name, opaque)
         except Exception as e:  # StarlarkError / primitive error / deadline abort
-            print(f"[script] {self.name}.{fn_name} raised {type(e).__name__}; "
-                  f"failing closed", flush=True)
+            if cancel is not None and cancel.fired:
+                print(f"[script] {self.name}.{fn_name} exceeded {self._timeout}s "
+                      f"deadline; failing closed", flush=True)
+            else:
+                print(f"[script] {self.name}.{fn_name} raised {type(e).__name__}; "
+                      f"failing closed", flush=True)
             return False
         return bool(result)

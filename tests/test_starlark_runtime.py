@@ -189,12 +189,14 @@ def test_make_deadline_cancel_fires_past_deadline():
     results = [cancel() for _ in range(8)]
     assert any(results)          # fires once the sample interval is hit
     assert results[-1] is True   # stays cancelled
+    assert cancel.fired is True  # records the trip (for accurate logging)
 
 
 def test_make_deadline_cancel_holds_before_deadline():
     from starlark_runtime import make_deadline_cancel
     cancel = make_deadline_cancel(timeout_seconds=60.0, check_every=4)
     assert not any(cancel() for _ in range(8))
+    assert cancel.fired is False
 
 
 def test_call_cancel_support_is_a_bool():
