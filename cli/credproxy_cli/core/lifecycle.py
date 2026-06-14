@@ -32,7 +32,7 @@ from .config import (
     render_template,
     workspace_spec_hash,
 )
-from .errors import DockerError, ImageError, WorkspaceError
+from .errors import DockerError, ImageError, ProxyError, WorkspaceError
 from .imageenv import ImageEnv
 from .workspace import Workspace, ensure_token
 from .paths import (
@@ -246,6 +246,28 @@ def stop_workspace(ws: Workspace) -> None:
     docker.docker_quiet(["stop", "-t", "1", ws.proxy_container])
 
 
+def _proxy_diagnostics(ws: Workspace) -> str:
+    """Explain why the proxy isn't answering /health, by inspecting its
+    container. The common case is a crash on boot (the container has exited);
+    surface its exit code and recent log tail so the failure is actionable
+    without a second command."""
+    status = docker.container_status(ws.proxy_container)
+    if status is None:
+        return f"  (the proxy container {ws.proxy_container} is gone)"
+    if status == "exited":
+        code = docker.inspect(ws.proxy_container, "{{.State.ExitCode}}") or "?"
+        head = f"  the proxy container exited (code {code}) -- it crashed on startup."
+    else:
+        head = f"  the proxy container is '{status}' but not answering /health."
+    lines = [head]
+    tail = [ln for ln in docker.logs_tail(ws.proxy_container, 20).splitlines() if ln.strip()]
+    if tail:
+        lines.append("  last proxy log lines:")
+        lines += [f"    {ln}" for ln in tail[-12:]]
+    lines.append(f"  full logs: credproxy workspace {ws.name} logs")
+    return "\n".join(lines)
+
+
 def start_workspace(ws: Workspace, notify: Notify = _noop) -> None:
     """Idempotently bring the workspace to fully-running. Auto-creates
     the workspace files if missing. Multiple workspaces run independently;
@@ -283,7 +305,13 @@ def start_workspace(ws: Workspace, notify: Notify = _noop) -> None:
 
     # Resolve the ephemeral host port assigned to this workspace's proxy.
     host_port = docker.resolve_host_port(ws.proxy_container, meta.http_port)
-    wait_for_ready(host_port)
+    try:
+        wait_for_ready(host_port)
+    except ProxyError as e:
+        # The bare readiness error ("Connection refused") hides the usual
+        # cause: the proxy crashed on boot. Surface its exit + log tail inline
+        # so the user doesn't have to run `logs` separately to find out.
+        raise ProxyError(f"{e}\n{_proxy_diagnostics(ws)}") from e
 
     # Always re-push: the proxy's tmpfs config does not survive a
     # `docker start`, and re-pushing also picks up config file edits.

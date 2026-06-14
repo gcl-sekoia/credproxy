@@ -70,6 +70,21 @@ def container_status(name: str) -> str | None:
     return inspect(name, "{{.State.Status}}")
 
 
+def logs_tail(name: str, n: int = 20) -> str:
+    """Last `n` log lines of a container, stdout+stderr MERGED (tracebacks land
+    on the container's stderr), best-effort -- '' if unavailable. Used to
+    surface a crashed proxy's reason inline rather than via a separate command."""
+    r = subprocess.run(
+        ["docker", "logs", "--tail", str(n), name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        return ""
+    return r.stdout + r.stderr
+
+
 def resolve_host_port(container_name: str, container_port: int) -> int:
     """Return the host port Docker mapped to *container_port* for *container_name*.
 
