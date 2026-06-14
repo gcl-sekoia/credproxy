@@ -352,8 +352,6 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
 
-    from ..core.schemes import get_scheme
-
     injector = find_injector(a.injector)
     find_provider(a.provider)
 
@@ -365,7 +363,7 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     # Sign schemes (sigv4, ...) hold no inert placeholder; only substitute
     # schemes do, and only those get one auto-generated.
-    if get_scheme(injector.scheme).uses_placeholder:
+    if injector.spec.uses_placeholder:
         placeholder = a.placeholder or injector.placeholder.generate()
     else:
         placeholder = a.placeholder
@@ -610,6 +608,10 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False, proxy_onl
         "docker", "run", "--rm",
         "-v", f"{PROXY_DIR}:{meta.source}",
         "-v", f"{TESTS_DIR}:/opt/tests",
+        # Read-only so the proxy suite can validate the CLI's bundled scripts
+        # (the dogfood .star) against the Python built-ins -- single source of
+        # truth, even though the proxy never reads cli/ at runtime.
+        "-v", f"{REPO_ROOT / 'cli'}:/opt/cli:ro",
         "-w", "/opt",
         "--entrypoint", "python",
         IMAGE_TAG,

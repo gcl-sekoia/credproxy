@@ -27,7 +27,7 @@ from typing import Callable
 from .errors import ConfigError
 from .injectors import Injector, find_injector
 from .providers import fetch_many as provider_fetch_many
-from .schemes import get_scheme, location_key
+from .schemes import location_key
 from .workspace import Workspace
 
 import tomllib
@@ -167,7 +167,7 @@ def validate(bindings: list[Binding], source: str) -> None:
         # injector + provider must exist (raises InjectorError/ProviderError).
         injector = find_injector(b.injector)
         find_provider(b.provider)
-        spec = get_scheme(injector.scheme)
+        spec = injector.spec
 
         # secret slots must match the scheme's declared slots.
         got = set(secret_refs(b))
@@ -341,7 +341,7 @@ def materialize_bindings(ws: Workspace, notify: Notify = _noop) -> list[Binding]
             injector = find_injector(res.injector)
             # Only the substitute family holds an inert placeholder; sign
             # schemes (sigv4, ...) compute auth material and have none.
-            if get_scheme(injector.scheme).uses_placeholder:
+            if injector.spec.uses_placeholder:
                 ph = injector.placeholder.generate()
                 text = _insert_line_in_block(text, idx, f'placeholder = {_toml_str(ph)}')
                 resolved[idx] = replace(res, placeholder=ph)
@@ -486,10 +486,12 @@ def wire_config(
 
     `fetch_many` is injected for testing; defaults to the real provider exec.
     """
+    from .scripts import find_script
+
     wire_bindings = []
     for b in bindings:
         injector = find_injector(b.injector)
-        spec = get_scheme(injector.scheme)
+        spec = injector.spec
         if spec.uses_placeholder and b.placeholder is None:
             raise ConfigError(
                 f"binding '{b.name}' has no placeholder; materialize it first"
@@ -504,6 +506,16 @@ def wire_config(
             "params": injector.params,
             "secret": secret,
         }
+        if injector.scheme == "script":
+            # Push the script SOURCE plus the metadata the proxy can't infer
+            # (the CLI can't run Starlark): the proxy compiles it into a
+            # ScriptedScheme. The push model -- proxy stays stateless.
+            entry["script"] = injector.script
+            entry["script_source"] = find_script(injector.script).source
+            entry["family"] = spec.family
+            entry["slots"] = list(spec.slots)
+            entry["location_kind"] = spec.location_kind
+            entry["header_default"] = spec.header_default
         if b.placeholder is not None:
             entry["placeholder"] = b.placeholder
         # env: prefer the binding-level override, fall back to the injector's

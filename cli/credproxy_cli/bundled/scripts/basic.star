@@ -1,9 +1,9 @@
-# Dogfood: the built-in `basic` scheme re-implemented as a Starlark script.
+# credproxy bundled script: basic
 #
-# HTTP Basic decode-and-swap: decode `Authorization: Basic`, swap the component
-# equal to the placeholder (password by default, or username) for the real
-# value, re-encode. The auth-scheme token is matched case-insensitively
-# (RFC 7235). Behaviourally identical to proxy/schemes.py BasicScheme.
+# A Starlark re-implementation of the built-in `basic` scheme -- an authoring
+# template. HTTP Basic decode-and-swap: decode `Authorization: Basic`, swap the
+# component equal to the placeholder (password by default, or username) for the
+# real value, re-encode. The auth-scheme token is matched case-insensitively.
 
 def on_request(ctx):
     header = param(ctx, "header", "Authorization")

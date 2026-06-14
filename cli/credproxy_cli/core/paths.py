@@ -56,6 +56,13 @@ def injectors_config_dir() -> Path:
     return config_dir() / "injectors"
 
 
+def scripts_config_dir() -> Path:
+    """User Starlark-script registry: $XDG_CONFIG_HOME/credproxy/scripts/.
+    Scripts back a scripted injector (scheme = "script"); the CLI reads the
+    .star source and pushes it to the proxy."""
+    return config_dir() / "scripts"
+
+
 # Bundled definitions ship in the package; they double as scaffold templates.
 BUNDLED_DIR = Path(__file__).resolve().parent.parent / "bundled"
 
@@ -66,6 +73,10 @@ def bundled_providers_dir() -> Path:
 
 def bundled_injectors_dir() -> Path:
     return BUNDLED_DIR / "injectors"
+
+
+def bundled_scripts_dir() -> Path:
+    return BUNDLED_DIR / "scripts"
 
 
 def state_dir() -> Path:

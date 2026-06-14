@@ -1,8 +1,8 @@
-# Dogfood: the built-in `body` scheme re-implemented as a Starlark script.
+# credproxy bundled script: body
 #
-# Substring-swap the placeholder for the real value anywhere in the request
-# body (OAuth2 client-credentials, key-in-body APIs). Behaviourally identical
-# to proxy/schemes.py BodyScheme.
+# A Starlark re-implementation of the built-in `body` scheme -- an authoring
+# template. Substring-swap the placeholder for the real value anywhere in the
+# request body (OAuth2 client-credentials, key-in-body APIs).
 
 def on_request(ctx):
     text = body_text(ctx)

@@ -30,7 +30,7 @@ from pathlib import Path
 
 from .errors import InjectorError
 from .paths import bundled_injectors_dir, injectors_config_dir
-from .schemes import get_scheme, merge_params
+from .schemes import SchemeSpec, build_script_spec, get_scheme, merge_params
 
 import tomllib
 
@@ -69,16 +69,21 @@ class Injector:
     params (merged with the scheme's defaults), the suggested env var, and the
     placeholder pattern the workspace holds.
 
-    `scheme` selects the proxy-side mechanism (substitute family: bearer/basic/
-    body; sign family later). `params` is scheme-defined and passed through to
-    the proxy verbatim on the wire (e.g. bearer/basic's `header`)."""
+    `scheme` is the wire dispatch key -- a built-in scheme name (bearer/basic/
+    body/sigv4) or "script" for a scripted injector. `spec` is the resolved
+    SchemeSpec (family/slots/wire-location): from CATALOG for a built-in, or
+    declared in the TOML for a scripted injector. `script` is the `.star` file
+    name when scheme == "script" (its source is read+pushed at wire time).
+    `params` is passed to the proxy verbatim (e.g. bearer/basic's `header`)."""
 
     name: str
     scheme: str
+    spec: SchemeSpec
     params: dict
     env: str | None
     placeholder: Placeholder
     source: str  # "user" or "bundled"
+    script: str | None = None
 
 
 def _placeholder_from(raw: dict, name: str) -> Placeholder:
@@ -120,7 +125,28 @@ def _parse(path: Path, name: str, source: str) -> Injector:
         raise InjectorError(
             f"injector '{name}': `scheme` is required and must be a non-empty string"
         )
-    spec = get_scheme(scheme_name)  # raises InjectorError on an unknown scheme
+
+    # A scripted injector (scheme = "script") declares its own family/slots/
+    # location (the CLI can't run Starlark) and names a .star file; built-in
+    # schemes get their spec from CATALOG.
+    script = None
+    if scheme_name == "script":
+        script = raw.get("script")
+        if not isinstance(script, str) or not script:
+            raise InjectorError(
+                f"injector '{name}': a scripted injector needs `script` "
+                f"(the .star file name)"
+            )
+        location_kind = raw.get("location_kind", "header")
+        spec = build_script_spec(
+            family=raw.get("family"),
+            slots=raw.get("slots"),
+            location_kind=location_kind,
+            header_default="Authorization" if location_kind == "header" else None,
+            where=f"injector '{name}'",
+        )
+    else:
+        spec = get_scheme(scheme_name)  # raises InjectorError on an unknown scheme
 
     params_raw = raw.get("params")
     if params_raw is not None and not isinstance(params_raw, dict):
@@ -141,6 +167,8 @@ def _parse(path: Path, name: str, source: str) -> Injector:
     return Injector(
         name=name,
         scheme=scheme_name,
+        spec=spec,
+        script=script,
         params=params,
         env=env,
         placeholder=_placeholder_from(raw, name),

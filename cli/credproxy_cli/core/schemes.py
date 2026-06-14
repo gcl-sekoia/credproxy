@@ -56,6 +56,10 @@ CATALOG: dict[str, SchemeSpec] = {
 }
 
 
+_FAMILIES = ("substitute", "sign")
+_LOCATION_KINDS = ("header", "body")
+
+
 def get_scheme(name: str) -> SchemeSpec:
     spec = CATALOG.get(name)
     if spec is None:
@@ -64,6 +68,40 @@ def get_scheme(name: str) -> SchemeSpec:
             f"{', '.join(sorted(CATALOG))}"
         )
     return spec
+
+
+def build_script_spec(
+    *,
+    family: str,
+    slots,
+    location_kind: str = "header",
+    header_default: str | None = "Authorization",
+    where: str = "scripted injector",
+) -> SchemeSpec:
+    """Build (and validate) a SchemeSpec for a scripted injector (scheme =
+    "script"), whose family/slots/location are declared in the TOML rather than
+    coming from CATALOG. The spec name is fixed to "script" -- the wire
+    dispatch key -- with the script source carried separately."""
+    if family not in _FAMILIES:
+        raise InjectorError(
+            f"{where}: family must be one of {', '.join(_FAMILIES)} (got {family!r})"
+        )
+    if not isinstance(slots, (list, tuple)) or not slots \
+            or not all(isinstance(s, str) and s for s in slots):
+        raise InjectorError(
+            f"{where}: slots must be a non-empty list of non-empty strings"
+        )
+    if location_kind not in _LOCATION_KINDS:
+        raise InjectorError(
+            f"{where}: location_kind must be one of "
+            f"{', '.join(_LOCATION_KINDS)} (got {location_kind!r})"
+        )
+    if header_default is not None and not isinstance(header_default, str):
+        raise InjectorError(f"{where}: header must be a string")
+    return SchemeSpec(
+        name="script", family=family, slots=tuple(slots), param_defaults={},
+        location_kind=location_kind, header_default=header_default,
+    )
 
 
 def merge_params(spec: SchemeSpec, params: dict | None) -> dict:
