@@ -46,6 +46,9 @@ scripted-injector authoring contract that builds ScriptedScheme from a binding.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
+import json
 import re
 import time
 
@@ -151,6 +154,61 @@ def _b64decode(s):
     return base64.b64decode(s).decode("utf-8")
 
 
+def _b64url_encode(s):
+    """URL-safe base64 with padding stripped (the JWT/JWS encoding)."""
+    return base64.urlsafe_b64encode(s.encode("utf-8")).rstrip(b"=").decode("ascii")
+
+
+# -- request introspection (request phase only; read-only) --
+def _method(ctx):
+    return ctx.method
+
+
+def _path(ctx):
+    return ctx.path
+
+
+def _host(ctx):
+    return ctx.host
+
+
+# -- hashing / signing (the crypto the proxy owns; scripts orchestrate it) --
+def _hex_sha1(s):
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+
+def _hex_sha256(s):
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _hmac_sha256_hex(key, msg):
+    return hmac.new(key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _rs256_sign_b64url(private_key_pem, msg):
+    """RS256 (RSASSA-PKCS1-v1_5 over SHA-256): sign `msg` with the PEM RSA
+    private key, return the signature as unpadded base64url (the JWT/JWS form).
+    Crypto stays host-owned; scripts only assemble the signing input."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    key = serialization.load_pem_private_key(private_key_pem.encode("utf-8"), password=None)
+    sig = key.sign(msg.encode("utf-8"), padding.PKCS1v15(), hashes.SHA256())
+    return base64.urlsafe_b64encode(sig).rstrip(b"=").decode("ascii")
+
+
+def _json_encode(value):
+    """Compact, deterministic JSON for a Starlark value (dict/list/str/int/bool/
+    None) -- e.g. building a JWT header/claims set. Keys keep insertion order."""
+    return json.dumps(value, separators=(",", ":"))
+
+
+def _now():
+    """Current Unix time (seconds). A trusted primitive because the sandbox has
+    no clock -- needed by time-bound signatures (OVH timestamp, JWT iat/exp)."""
+    return int(time.time())
+
+
 PRIMITIVES = {
     "header_get": _header_get,
     "header_set": _header_set,
@@ -161,6 +219,19 @@ PRIMITIVES = {
     "param": _param,
     "b64encode": _b64encode,
     "b64decode": _b64decode,
+    "b64url_encode": _b64url_encode,
+    # request introspection (request phase)
+    "method": _method,
+    "path": _path,
+    "host": _host,
+    # hashing / signing
+    "hex_sha1": _hex_sha1,
+    "hex_sha256": _hex_sha256,
+    "hmac_sha256_hex": _hmac_sha256_hex,
+    "rs256_sign_b64url": _rs256_sign_b64url,
+    # misc
+    "json_encode": _json_encode,
+    "now": _now,
 }
 
 

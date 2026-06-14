@@ -108,6 +108,53 @@ def test_body_equivalence(body):
     assert rpy.text == rst.text
 
 
+# ---- sign-family crypto/encoding primitives ----------------------------------
+
+def test_primitive_hashes():
+    from starlark_runtime import _hex_sha1, _hex_sha256, _hmac_sha256_hex
+    import hashlib
+    import hmac as _hmac
+    assert _hex_sha1("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d"
+    assert _hex_sha256("abc") == \
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    assert _hmac_sha256_hex("k", "m") == \
+        _hmac.new(b"k", b"m", hashlib.sha256).hexdigest()
+
+
+def test_primitive_b64url_unpadded_roundtrip():
+    from starlark_runtime import _b64url_encode
+    enc = _b64url_encode("subject?>")          # chars that exercise url-safe + padding
+    assert "=" not in enc and "+" not in enc and "/" not in enc
+    decoded = base64.urlsafe_b64decode(enc + "=" * (-len(enc) % 4)).decode()
+    assert decoded == "subject?>"
+
+
+def test_primitive_json_encode_compact():
+    from starlark_runtime import _json_encode
+    assert _json_encode({"alg": "RS256", "typ": "JWT"}) == '{"alg":"RS256","typ":"JWT"}'
+
+
+def test_primitive_now_is_unix_int():
+    from starlark_runtime import _now
+    assert isinstance(_now(), int) and abs(_now() - int(time.time())) < 5
+
+
+def test_primitive_rs256_sign_verifies():
+    from starlark_runtime import _rs256_sign_b64url
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()).decode()
+    msg = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJ4In0"
+    sig_b64 = _rs256_sign_b64url(pem, msg)
+    sig = base64.urlsafe_b64decode(sig_b64 + "=" * (-len(sig_b64) % 4))
+    # No exception == valid RS256 signature.
+    key.public_key().verify(sig, msg.encode(), padding.PKCS1v15(), hashes.SHA256())
+
+
 # ---- sandbox + fail-closed + timeout -----------------------------------------
 
 def test_sandbox_rejects_load_at_compile():
