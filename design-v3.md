@@ -308,8 +308,12 @@ hosts — plus per-slot placeholders for multi-slot; never provider/secret-id/re
    `oauth2-reseal` scheme (client_secret body-swap on request, mint+rewrite on
    response, `api_hosts` TLS-terminated via `extra_intercept_hosts`) covers
    OAuth2 client-credentials, with a scripted `oauth-reseal` twin. The minted
-   token's TTL comes from the response `expires_in`. Single-binding-per-token-
-   endpoint only; multi-binding disambiguation (open question below) deferred.
+   token's TTL comes from the response `expires_in`. Multiple re-seal bindings
+   may share one token endpoint: distinct placeholders disambiguate the request
+   (relaxed (host, location) collision check — co-location allowed iff each
+   binding has a distinct non-None placeholder), and the response is re-sealed
+   only for the binding whose `on_request` fired on that flow (recorded on
+   `flow.metadata`, read back in the response hook).
 
 Note: the scripted primitive surface was reworked to the flat/implicit-ctx
 "option B" model (zero-arg hooks; `req_*`/`resp_*` primitives over a contextvar-
@@ -321,10 +325,11 @@ names above are superseded by `sha1_hex`/`rs256_sign`/etc. See docs/injectors.md
 
 ## Open questions
 
-- **Re-seal token-endpoint disambiguation.** When multiple bindings mint at the
-  same token endpoint, the request-phase must match the specific binding via a
-  trigger placeholder *in the request* (body/header), not just the host. Needs
-  pinning down per provider.
+- **Re-seal token-endpoint disambiguation (RESOLVED).** Multiple bindings can
+  mint at the same token endpoint: each is disambiguated by its own placeholder
+  in the request (the (host, location) collision check now allows co-location
+  with distinct placeholders), and the response hook re-seals only for the
+  binding whose `on_request` fired on that flow (tracked via `flow.metadata`).
 - **Sign-family per-service quirks** (S3 payload signing, GitHub App's two-step
   installation-token dance, exact GCP claims) must be expressible as scheme
   *params*; a service needing imperative special-casing is a signal to add a

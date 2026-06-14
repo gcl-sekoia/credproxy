@@ -67,7 +67,11 @@ with a TTL; the data-plane swap reuses the `bearer` substitute.
 
 The binding is scoped (via `--host`) to the **token endpoint** host. The
 `api_hosts` param lists the hosts where the minted token is used; they are
-TLS-terminated so the swap applies there too. Because `api_hosts` is
+TLS-terminated so the swap applies there too. Several re-seal bindings can share
+one token endpoint (e.g. multiple OAuth2 apps on a multi-tenant IdP): each is
+told apart by its own placeholder in the request, and the response is re-sealed
+only for the binding that fired on that request — so app A's token only ever
+lands on app A's `api_hosts`. Because `api_hosts` is
 deployment-specific, you **copy** the bundled `oauth2-reseal` injector to
 `$XDG_CONFIG_HOME/credproxy/injectors/` and edit `api_hosts` (a user injector
 shadows the bundled one) — the same copy-to-edit pattern as `jwt-bearer`. A
