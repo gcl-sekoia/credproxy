@@ -121,6 +121,46 @@ def _fail(msg: str) -> None:
     raise ConfigError(f"[config] {msg}")
 
 
+def _build_scripted_scheme(entry: dict, source: str, where: str):
+    """Compile a pushed `.star` source into a ScriptedScheme (scheme="script").
+
+    The wire carries the script source plus the metadata the CLI couldn't infer
+    (family/slots/location). starlark_runtime is imported lazily so this module
+    stays importable where starlark is absent (e.g. the host-side drift test)."""
+    src = entry.get("script_source")
+    if not isinstance(src, str) or not src:
+        _fail(f"{source}: {where} scheme 'script' needs a non-empty 'script_source'")
+    name = entry.get("script")
+    if not isinstance(name, str) or not name:
+        name = "script"
+    family = entry.get("family")
+    if family not in ("substitute", "sign"):
+        _fail(f"{source}: {where}.family must be 'substitute' or 'sign'")
+    slots = entry.get("slots")
+    if not isinstance(slots, list) or not slots \
+            or not all(isinstance(s, str) and s for s in slots):
+        _fail(f"{source}: {where}.slots must be a non-empty array of strings")
+    location_kind = entry.get("location_kind", "header")
+    if location_kind not in ("header", "body"):
+        _fail(f"{source}: {where}.location_kind must be 'header' or 'body'")
+    header_default = entry.get("header_default")
+    if header_default is not None and not isinstance(header_default, str):
+        _fail(f"{source}: {where}.header_default must be a string or null")
+    try:
+        from starlark_runtime import ScriptedScheme
+    except Exception as e:  # pragma: no cover - starlark always present in proxy
+        _fail(f"{source}: scripted schemes require the starlark runtime ({e})")
+    try:
+        # A compile error here is about the host's own script source (no secret
+        # is in scope at compile time), so it is safe to surface.
+        return ScriptedScheme(
+            name, src, family=family, slots=tuple(slots),
+            location_kind=location_kind, header_default=header_default,
+        )
+    except Exception as e:
+        _fail(f"{source}: {where} script '{name}' failed to compile: {e}")
+
+
 def _check_unresolved(value: str, source: str, where: str) -> None:
     m = _SECRET_REF.search(value)
     if m:
@@ -169,13 +209,19 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
             _fail(f"{source}: {where}.hosts must be a non-empty array of strings")
 
         # --- scheme ---
+        # Built-in schemes come from the registry; "script" builds a sandboxed
+        # ScriptedScheme from the pushed source. Both duck-type schemes.Scheme,
+        # so the slot/placeholder/location checks below are uniform.
         scheme_name = entry.get("scheme")
-        if not isinstance(scheme_name, str) or scheme_name not in schemes.SCHEMES:
+        if scheme_name == "script":
+            scheme = _build_scripted_scheme(entry, source, where)
+        elif isinstance(scheme_name, str) and scheme_name in schemes.SCHEMES:
+            scheme = schemes.SCHEMES[scheme_name]
+        else:
             _fail(
                 f"{source}: {where}.scheme must be one of "
-                f"{', '.join(sorted(schemes.SCHEMES))} (got {scheme_name!r})"
+                f"{', '.join(sorted(schemes.SCHEMES))}, 'script' (got {scheme_name!r})"
             )
-        scheme = schemes.SCHEMES[scheme_name]
 
         # --- params (optional) ---
         params = entry.get("params", {})
