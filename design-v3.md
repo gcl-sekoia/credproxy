@@ -289,10 +289,15 @@ hosts — plus per-slot placeholders for multi-slot; never provider/secret-id/re
      dogfood of bearer/basic/body, proven behaviourally identical to the Python
      built-ins, with a Python-vs-Starlark benchmark. **Not yet wired into config
      dispatch** — see 3b.
-   - **3b (next):** the scripted-injector authoring contract — the injector TOML
+   - **3b (done):** the scripted-injector authoring contract — the injector TOML
      declares `scheme = "script"`, the `.star` file, and `family`/`slots`/
      `location_kind` (the host CLI stays declarative; only on_request/on_response
-     live in the script); plus `jwt-bearer`/OVH as worked examples.
+     live in the script); the CLI pushes the script source, the proxy compiles
+     it into a `ScriptedScheme`. Sign-family script primitives (`hex_sha1`,
+     `hmac_sha256_hex`, `rs256_sign_b64url`, `b64url_encode`, `json_encode`,
+     `now`, request introspection) and worked `ovh` + `jwt-bearer` bundled
+     examples ship and are tested (OVH signature self-validates; the JWT verifies
+     with `cryptography`). Closes the rest of #5.
 4. **Re-seal** (the response-phase + dynamic-placeholder store), as the additive
    extension the seams above anticipate.
 

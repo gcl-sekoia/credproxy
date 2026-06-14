@@ -189,25 +189,23 @@ reading Starlark (`family`, `slots`, and the wire `location_kind`). The script
 carries only the logic: `on_request(ctx)` (and optionally `on_response(ctx)`).
 
 ```toml
-# ~/.config/credproxy/injectors/acme.toml
+# ~/.config/credproxy/injectors/myservice.toml
 scheme = "script"
-script = "acme"              # resolves acme.star (user dir, then bundled)
+script = "myservice"         # resolves myservice.star (user dir, then bundled)
 family = "sign"              # "substitute" (placeholder) | "sign" (no placeholder)
 slots  = ["value"]           # secret slot names the script reads
 location_kind = "header"     # where it writes, for host-collision detection
-env    = "ACME_TOKEN"
+env    = "MYSERVICE_TOKEN"
 
 [params]                      # passed to the script verbatim (ctx via param())
-header = "X-Acme-Auth"
+header = "X-MyService-Auth"
 ```
 
 ```python
-# ~/.config/credproxy/scripts/acme.star
-# This API wants base64(token) in a custom header -- the proxy constructs the
-# value directly (sign family, so no placeholder rides in the workspace).
+# ~/.config/credproxy/scripts/myservice.star
 def on_request(ctx):
-    header = param(ctx, "header", "Authorization")
-    header_set(ctx, header, "Basic " + b64encode(secret(ctx)))
+    header_set(ctx, param(ctx, "header", "Authorization"),
+               "Bearer " + secret(ctx))
     return True
 ```
 
@@ -226,14 +224,99 @@ bound for the binding's already-fixed host, so even a shared third-party script
 can't choose a destination or exfiltrate the secret. Errors fail closed (the
 request is forwarded unmodified). See `proxy/starlark_runtime.py`.
 
-> **Status (design-v3 phase 3b).** The runtime, sandbox, and the contract above
-> are implemented; bundled `bearer`/`basic`/`body` scripts ship as authoring
-> templates (they re-implement the built-ins). The crypto primitives for the
-> sign-family long tail (`hmac_sha256_hex`, `jwt_sign`, request introspection)
-> and worked `jwt-bearer`/OVH examples are the next increment. Enforced runaway
-> deadlines activate once starlark-pyo3's `check_cancelled` lands on the call
-> path (until then a non-terminating script hangs the proxy — scripts are
-> trusted host config).
+### Primitives available to scripts
+
+A script defines `on_request(ctx)` (return `True` if it injected, `False` to
+skip) and optionally `on_response(ctx)`. Function names must not start with `_`.
+
+The full set of trusted primitives:
+
+| Primitive | Returns | Purpose |
+|---|---|---|
+| `secret(ctx, slot="value")` | `str` | The resolved credential for a slot — the only door to the real value. |
+| `placeholder(ctx)` | `str\|None` | The inert placeholder (substitute family). |
+| `param(ctx, key, default=None)` | `str` | An injector `[params]` value. |
+| `header_get(ctx, name)` | `str\|None` | Read a request header (request phase). |
+| `header_set(ctx, name, value)` | — | Write a request header. |
+| `body_text(ctx)` | `str\|None` | Read the request body as text. |
+| `set_body_text(ctx, text)` | — | Replace the request body. |
+| `method(ctx)` | `str` | HTTP method of the current request. |
+| `path(ctx)` | `str` | Request path including query string. |
+| `host(ctx)` | `str` | Request host. |
+| `b64encode(s)` | `str` | Standard base64-encode a UTF-8 string. |
+| `b64decode(s)` | `str` | Standard base64-decode to a UTF-8 string. |
+| `b64url_encode(s)` | `str` | Unpadded URL-safe base64 (the JWS form). |
+| `hex_sha1(s)` | `str` | Hex-encoded SHA-1 digest of a UTF-8 string. |
+| `hex_sha256(s)` | `str` | Hex-encoded SHA-256 digest. |
+| `hmac_sha256_hex(key, msg)` | `str` | Hex-encoded HMAC-SHA-256. |
+| `rs256_sign_b64url(private_key_pem, msg)` | `str` | RS256 signature of `msg`, unpadded base64url. |
+| `json_encode(value)` | `str` | Compact JSON of a dict/list/str/int/bool/None. |
+| `now()` | `int` | Current time as Unix seconds. |
+
+The crypto and encoding primitives are owned and trusted by the proxy; scripts
+orchestrate them and never implement crypto. The Starlark environment has no
+`print`, `import`, `load()`, I/O, or JSON builtin — use `json_encode()` for
+JSON serialization and `+` for string concatenation (no f-strings).
+
+### Bundled scripted injectors
+
+Two sign-family examples ship as bundled injectors.
+
+**`ovh`** — signs OVH API requests. Sets `X-Ovh-Application`,
+`X-Ovh-Consumer`, `X-Ovh-Timestamp`, and `X-Ovh-Signature` (`"$1$" +`
+hex_sha1 over the concatenated signing string). Slots: `app_key`,
+`app_secret`, `consumer_key`.
+
+```sh
+credproxy workspace NAME binding add --injector ovh --provider env \
+    --secret app_key=OVH_APP_KEY \
+    --secret app_secret=OVH_APP_SECRET \
+    --secret consumer_key=OVH_CONSUMER_KEY \
+    --host eu.api.ovh.com
+```
+
+**`jwt-bearer`** — mints a self-signed RS256 JWT assertion from an RSA private
+key and sets `Authorization: Bearer <jwt>`. Slot: `private_key`. Params:
+`iss`, `aud`, `ttl` (set in the injector TOML; copy it to your user injectors
+dir to customize, since a user injector shadows the bundled one).
+
+```sh
+credproxy workspace NAME binding add --injector jwt-bearer --provider env \
+    --secret private_key=GCP_SA_PRIVATE_KEY --host api.example.com
+```
+
+A representative excerpt from `jwt-bearer.star` showing how the primitives
+compose:
+
+```python
+def on_request(ctx):
+    now_ts = now()
+    ttl    = int(param(ctx, "ttl", "3600"))
+
+    header = json_encode({"alg": "RS256", "typ": "JWT"})
+    claims = json_encode({
+        "iss": param(ctx, "iss"),
+        "aud": param(ctx, "aud"),
+        "iat": now_ts,
+        "exp": now_ts + ttl,
+    })
+
+    signing_input = b64url_encode(header) + "." + b64url_encode(claims)
+    sig = rs256_sign_b64url(secret(ctx, "private_key"), signing_input)
+    jwt = signing_input + "." + sig
+
+    header_set(ctx, "Authorization", "Bearer " + jwt)
+    return True
+```
+
+> **Status (design-v3 phase 3b).** The runtime, sandbox, full primitive set
+> (including sign-family crypto: `hmac_sha256_hex`, `rs256_sign_b64url`,
+> `json_encode`, `now`, and request introspection), and the bundled `ovh` and
+> `jwt-bearer` examples are implemented. The runaway-deadline mechanism is
+> wired and verified against starlark-pyo3's call-path `check_cancelled`
+> (feature-detected); it activates automatically once a wheel carrying that
+> support is published. Until then a non-terminating script hangs the proxy —
+> scripts are trusted host config.
 
 ## See also
 
