@@ -251,7 +251,13 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
         _fail(f"{source}: `bindings` must be an array")
 
     names_seen: set[str] = set()
-    loc_seen: dict[tuple, str] = {}  # (host, location) -> binding name
+    # (host, location) -> {"unconditional": name|None, "by_ph": {placeholder: name}}.
+    # Two bindings may share a wire location ONLY if each is disambiguated by a
+    # distinct, non-None placeholder (the request carries one placeholder, so the
+    # matching binding is unambiguous -- this is what lets several re-seal
+    # bindings share one token endpoint). A binding with no placeholder writes
+    # unconditionally and can't share a location with anything.
+    loc_seen: dict[tuple, dict] = {}
     hosts: dict[str, list[Transform]] = {}
     inward: list[InwardBinding] = []
 
@@ -336,16 +342,35 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
         if env is not None and (not isinstance(env, str) or not env):
             _fail(f"{source}: {where}.env must be a non-empty string or absent/null")
 
-        # --- (host, location) uniqueness ---
+        # --- (host, location) uniqueness, disambiguated by placeholder ---
         loc = schemes.location_key(scheme, params)
         for host in binding_hosts:
-            key = (host, loc)
-            if key in loc_seen:
-                _fail(
-                    f"{source}: bindings '{loc_seen[key]}' and '{name}' both "
-                    f"write {loc[0]} on host '{host}'"
-                )
-            loc_seen[key] = name
+            group = loc_seen.setdefault((host, loc), {"unconditional": None, "by_ph": {}})
+            if placeholder is None:
+                # Writes the location unconditionally -> can't coexist there.
+                other = group["unconditional"] or next(iter(group["by_ph"].values()), None)
+                if other is not None:
+                    _fail(
+                        f"{source}: bindings '{other}' and '{name}' both write "
+                        f"{loc[0]} on host '{host}' (a binding with no placeholder "
+                        f"writes unconditionally and can't share a wire location)"
+                    )
+                group["unconditional"] = name
+            else:
+                if group["unconditional"] is not None:
+                    _fail(
+                        f"{source}: bindings '{group['unconditional']}' and '{name}' "
+                        f"both write {loc[0]} on host '{host}' (a binding with no "
+                        f"placeholder writes unconditionally and can't share a "
+                        f"wire location)"
+                    )
+                if placeholder in group["by_ph"]:
+                    _fail(
+                        f"{source}: bindings '{group['by_ph'][placeholder]}' and "
+                        f"'{name}' both write {loc[0]} on host '{host}' with the "
+                        f"same placeholder '{placeholder}'"
+                    )
+                group["by_ph"][placeholder] = name
 
         transform = Transform(
             name=name,

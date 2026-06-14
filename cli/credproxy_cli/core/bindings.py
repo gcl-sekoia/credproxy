@@ -155,7 +155,13 @@ def validate(bindings: list[Binding], source: str) -> None:
     from .providers import find_provider
 
     names: set[str] = set()
-    seen_loc: dict[tuple, str] = {}  # (host, location) -> binding name
+    # (host, location) -> {"unconditional": name|None, "by_ph": {placeholder: name}}.
+    # Two bindings may share a wire location only if each has a distinct
+    # placeholder (the request carries one, so the match is unambiguous -- lets
+    # several re-seal bindings share a token endpoint). Sign-family bindings have
+    # no placeholder and write unconditionally, so they can't share. Mirrors
+    # proxy/config.load_resolved.
+    seen_loc: dict[tuple, dict] = {}
     for b in bindings:
         if b.name is None:
             # Should not happen post-materialize; defensive.
@@ -181,13 +187,33 @@ def validate(bindings: list[Binding], source: str) -> None:
 
         loc = location_key(spec, injector.params)
         for host in b.hosts:
-            key = (host, loc)
-            if key in seen_loc:
-                raise ConfigError(
-                    f"{source}: bindings '{seen_loc[key]}' and '{b.name}' both "
-                    f"write {loc[0]} on host '{host}'"
-                )
-            seen_loc[key] = b.name
+            group = seen_loc.setdefault((host, loc), {"unconditional": None, "by_ph": {}})
+            if not spec.uses_placeholder:
+                other = group["unconditional"] or next(iter(group["by_ph"].values()), None)
+                if other is not None:
+                    raise ConfigError(
+                        f"{source}: bindings '{other}' and '{b.name}' both write "
+                        f"{loc[0]} on host '{host}' (a binding with no placeholder "
+                        f"writes unconditionally and can't share a wire location)"
+                    )
+                group["unconditional"] = b.name
+            else:
+                if group["unconditional"] is not None:
+                    raise ConfigError(
+                        f"{source}: bindings '{group['unconditional']}' and "
+                        f"'{b.name}' both write {loc[0]} on host '{host}' (a binding "
+                        f"with no placeholder writes unconditionally and can't share "
+                        f"a wire location)"
+                    )
+                if b.placeholder is not None and b.placeholder in group["by_ph"]:
+                    raise ConfigError(
+                        f"{source}: bindings '{group['by_ph'][b.placeholder]}' and "
+                        f"'{b.name}' both write {loc[0]} on host '{host}' with the "
+                        f"same placeholder '{b.placeholder}'"
+                    )
+                # An unmaterialized placeholder (None) will become a distinct
+                # random value, so key it by name to keep it from colliding.
+                group["by_ph"][b.placeholder or f"\x00{b.name}"] = b.name
 
 
 def load_bindings(ws: Workspace) -> list[Binding]:

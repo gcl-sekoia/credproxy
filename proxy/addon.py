@@ -45,13 +45,22 @@ class HostnameLogger:
         req = flow.request
         host = req.pretty_host
         applied: list[str] = []
+        fired: list[str] = []
         for t in creds.transforms_for(host):
             ctx = RequestCtx(req, t.secrets, t.params, t.placeholder)
             try:
                 if t.scheme.on_request(ctx):
                     applied.append(t.scheme.name)
+                    fired.append(t.name)
             except Exception as e:  # a scheme must never take the flow down
                 print(f"[scheme] {t.scheme.name} on {host} failed: {e}", flush=True)
+
+        # Record which bindings fired so the response hook runs on_response only
+        # for them. A binding keys on its own placeholder, so only the one that
+        # matched this request fires -- that's how re-seal bindings sharing a
+        # token endpoint are disambiguated (the response carries no binding id).
+        if fired:
+            flow.metadata["credproxy_fired"] = fired
 
         if applied:
             marker = f" (inject:{','.join(applied)})"
@@ -66,12 +75,20 @@ class HostnameLogger:
         # uses on_response. Iterate the same transforms so a future re-seal
         # scheme can mint a token from the response and register a dynamic
         # placeholder via creds.register_runtime(...).
+        # Only run on_response for bindings whose on_request fired on THIS flow
+        # (recorded in the request hook). No fired binding -> nothing to do.
+        fired = flow.metadata.get("credproxy_fired")
+        if not fired:
+            return
+        fired_set = set(fired)
         creds = self._state.creds
         host = flow.request.pretty_host
         # The minter lets a re-seal scheme register a dynamic placeholder
         # (placeholder -> minted token, TTL) on the API hosts via creds.
         minter = RuntimeMinter(creds, placeholders.generate)
         for t in creds.transforms_for(host):
+            if t.name not in fired_set:
+                continue
             # ResponseCtx wraps the whole flow: a re-seal scheme can read the
             # request it answered (host/path) AND read/mutate the response.
             ctx = ResponseCtx(flow, t.secrets, t.params, t.placeholder, minter=minter)

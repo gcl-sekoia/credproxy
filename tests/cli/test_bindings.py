@@ -165,15 +165,44 @@ def test_validate_duplicate_name(xdg, workspaces_dir):
 
 
 def test_validate_duplicate_host_location(xdg, workspaces_dir):
-    """Two bindings writing the same header on the same host should fail."""
+    """Two bindings writing the same header on the same host with the SAME
+    placeholder can't be told apart -> fail."""
     from credproxy_cli.core.bindings import Binding, validate
     from credproxy_cli.core.errors import ConfigError
+
+    b1 = Binding(name="b1", injector="bearer", provider="env",
+                 secret="X", hosts=("api.github.com",), placeholder="p", env=None)
+    b2 = Binding(name="b2", injector="bearer", provider="env",
+                 secret="Y", hosts=("api.github.com",), placeholder="p", env=None)
+    with pytest.raises(ConfigError, match="both write header"):
+        validate([b1, b2], "test")
+
+
+def test_validate_distinct_placeholders_share_location(xdg, workspaces_dir):
+    """Distinct placeholders disambiguate, so two bindings may share a header on
+    one host -- the rule that lets several re-seal bindings share a token
+    endpoint."""
+    from credproxy_cli.core.bindings import Binding, validate
 
     b1 = Binding(name="b1", injector="bearer", provider="env",
                  secret="X", hosts=("api.github.com",), placeholder="p1", env=None)
     b2 = Binding(name="b2", injector="bearer", provider="env",
                  secret="Y", hosts=("api.github.com",), placeholder="p2", env=None)
-    with pytest.raises(ConfigError, match="both write header"):
+    validate([b1, b2], "test")   # no raise
+
+
+def test_validate_unconditional_writers_collide(xdg, workspaces_dir):
+    """Two sign-family (no-placeholder) bindings on the same header collide --
+    nothing disambiguates them."""
+    from credproxy_cli.core.bindings import Binding, validate
+    from credproxy_cli.core.errors import ConfigError
+
+    sec = {"access_key_id": "AK", "secret_access_key": "SK"}
+    b1 = Binding(name="s1", injector="sigv4", provider="env",
+                 secret=sec, hosts=("aws.example.com",), placeholder=None, env=None)
+    b2 = Binding(name="s2", injector="sigv4", provider="env",
+                 secret=sec, hosts=("aws.example.com",), placeholder=None, env=None)
+    with pytest.raises(ConfigError, match="no placeholder"):
         validate([b1, b2], "test")
 
 

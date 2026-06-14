@@ -169,13 +169,34 @@ def test_env_empty_string_rejected():
         config.load_resolved({"bindings": [_entry(env="")]})
 
 
-def test_host_location_uniqueness_violated():
-    """Two bindings writing the same header on the same host -> ConfigError."""
+def test_host_location_same_placeholder_collides():
+    """Two bindings writing the same header on the same host with the SAME
+    placeholder can't be told apart -> ConfigError."""
     with pytest.raises(config.ConfigError, match="both write header on host"):
         config.load_resolved({"bindings": [
-            _entry(name="b1", placeholder="ph1"),
-            _entry(name="b2", placeholder="ph2"),
+            _entry(name="b1", placeholder="ph"),
+            _entry(name="b2", placeholder="ph"),
         ]})
+
+
+def test_host_location_distinct_placeholders_allowed():
+    """Distinct placeholders disambiguate, so two bindings may share a header on
+    one host (each swaps only its own placeholder) -- what lets several re-seal
+    bindings share a token endpoint."""
+    creds = config.load_resolved({"bindings": [
+        _entry(name="b1", placeholder="ph1"),
+        _entry(name="b2", placeholder="ph2"),
+    ]})
+    assert len(creds.transforms_for("api.github.com")) == 2
+
+
+def test_unconditional_writers_collide():
+    """Two no-placeholder (sign) bindings on the same header write
+    unconditionally -- nothing disambiguates them, so they collide."""
+    sig = {"name": "s1", "hosts": ["aws.example.com"], "scheme": "sigv4",
+           "secret": {"access_key_id": "AK", "secret_access_key": "SK"}}
+    with pytest.raises(config.ConfigError, match="no placeholder"):
+        config.load_resolved({"bindings": [sig, {**sig, "name": "s2"}]})
 
 
 def test_validation_uses_source_label():

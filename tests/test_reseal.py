@@ -8,10 +8,12 @@ endpoint request swap -> response mint+rewrite -> API-host swap), and the
 scripted mint_into_json primitive.
 """
 import json
+from types import SimpleNamespace
 
 import pytest
 from mitmproxy.test import tflow, tutils
 
+import addon
 import config
 import placeholders
 import schemes
@@ -210,3 +212,75 @@ def test_scripted_reseal_via_mint_primitive():
     [tr] = creds.transforms_for("api.example.com")
     assert tr.secrets == {"value": "MINTED"}
     assert tr.placeholder == ph
+
+
+# ---- multi-binding disambiguation (open question (a), now closed) ------------
+
+def test_two_reseal_bindings_share_one_token_endpoint():
+    """Two re-seal bindings on the SAME token endpoint with distinct placeholders
+    are allowed (distinct placeholders disambiguate)."""
+    creds = config.load_resolved({"bindings": [
+        {"name": "A", "hosts": ["login.example.com"], "scheme": "oauth2-reseal",
+         "params": {"api_hosts": ["api-a.com"]}, "secret": {"value": "SECRET_A"},
+         "placeholder": "ph_a"},
+        {"name": "B", "hosts": ["login.example.com"], "scheme": "oauth2-reseal",
+         "params": {"api_hosts": ["api-b.com"]}, "secret": {"value": "SECRET_B"},
+         "placeholder": "ph_b"},
+    ]})
+    assert len(creds.transforms_for("login.example.com")) == 2
+
+
+def test_multi_reseal_disambiguation_routes_response_to_the_right_binding():
+    """The response hook re-seals ONLY for the binding whose on_request fired on
+    this flow (correlated via flow.metadata) -- so app A's token lands on A's API
+    host, never B's, even though both bindings share the token endpoint."""
+    creds = config.load_resolved({"bindings": [
+        {"name": "A", "hosts": ["login.example.com"], "scheme": "oauth2-reseal",
+         "params": {"api_hosts": ["api-a.com"]}, "secret": {"value": "SECRET_A"},
+         "placeholder": "ph_a"},
+        {"name": "B", "hosts": ["login.example.com"], "scheme": "oauth2-reseal",
+         "params": {"api_hosts": ["api-b.com"]}, "secret": {"value": "SECRET_B"},
+         "placeholder": "ph_b"},
+    ]})
+    log = addon.HostnameLogger(SimpleNamespace(creds=creds))
+
+    # App A's token request carries only ph_a -> only binding A fires.
+    req = tutils.treq(host="login.example.com", method=b"POST", path=b"/token",
+                      content=b"grant_type=client_credentials&client_secret=ph_a")
+    flow = tflow.tflow(req=req, resp=True)
+    log.request(flow)
+    assert "client_secret=SECRET_A" in flow.request.text   # A injected its secret
+    assert "ph_b" not in flow.request.text and "SECRET_B" not in flow.request.text
+    assert flow.metadata["credproxy_fired"] == ["A"]
+
+    # Token response -> only A re-seals.
+    flow.response.status_code = 200
+    flow.response.text = json.dumps({"access_token": "TOKEN_A", "expires_in": 3600})
+    log.response(flow)
+
+    [a_swap] = creds.transforms_for("api-a.com")
+    assert a_swap.secrets == {"value": "TOKEN_A"}      # A's token on A's API host
+    assert creds.transforms_for("api-b.com") == []     # B untouched
+    assert json.loads(flow.response.text)["access_token"] != "TOKEN_A"  # rewritten
+
+
+def test_response_hook_skips_when_no_binding_fired():
+    """If on_request fired for nothing on this flow, the response hook is inert
+    (no minting, no body rewrite)."""
+    creds = config.load_resolved({"bindings": [
+        {"name": "A", "hosts": ["login.example.com"], "scheme": "oauth2-reseal",
+         "params": {"api_hosts": ["api-a.com"]}, "secret": {"value": "SECRET_A"},
+         "placeholder": "ph_a"},
+    ]})
+    log = addon.HostnameLogger(SimpleNamespace(creds=creds))
+    # A request that does NOT carry the placeholder -> A.on_request returns False.
+    req = tutils.treq(host="login.example.com", method=b"POST", path=b"/token",
+                      content=b"grant_type=client_credentials")
+    flow = tflow.tflow(req=req, resp=True)
+    log.request(flow)
+    assert "credproxy_fired" not in flow.metadata
+    flow.response.status_code = 200
+    flow.response.text = json.dumps({"access_token": "TOKEN_A", "expires_in": 3600})
+    log.response(flow)
+    assert creds.transforms_for("api-a.com") == []
+    assert json.loads(flow.response.text)["access_token"] == "TOKEN_A"  # not rewritten

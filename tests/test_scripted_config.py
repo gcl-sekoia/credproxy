@@ -49,12 +49,13 @@ def test_scripted_scheme_loads_and_runs():
 
 def test_scripted_scheme_location_collision_with_bearer():
     """A scripted header scheme collides with a built-in bearer on the same
-    header + host (uniform wire-location detection)."""
+    header + host when they share a placeholder (uniform wire-location
+    detection); distinct placeholders would disambiguate them."""
     with pytest.raises(config.ConfigError, match="both write header"):
         config.load_resolved({"bindings": [
-            _script_entry(name="s1", placeholder="tok_a"),
+            _script_entry(name="s1", placeholder="tok_x"),
             {"name": "s2", "hosts": ["api.example.com"], "scheme": "bearer",
-             "params": {"header": "Authorization"}, "placeholder": "ghp_b",
+             "params": {"header": "Authorization"}, "placeholder": "tok_x",
              "secret": {"value": "r"}},
         ]})
 
