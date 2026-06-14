@@ -265,6 +265,19 @@ def test_resp_json_is_total_on_non_json():
     assert flow.response.headers["X"] == "none"
 
 
+def test_req_host_returns_hostname_in_transparent_mode():
+    """Regression for #7: req_host() reads pretty_host, so it returns the
+    hostname even when the connection target (flow.request.host) is an IP."""
+    req = tutils.treq(host="10.0.0.5", method=b"GET", path=b"/", content=b"")
+    req.headers.clear()
+    req.headers["Host"] = "api.example.com"
+    ctx = schemes.RequestCtx(req, {"value": "x"}, {}, "PH")
+    s = ScriptedScheme(
+        "h", "def on_request():\n    req_set_header('X-Seen-Host', req_host())\n    return True\n")
+    assert s.on_request(ctx) is True
+    assert req.headers["X-Seen-Host"] == "api.example.com"   # not 10.0.0.5
+
+
 def test_req_getters_readable_in_response_phase():
     """`req_*` getters read the ANSWERED request during on_response."""
     src = ("def on_response():\n"

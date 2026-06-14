@@ -47,6 +47,25 @@ def test_ovh_sets_signed_headers():
     assert req.headers["X-Ovh-Consumer"] == "CK"
 
 
+def test_ovh_signs_hostname_not_ip():
+    """Regression for #7: in transparent mode flow.request.host is the
+    destination IP; the script must sign the HOSTNAME URL (from pretty_host /
+    the Host header), or OVH rejects with 'Invalid signature'."""
+    s = _scheme()
+    req = tutils.treq(host="54.88.241.89", method=b"GET", path=b"/1.0/me", content=b"")
+    req.headers.clear()
+    req.headers["host"] = "eu.api.ovh.com"   # the real hostname
+    ctx = schemes.RequestCtx(req, _secrets(), {}, None)
+
+    assert s.on_request(ctx) is True
+
+    ts = req.headers["X-Ovh-Timestamp"]
+    # Signed over the hostname URL, not https://54.88.241.89/...
+    base = "AS+CK+GET+https://eu.api.ovh.com/1.0/me++" + ts
+    expected_sig = "$1$" + hashlib.sha1(base.encode()).hexdigest()
+    assert req.headers["X-Ovh-Signature"] == expected_sig
+
+
 def test_ovh_post_with_body():
     s = _scheme()
     body = '{"description":"test"}'

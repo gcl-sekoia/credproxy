@@ -96,7 +96,10 @@ class RequestCtx(_Ctx):
 
     @property
     def host(self) -> str:
-        return self._req.host
+        # pretty_host (Host header / SNI), NOT .host -- in transparent mode
+        # .host is the destination IP, which breaks URL signatures (e.g. OVH).
+        # This is also what the addon host-scopes on, so script and binding agree.
+        return self._req.pretty_host
 
     # -- header primitives --
     def header_get(self, name: str) -> str | None:
@@ -149,7 +152,8 @@ class ResponseCtx(_Ctx):
 
     @property
     def request_host(self) -> str:
-        return self._flow.request.host
+        # pretty_host, not .host (the IP in transparent mode) -- see RequestCtx.host.
+        return self._flow.request.pretty_host
 
     def request_header_get(self, name: str) -> str | None:
         return self._flow.request.headers.get(name)
