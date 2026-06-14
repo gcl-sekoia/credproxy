@@ -19,6 +19,8 @@ bootstrap) on a separate port, so this addon never sees those flows.
 """
 from mitmproxy import http, tls
 
+import placeholders
+from config import RuntimeMinter
 from schemes import RequestCtx, ResponseCtx
 
 
@@ -66,10 +68,13 @@ class HostnameLogger:
         # placeholder via creds.register_runtime(...).
         creds = self._state.creds
         host = flow.request.pretty_host
+        # The minter lets a re-seal scheme register a dynamic placeholder
+        # (placeholder -> minted token, TTL) on the API hosts via creds.
+        minter = RuntimeMinter(creds, placeholders.generate)
         for t in creds.transforms_for(host):
             # ResponseCtx wraps the whole flow: a re-seal scheme can read the
             # request it answered (host/path) AND read/mutate the response.
-            ctx = ResponseCtx(flow, t.secrets, t.params, t.placeholder)
+            ctx = ResponseCtx(flow, t.secrets, t.params, t.placeholder, minter=minter)
             try:
                 t.scheme.on_response(ctx)
             except Exception as e:

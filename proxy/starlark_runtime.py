@@ -243,6 +243,25 @@ def _resp_json():
         return None
 
 
+# -- re-seal: mint a dynamic placeholder for a runtime-derived secret. The API
+#    hosts and target header come from the binding params (`api_hosts`,
+#    `reseal_header`), so the script just supplies the value + TTL. --
+def _mint(value, ttl):
+    """Register a runtime swap (placeholder -> value) on the binding's api_hosts
+    with `ttl` seconds, and return the placeholder."""
+    c = _require("response", "mint")
+    return c.mint(value, int(ttl), c.params.get("api_hosts"),
+                  c.params.get("reseal_header", "Authorization"))
+
+
+def _mint_into_json(field, value, ttl):
+    """mint(value, ttl), then rewrite the response body's JSON `field` to the
+    placeholder so the workspace receives the placeholder, not the real token."""
+    c = _require("response", "mint_into_json")
+    return c.mint_into_json(field, value, int(ttl), c.params.get("api_hosts"),
+                            c.params.get("reseal_header", "Authorization"))
+
+
 # -- encoding (text <-> encoding; every encode has a decode) --
 def _b64encode(s):
     """Base64-encode a str (UTF-8) -> str."""
@@ -379,6 +398,9 @@ PRIMITIVES = {
     "resp_body": _resp_body,
     "resp_set_body": _resp_set_body,
     "resp_json": _resp_json,
+    # re-seal (response phase)
+    "mint": _mint,
+    "mint_into_json": _mint_into_json,
     # encoding
     "b64encode": _b64encode,
     "b64decode": _b64decode,
@@ -450,6 +472,13 @@ class ScriptedScheme:
         if not self._has_on_response:
             return False
         return self._invoke("on_response", ctx)
+
+    def extra_intercept_hosts(self, params) -> list:
+        """A scripted re-seal injector declares the API hosts it mints onto via
+        the `api_hosts` param; they must be TLS-terminated so the runtime swap
+        applies (parity with the built-in oauth2-reseal scheme)."""
+        hosts = params.get("api_hosts") or []
+        return [h for h in hosts if isinstance(h, str) and h]
 
     def _invoke(self, fn_name: str, ctx) -> bool:
         """Run the script hook, failing CLOSED on any error (return False, log).

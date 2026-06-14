@@ -33,6 +33,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 from typing import Protocol
 from urllib.parse import unquote
 
@@ -130,9 +131,12 @@ class ResponseCtx(_Ctx):
     phase = "response"
 
     def __init__(self, flow, secrets: dict[str, str], params: dict,
-                 placeholder: str | None):
+                 placeholder: str | None, minter=None):
         super().__init__(secrets, params, placeholder)
         self._flow = flow
+        # Re-seal mint hook (a config.RuntimeMinter), injected by addon.response.
+        # None outside that path (e.g. request-only tests), where mint() errors.
+        self._minter = minter
 
     # -- the request that was sent (read-only) --
     @property
@@ -172,6 +176,28 @@ class ResponseCtx(_Ctx):
 
     def set_body_text(self, text: str) -> None:
         self._flow.response.text = text
+
+    # -- re-seal: mint a dynamic placeholder for a runtime-derived secret --
+    def mint(self, value: str, ttl: float | None, api_hosts, header: str = "Authorization") -> str:
+        """Register a runtime swap (placeholder -> value) on each API host with a
+        TTL and return the placeholder. Raises if minting isn't wired (no minter
+        -- e.g. a request-only context)."""
+        if self._minter is None:
+            raise RuntimeError("mint() requires the response addon's minter")
+        return self._minter.mint(value, ttl, api_hosts, header)
+
+    def mint_into_json(self, field: str, value: str, ttl: float | None,
+                       api_hosts, header: str = "Authorization") -> str:
+        """Mint a placeholder for `value`, then rewrite the response body's JSON
+        `field` to the placeholder (so the workspace receives the placeholder,
+        not the real minted token). Parses the body BEFORE registering, so a
+        non-JSON body fails without leaving a dangling runtime entry."""
+        text = self.body_text()
+        data = json.loads(text)              # raises on non-JSON -> fail closed
+        placeholder = self.mint(value, ttl, api_hosts, header)
+        data[field] = placeholder
+        self.set_body_text(json.dumps(data, separators=(",", ":")))
+        return placeholder
 
 
 class Scheme(Protocol):
@@ -498,7 +524,83 @@ class SigV4Scheme:
         return False
 
 
+# --------------------------------------------------------------------------
+# Re-seal family
+# --------------------------------------------------------------------------
+#
+# Pass-through keeps the durable secret out of the workspace but lets the
+# short-lived minted token land there. Re-seal closes that: the proxy intercepts
+# the token-endpoint response, holds the minted token, and hands the workspace a
+# placeholder it swaps back on API-host requests -- so even the short-lived token
+# never lands in the workspace.
+
+
+class OAuth2ResealScheme:
+    """OAuth2 client-credentials re-seal (design-v3 phase 4).
+
+    Two phases over ONE binding scoped to the TOKEN ENDPOINT host:
+      - on_request: swap the inert placeholder in the request body for the real
+        `client_secret` (so the token endpoint authenticates) -- like `body`.
+      - on_response: on a 200, pull the minted token out of the JSON body,
+        register a runtime bearer swap (placeholder -> token, TTL) on each API
+        host, and rewrite the body field to the placeholder so the workspace
+        receives the placeholder instead of the real token.
+
+    Params: `api_hosts` (required list -- where the token is used), `token_field`
+    (default "access_token"), `expires_field` (default "expires_in"), `ttl`
+    (fallback seconds when the response omits expires_field, default "3600"),
+    `reseal_header` (the API-host header the workspace sends the token in,
+    default "Authorization"). The durable `client_secret` never enters the
+    workspace; with re-seal, neither does the minted token."""
+
+    name = "oauth2-reseal"
+    family = "substitute"            # request-phase placeholder swap of the secret
+    slots = ("value",)
+    location_kind = "body"           # the token-endpoint request body
+    header_default = None
+
+    def on_request(self, ctx: RequestCtx) -> bool:
+        text = ctx.body_text()
+        if not text or ctx.placeholder is None or ctx.placeholder not in text:
+            return False
+        ctx.set_body_text(text.replace(ctx.placeholder, ctx.secret()))
+        return True
+
+    def on_response(self, ctx: ResponseCtx) -> bool:
+        if ctx.status_code != 200:
+            return False
+        text = ctx.body_text()
+        if not text:
+            return False
+        try:
+            data = json.loads(text)
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        token_field = ctx.params.get("token_field", "access_token")
+        token = data.get(token_field)
+        if not isinstance(token, str) or not token:
+            return False
+        expires_field = ctx.params.get("expires_field", "expires_in")
+        ttl = data.get(expires_field)
+        if not isinstance(ttl, (int, float)) or isinstance(ttl, bool):
+            try:
+                ttl = int(ctx.params.get("ttl", "3600"))
+            except (TypeError, ValueError):
+                ttl = 3600
+        api_hosts = ctx.params.get("api_hosts") or []
+        header = ctx.params.get("reseal_header", "Authorization")
+        ctx.mint_into_json(token_field, token, ttl, api_hosts, header)
+        return True
+
+    def extra_intercept_hosts(self, params: dict) -> list[str]:
+        """The API hosts must be intercepted (TLS-terminated) so the runtime swap
+        can apply once a token is minted -- even before the first mint."""
+        return [h for h in (params.get("api_hosts") or []) if isinstance(h, str) and h]
+
+
 SCHEMES: dict[str, Scheme] = {
     s.name: s for s in (BearerScheme(), BasicScheme(), BodyScheme(),
-                        SigV4Scheme())
+                        SigV4Scheme(), OAuth2ResealScheme())
 }

@@ -41,6 +41,7 @@ Credentials API:
     for /setup (no secret values, no provider/secret-id).
 """
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -93,23 +94,81 @@ class BindingCredentials:
         self,
         hosts: dict[str, list[Transform]],
         bindings: list[InwardBinding] | None = None,
+        clock=time.monotonic,
     ):
         self._hosts = hosts
-        self._runtime: dict[str, list[Transform]] = {}
+        # Runtime layer: host -> list of (Transform, expires_at | None). Re-seal
+        # schemes mint these at response time with a TTL; expired entries are
+        # pruned lazily on read (no background task). expires_at is in `clock`
+        # units (monotonic by default; injectable for tests).
+        self._runtime: dict[str, list[tuple[Transform, float | None]]] = {}
+        self._clock = clock
         self._bindings: list[InwardBinding] = bindings or []
 
     def intercept_hosts(self) -> set[str]:
-        return set(self._hosts) | set(self._runtime)
+        live = {h for h in list(self._runtime) if self._live(h)}
+        return set(self._hosts) | live
 
     def transforms_for(self, host: str) -> list[Transform]:
-        return list(self._hosts.get(host, [])) + list(self._runtime.get(host, []))
+        return list(self._hosts.get(host, [])) + self._live(host)
 
-    def register_runtime(self, host: str, transform: Transform) -> None:
-        """Add a runtime transform (re-seal seam; unused today)."""
-        self._runtime.setdefault(host, []).append(transform)
+    def register_runtime(self, host: str, transform: Transform,
+                         ttl: float | None = None) -> None:
+        """Add a runtime transform for `host` (the re-seal mint seam), optionally
+        expiring `ttl` seconds from now. ttl=None means it never expires."""
+        expires_at = (self._clock() + ttl) if ttl is not None else None
+        self._runtime.setdefault(host, []).append((transform, expires_at))
+
+    def _live(self, host: str) -> list[Transform]:
+        """Non-expired runtime transforms for `host`, pruning expired ones in
+        place so the store can't grow without bound."""
+        entries = self._runtime.get(host)
+        if not entries:
+            return []
+        now = self._clock()
+        live = [(t, e) for (t, e) in entries if e is None or e > now]
+        if len(live) != len(entries):
+            if live:
+                self._runtime[host] = live
+            else:
+                del self._runtime[host]
+        return [t for (t, _) in live]
 
     def inward_bindings(self) -> list[InwardBinding]:
         return list(self._bindings)
+
+
+class RuntimeMinter:
+    """Registers a runtime-derived secret as a dynamic placeholder (re-seal).
+
+    `mint(value, ttl, api_hosts, header)` generates a placeholder, registers a
+    bearer-substitute swap (placeholder -> value) on each API host with the
+    given TTL, and returns the placeholder. The data-plane swap reuses the
+    built-in bearer scheme: a dynamic placeholder is just a static one
+    registered at runtime, so the request-phase injection path is unchanged.
+
+    Lives here (not on ResponseCtx) because building a Transform couples to
+    config; the instance is injected into ResponseCtx so schemes.py stays free
+    of a config import."""
+
+    def __init__(self, creds: "BindingCredentials", generate_placeholder):
+        self._creds = creds
+        self._generate = generate_placeholder
+
+    def mint(self, value: str, ttl: float | None, api_hosts, header: str = "Authorization") -> str:
+        if not api_hosts:
+            raise ValueError("mint requires at least one api_host (binding param 'api_hosts')")
+        placeholder = self._generate()
+        transform = Transform(
+            name=f"reseal:{placeholder[:16]}",
+            scheme=schemes.SCHEMES["bearer"],
+            params={"header": header},
+            placeholder=placeholder,
+            secrets={"value": value},
+        )
+        for host in api_hosts:
+            self._creds.register_runtime(host, transform, ttl=ttl)
+        return placeholder
 
 
 class ConfigError(Exception):
@@ -234,12 +293,15 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
         params = entry.get("params", {})
         if not isinstance(params, dict):
             _fail(f"{source}: {where}.params must be an object")
-        # Param values must be strings (current schemes use only string params,
-        # e.g. `header`). A non-string would silently break injection at request
-        # time; relax this if a scheme ever needs structured params.
+        # Param values are strings (e.g. `header`) or arrays of strings (e.g. a
+        # re-seal scheme's `api_hosts`). A wrong type would silently break
+        # injection at request time, so reject it here.
         for pk, pv in params.items():
-            if not isinstance(pv, str):
-                _fail(f"{source}: {where}.params['{pk}'] must be a string")
+            if isinstance(pv, str):
+                continue
+            if isinstance(pv, list) and all(isinstance(x, str) and x for x in pv):
+                continue
+            _fail(f"{source}: {where}.params['{pk}'] must be a string or array of strings")
 
         # --- secret (slot -> value) ---
         secret = entry.get("secret")
@@ -294,6 +356,17 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
         )
         for host in binding_hosts:
             hosts.setdefault(host, []).append(transform)
+
+        # Re-seal: a scheme may need extra hosts TLS-terminated (the API hosts
+        # where a minted token is later used) even though no static transform
+        # writes there -- the runtime layer fills in once a token is minted.
+        extra = getattr(scheme, "extra_intercept_hosts", None)
+        if extra is not None:
+            for h in extra(params):
+                if not isinstance(h, str) or not h:
+                    _fail(f"{source}: {where} scheme '{scheme_name}' returned an "
+                          f"invalid extra-intercept host {h!r}")
+                hosts.setdefault(h, [])
 
         inward.append(InwardBinding(
             name=name,
