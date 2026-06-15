@@ -22,7 +22,59 @@ from .paths import (
 
 # Which bundled definition seeds each kind of scaffold.
 _INJECTOR_TEMPLATE = "bearer"  # generic bearer injector
-_PROVIDER_TEMPLATE = "env"     # env-var provider script
+_PROVIDER_TEMPLATE = "env"     # env-var provider script (the python default)
+
+PROVIDER_LANGS = ("python", "sh")
+
+# Second-language provider template: the env provider in POSIX sh + jq. Same
+# protocol and three-zone shape as the python default, so the two diff cleanly
+# (only fetch() and the dispatch syntax differ). Kept here, NOT under
+# bundled/providers/, so it doesn't show up as a real provider in `list`.
+_PROVIDER_TEMPLATE_SH = '''#!/bin/sh
+# credproxy provider: env  —  protocol: docs/providers.md  (needs jq)
+#
+# A provider is any executable speaking the batch protocol. This is the env
+# provider written in POSIX sh + jq, as a starting point: edit the metadata and
+# fetch() for your backend. Copy with `credproxy provider scaffold NAME --lang sh`.
+set -u
+
+# ════ metadata ════════════════════════════════════════════════════════
+NAME="env"
+DESCRIPTION="Host environment variables"
+PROTOCOL_VERSION=1
+HELP='Reads host environment variables.
+  ref:     the environment variable NAME (e.g. GITHUB_TOKEN)
+  example: --provider env --secret GITHUB_TOKEN
+The variable must be set in the shell that runs credproxy.'
+
+# ════ fetch one secret (the only provider-specific logic) ═════════════
+# Print the secret for "$1" on stdout and return 0; return non-zero if the ref
+# does not resolve. Swap in your backend, e.g.  op read "$1"  /  vault kv get …
+fetch() {
+  printenv "$1"
+}
+
+# ════ protocol footer (identical for every sh provider — needs jq) ════
+req=$(cat)
+printf '%s' "$req" | jq -e . >/dev/null 2>&1 || {
+  echo "$NAME provider: bad request JSON" >&2; exit 1; }
+[ "$(printf '%s' "$req" | jq -r '.version')" = "$PROTOCOL_VERSION" ] || {
+  echo "$NAME provider: unsupported version" >&2; exit 3; }
+op=$(printf '%s' "$req" | jq -r '.op')
+case "$op" in
+  describe) jq -n --arg d "$DESCRIPTION" '{description: $d}' ;;
+  help)     jq -n --arg h "$HELP"        '{help: $h}' ;;
+  get)
+    values='{}'
+    for ref in $(printf '%s' "$req" | jq -r '(.secrets // [])[]'); do
+      val=$(fetch "$ref") || { echo "$NAME provider: '$ref' not found" >&2; exit 2; }
+      values=$(printf '%s' "$values" | jq --arg k "$ref" --arg v "$val" '.[$k] = $v')
+    done
+    printf '%s' "$values" | jq -c '{values: .}'
+    ;;
+  *) echo "$NAME provider: unsupported op" >&2; exit 3 ;;
+esac
+'''
 
 
 @dataclass(frozen=True)
@@ -32,8 +84,9 @@ class ScaffoldResult:
     path: Path
 
 
-def scaffold(kind: str, name: str) -> ScaffoldResult:
-    """Copy the bundled template for `kind` into the user registry as `name`.
+def scaffold(kind: str, name: str, lang: str = "python") -> ScaffoldResult:
+    """Seed a `kind` definition into the user registry as `name`. Providers can
+    pick a template language (`python` default, or `sh` for POSIX shell + jq).
 
     Refuses to overwrite an existing file. Returns the destination path."""
     # A name is a single registry filename, never a flag or a path. Guards the
@@ -42,23 +95,32 @@ def scaffold(kind: str, name: str) -> ScaffoldResult:
     if not name or name.startswith("-") or "/" in name or name in (".", ".."):
         raise CredproxyError(f"invalid {kind} name {name!r}")
     if kind == "injector":
+        if lang != "python":
+            raise CredproxyError("--lang is only valid for `provider scaffold`")
         src = bundled_injectors_dir() / f"{_INJECTOR_TEMPLATE}.toml"
-        dst_dir = injectors_config_dir()
-        dst = dst_dir / f"{name}.toml"
-    elif kind == "provider":
-        src = bundled_providers_dir() / _PROVIDER_TEMPLATE
-        dst_dir = providers_config_dir()
-        dst = dst_dir / name
-    else:
-        raise CredproxyError(f"unknown scaffold kind {kind!r}")
+        dst = injectors_config_dir() / f"{name}.toml"
+        if dst.exists():
+            raise CredproxyError(f"{dst} already exists; refusing to overwrite")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        return ScaffoldResult(kind="injector", name=name, path=dst)
 
+    if kind != "provider":
+        raise CredproxyError(f"unknown scaffold kind {kind!r}")
+    if lang not in PROVIDER_LANGS:
+        raise CredproxyError(
+            f"unknown --lang {lang!r}; choose {' or '.join(PROVIDER_LANGS)}"
+        )
+    dst = providers_config_dir() / name
     if dst.exists():
         raise CredproxyError(f"{dst} already exists; refusing to overwrite")
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(src, dst)
-    if kind == "provider":
-        # Preserve the executable bit so the copy is directly runnable.
-        dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if lang == "sh":
+        dst.write_text(_PROVIDER_TEMPLATE_SH)
+    else:
+        shutil.copyfile(bundled_providers_dir() / _PROVIDER_TEMPLATE, dst)
+    # Preserve/set the executable bit so the provider is directly runnable.
+    dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return ScaffoldResult(kind=kind, name=name, path=dst)
 
 

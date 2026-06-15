@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# credproxy provider: env  —  protocol: docs/providers.md
+# credproxy provider: keychain  —  protocol: docs/providers.md
 #
 # A provider is a standalone executable speaking the batch protocol. Everything
 # specific to THIS provider is the metadata block and the get() function; the
 # protocol footer is identical across providers. Copy this file as a starting
 # point with `credproxy provider scaffold NAME`.
 import json
-import os
+import subprocess
 import sys
 
 # ════ metadata ═══════════════════════════════════════════════════════
-NAME = "env"
-DESCRIPTION = "Host environment variables"
+NAME = "keychain"
+DESCRIPTION = "macOS Keychain (security CLI)"
 PROTOCOL_VERSION = 1
 HELP = """\
-Reads host environment variables.
-  ref:     the environment variable NAME (e.g. GITHUB_TOKEN)
-  example: --provider env --secret GITHUB_TOKEN
-The variable must be set in the shell that runs credproxy.
+Fetches generic-password items from the macOS Keychain (security CLI).
+  ref:     the item's SERVICE NAME
+  store:   security add-generic-password -s <ref> -a "$USER" -w
+  example: --provider keychain --secret anthropic-key
+First access prompts; choose "Always Allow" for unattended use. macOS only.
 """
 
 # ════ fetch one secret (the only provider-specific logic) ═════════════
@@ -26,10 +27,18 @@ class NotFound(Exception):
 
 
 def get(ref):
-    val = os.environ.get(ref)
-    if val is None:
-        raise NotFound(f"${ref} is not set in the host environment")
-    return val
+    r = subprocess.run(
+        ["security", "find-generic-password", "-s", ref, "-w"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        raise NotFound(
+            f"no generic-password item with service {ref!r} "
+            f'(store it: security add-generic-password -s {ref} -a "$USER" -w)'
+        )
+    # `-w` prints the password with a single trailing newline; strip just that
+    # one, never more (a secret could legitimately end in \n).
+    return r.stdout.removesuffix("\n")
 
 
 # ════ protocol footer (identical for every provider — skip on a scan) ═

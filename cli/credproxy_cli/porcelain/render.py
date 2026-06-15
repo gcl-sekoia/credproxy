@@ -216,10 +216,13 @@ class Renderer:
             print(f"no {kind}s")
             return
         # Injectors carry a SCHEME column (so scripted injectors are visible as
-        # such); providers don't. Lay out whatever columns the rows have.
+        # such); providers carry a DESCRIPTION. Lay out the columns present.
         if any("scheme" in r for r in rows):
             cols = ("NAME", "SCHEME", "SOURCE")
             table = [cols] + [(r["name"], r.get("scheme", ""), r["source"]) for r in rows]
+        elif any(r.get("description") for r in rows):
+            cols = ("NAME", "SOURCE", "DESCRIPTION")
+            table = [cols] + [(r["name"], r["source"], r.get("description", "")) for r in rows]
         else:
             cols = ("NAME", "SOURCE")
             table = [cols] + [(r["name"], r["source"]) for r in rows]
@@ -248,6 +251,20 @@ class Renderer:
                 print(f"  compile error: {info['compile_error']}")
         elif info.get("scripted"):
             print("  (run with --compile to compile the .star in the proxy image)")
+
+    # -- provider show --
+    def provider_show(self, info: dict) -> None:
+        print(f"provider: {info['name']}")
+        print(f"  source:      {info['source']}")
+        print(f"  path:        {info['path']}")
+        if info.get("description"):
+            print(f"  description: {info['description']}")
+        if info.get("help"):
+            print("  help:")
+            for line in info["help"].rstrip("\n").splitlines():
+                print(f"    {line}")
+        elif not info.get("description"):
+            print("  (this provider implements neither describe nor help)")
 
     # -- preset list --
     def preset_list(self, rows: list[dict]) -> None:
@@ -336,6 +353,9 @@ class JsonRenderer(Renderer):
 
     def preset_list(self, rows: list[dict]) -> None:
         self._emit(rows)
+
+    def provider_show(self, info: dict) -> None:
+        self._emit(info)
 
     def scaffolded_script(self, name: str, injector_path: str,
                           script_path: str, family: str) -> None:

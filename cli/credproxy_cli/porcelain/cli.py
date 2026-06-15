@@ -557,11 +557,14 @@ def _do_binding_test_adhoc(ctx: Ctx, name: str | None, a: argparse.Namespace) ->
 # ---- injector / provider -----------------------------------------------------
 
 
-def do_scaffold(ctx: Ctx, kind: str, name: str) -> None:
+def do_scaffold(ctx: Ctx, kind: str, name: str, lang: str = "python") -> None:
     from ..core.scaffold import scaffold
 
-    result = scaffold(kind, name)
+    result = scaffold(kind, name, lang)
     render.OUT.scaffolded(result.kind, result.name, str(result.path))
+    if kind == "provider":
+        say("the template is just a starting point -- a provider can be any "
+            "executable that speaks the JSON protocol (docs/providers.md).")
 
 
 def do_def_list(ctx: Ctx, kind: str) -> None:
@@ -578,7 +581,10 @@ def do_def_list(ctx: Ctx, kind: str) -> None:
         ]
     else:
         from ..core.providers import list_providers
-        rows = [{"name": d.name, "source": d.source} for d in list_providers()]
+        rows = [
+            {"name": d.name, "source": d.source, "description": d.description or ""}
+            for d in list_providers()
+        ]
     render.OUT.def_list(kind, rows)
 
 
@@ -586,6 +592,19 @@ def do_preset_list(ctx: Ctx) -> None:
     from ..core.presets import describe_presets
 
     render.OUT.preset_list(describe_presets())
+
+
+def do_provider_show(ctx: Ctx, name: str) -> None:
+    from ..core.providers import find_provider, _describe, _help
+
+    p = find_provider(name)  # raises ProviderError if missing / not executable
+    render.OUT.provider_show({
+        "name": p.name,
+        "source": p.source,
+        "path": str(p.exe),
+        "description": _describe(p.exe),
+        "help": _help(p.exe),
+    })
 
 
 # ---- dev harness -------------------------------------------------------------
@@ -757,7 +776,7 @@ _STRICT_HELP = (
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
     "  credproxy injector scaffold NAME [--script] | list | check NAME | api\n"
-    "  credproxy provider scaffold NAME | provider list\n"
+    "  credproxy provider scaffold NAME | provider list | show NAME\n"
     "  credproxy preset list               (coordinated multi-binding sets)\n"
     "Dev harness:\n"
     "  credproxy dev build|test|reload\n"
@@ -784,7 +803,7 @@ _LOOSE_HELP = (
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
     "  credp injector scaffold NAME [--script] | list | check NAME | api\n"
-    "  credp provider scaffold NAME | provider list\n"
+    "  credp provider scaffold NAME | provider list | show NAME\n"
     "  credp preset list               (coordinated multi-binding sets)\n"
     "Dev harness:\n"
     "  credp dev build|test|reload\n"
@@ -864,6 +883,15 @@ def _scaffold_help(kind: str) -> str:
             "                real secret value.\n"
             "  See `injector api` for the full reference; check it with "
             "`injector check NAME`."
+        )
+    if kind == "provider":
+        s += (
+            "\n\n--lang [python|sh]  template language (default python; "
+            "sh = POSIX shell + jq).\n\n"
+            "A provider is ANY executable -- a script in any language, or a "
+            "compiled\nbinary -- that speaks the JSON stdin/stdout protocol "
+            "(docs/providers.md);\nit can also be a directory with an executable "
+            "`run`."
         )
     s += f"\nThen `credproxy {kind} list` shows it."
     return s
@@ -1154,13 +1182,13 @@ def _dispatch_def(ctx: Ctx, kind: str, rest: list[str]) -> None:
         if _wants_help(args):
             say(_scaffold_help(kind))
             return
-        name, script_mode, family = _parse_scaffold_args(kind, args)
+        name, script_mode, family, lang = _parse_scaffold_args(kind, args)
         if script_mode:
             if kind != "injector":
                 fail("--script is only valid for `injector scaffold`")
             do_scaffold_script(ctx, name, family)
         else:
-            do_scaffold(ctx, kind, name)
+            do_scaffold(ctx, kind, name, lang)
         return
 
     if sub == "check" and kind == "injector":
@@ -1188,6 +1216,16 @@ def _dispatch_def(ctx: Ctx, kind: str, rest: list[str]) -> None:
         do_injector_api(ctx)
         return
 
+    if sub == "show" and kind == "provider":
+        args = rest[1:]
+        names = [a for a in args if not a.startswith("-")]
+        if _wants_help(args) or len(names) != 1:
+            say("usage: credproxy provider show NAME\n"
+                "Show a provider's source, resolved path, description, and help.")
+            return
+        do_provider_show(ctx, names[0])
+        return
+
     if sub == "list":
         do_def_list(ctx, kind)
         return
@@ -1196,7 +1234,7 @@ def _dispatch_def(ctx: Ctx, kind: str, rest: list[str]) -> None:
         "usage: credproxy injector {scaffold NAME [--script [sign|substitute]]"
         "|list|check NAME|api}"
         if kind == "injector"
-        else f"usage: credproxy {kind} {{scaffold NAME|list}}"
+        else "usage: credproxy provider {scaffold NAME|list|show NAME}"
     )
     if _wants_help(rest):
         say(usage)
@@ -1206,12 +1244,13 @@ def _dispatch_def(ctx: Ctx, kind: str, rest: list[str]) -> None:
     fail(f"unknown {kind} command '{rest[0]}'")
 
 
-def _parse_scaffold_args(kind: str, args: list[str]) -> tuple[str, bool, str]:
-    """Parse `scaffold` args: a NAME plus an optional
-    `--script [sign|substitute]` (default family: sign)."""
+def _parse_scaffold_args(kind: str, args: list[str]) -> tuple[str, bool, str, str]:
+    """Parse `scaffold` args: a NAME plus optional `--script [sign|substitute]`
+    (injector) or `--lang python|sh` (provider)."""
     name: str | None = None
     script_mode = False
     family = "sign"
+    lang = "python"
     i = 0
     while i < len(args):
         tok = args[i]
@@ -1220,17 +1259,22 @@ def _parse_scaffold_args(kind: str, args: list[str]) -> tuple[str, bool, str]:
             if i + 1 < len(args) and args[i + 1] in ("sign", "substitute"):
                 family = args[i + 1]
                 i += 1
+        elif tok == "--lang":
+            if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                fail("--lang needs a value (python or sh)")
+            lang = args[i + 1]
+            i += 1
         elif tok.startswith("-"):
-            fail(f"unknown flag {tok!r}; usage: credproxy {kind} scaffold "
-                 f"NAME [--script [sign|substitute]]")
+            fail(f"unknown flag {tok!r}; usage: credproxy {kind} scaffold NAME "
+                 f"[--script [sign|substitute]] [--lang python|sh]")
         elif name is None:
             name = tok
         else:
             fail(f"usage: credproxy {kind} scaffold NAME")
         i += 1
     if name is None:
-        fail(f"usage: credproxy {kind} scaffold NAME [--script [sign|substitute]]")
-    return name, script_mode, family
+        fail(f"usage: credproxy {kind} scaffold NAME")
+    return name, script_mode, family, lang
 
 
 def do_scaffold_script(ctx: Ctx, name: str, family: str) -> None:

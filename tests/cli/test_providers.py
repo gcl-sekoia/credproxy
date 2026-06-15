@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import textwrap
 from pathlib import Path
@@ -284,3 +285,147 @@ def test_list_providers_user_shadows(xdg):
     from credproxy_cli.core.providers import list_providers
     providers = {p.name: p for p in list_providers()}
     assert providers["env"].source == "user"
+
+
+# ---- description via the `describe` op (provider IS executed on `list`) -------
+
+
+def test_bundled_providers_describe(xdg):
+    from credproxy_cli.core.providers import list_providers
+    desc = {p.name: p.description for p in list_providers()}
+    assert desc["env"] == "Host environment variables"
+    assert desc["op"] == "1Password (op CLI)"
+    assert desc["keychain"]  # non-empty
+
+
+def test_user_provider_describe_supported(xdg):
+    d = _user_providers(xdg)
+    _make_provider(d, "fancy",
+                   "#!/usr/bin/env python3\n"
+                   "import json, sys\n"
+                   "req = json.load(sys.stdin)\n"
+                   "if req.get('op') == 'describe':\n"
+                   "    json.dump({'description': 'A fancy provider'}, sys.stdout)\n"
+                   "    sys.exit(0)\n"
+                   "sys.exit(3)\n")
+    from credproxy_cli.core.providers import list_providers
+    desc = {p.name: p.description for p in list_providers()}
+    assert desc["fancy"] == "A fancy provider"
+
+
+def test_provider_without_describe_is_none(xdg):
+    """A provider that doesn't implement describe (exits 3) lists with no
+    description -- graceful, so old providers keep working."""
+    d = _user_providers(xdg)
+    _make_provider(d, "plain", "#!/bin/sh\nexit 3\n")
+    from credproxy_cli.core.providers import list_providers
+    desc = {p.name: p.description for p in list_providers()}
+    assert desc["plain"] is None
+
+
+def test_describe_non_json_is_none(xdg):
+    from credproxy_cli.core.providers import _describe
+    d = _user_providers(xdg)
+    p = _make_provider(d, "garbage", "#!/bin/sh\necho not-json\n")  # exit 0, junk
+    assert _describe(p) is None
+
+
+# ---- help op + `provider show` -----------------------------------------------
+
+
+def test_help_op_bundled(xdg):
+    from credproxy_cli.core.providers import find_provider, _help
+    h = _help(find_provider("op").exe)
+    assert h and "op://" in h  # the ref format is in the help
+
+
+def test_help_unsupported_is_none(xdg):
+    """A provider that implements describe but not help -> help is None."""
+    d = _user_providers(xdg)
+    _make_provider(d, "deso",
+                   "#!/usr/bin/env python3\n"
+                   "import json, sys\n"
+                   "req = json.load(sys.stdin)\n"
+                   "if req.get('op') == 'describe':\n"
+                   "    json.dump({'description': 'desc only'}, sys.stdout)\n"
+                   "    sys.exit(0)\n"
+                   "sys.exit(3)\n")
+    from credproxy_cli.core.providers import find_provider, _help
+    assert _help(find_provider("deso").exe) is None
+
+
+def test_provider_show_human(xdg):
+    from test_porcelain import _run
+    code, out, err = _run(["provider", "show", "op"])
+    assert code == 0
+    blob = out + err
+    assert "bundled" in blob
+    assert "/providers/op" in blob          # the resolved path is shown
+    assert "op://" in blob                   # help text is shown
+
+
+def test_provider_show_json(xdg):
+    from test_porcelain import _run
+    code, out, err = _run(["--json", "provider", "show", "keychain"])
+    assert code == 0
+    d = json.loads(out)
+    assert d["name"] == "keychain"
+    assert d["path"].endswith("/keychain")
+    assert d["source"] == "bundled"
+    assert d["description"] and d["help"]
+
+
+def test_provider_show_missing(xdg):
+    from test_porcelain import _run
+    code, out, err = _run(["provider", "show", "nope_zzz"])
+    assert code == 1
+
+
+# ---- provider scaffold --lang ------------------------------------------------
+
+
+def test_scaffold_lang_default_python(xdg):
+    from test_porcelain import _run
+    from credproxy_cli.core.paths import providers_config_dir
+    assert _run(["provider", "scaffold", "pyprov"])[0] == 0
+    text = (providers_config_dir() / "pyprov").read_text()
+    assert text.startswith("#!/usr/bin/env python3")
+
+
+def test_scaffold_lang_sh(xdg):
+    from test_porcelain import _run
+    from credproxy_cli.core.paths import providers_config_dir
+    assert _run(["provider", "scaffold", "myvault", "--lang", "sh"])[0] == 0
+    p = providers_config_dir() / "myvault"
+    text = p.read_text()
+    assert text.startswith("#!/bin/sh")
+    assert "fetch()" in text and "PROTOCOL_VERSION=1" in text
+    assert os.access(p, os.X_OK)
+
+
+def test_scaffold_lang_unknown(xdg):
+    from test_porcelain import _run
+    code, out, err = _run(["provider", "scaffold", "z", "--lang", "ruby"])
+    assert code == 1
+    assert "python or sh" in (out + err)
+
+
+def test_scaffold_lang_rejected_on_injector(xdg):
+    from test_porcelain import _run
+    code, out, err = _run(["injector", "scaffold", "z", "--lang", "sh"])
+    assert code == 1
+    assert "only valid for" in (out + err)
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="sh provider needs jq")
+def test_scaffold_sh_provider_runs_via_cli(xdg, monkeypatch):
+    """The scaffolded shell provider works end-to-end through the CLI: describe
+    (provider show) and a real fetch (binding test)."""
+    from test_porcelain import _run
+    assert _run(["provider", "scaffold", "shp", "--lang", "sh"])[0] == 0
+    code, out, err = _run(["provider", "show", "shp"])
+    assert code == 0 and "Host environment variables" in (out + err)
+    monkeypatch.setenv("SHX", "abcdef")
+    code, out, err = _run(["workspace", "binding", "test", "--provider", "shp",
+                           "--secret", "SHX", "--injector", "bearer"])
+    assert code == 0 and "value length 6" in (out + err)

@@ -48,6 +48,42 @@ class Provider:
     name: str
     exe: Path
     source: str  # "user" or "bundled" -- for diagnostics / `list`
+    description: str | None = None  # from the `describe` op, for `list`
+
+
+def _ask(exe: Path, op: str, field: str) -> str | None:
+    """Exec a provider with a metadata op (`describe`/`help`) and read back the
+    named string field. Best-effort -- any failure (a provider that doesn't
+    implement the op and exits non-zero, non-JSON output, a timeout, an error)
+    yields None. This RUNS the provider, so it backs `list`/`show` only, never
+    the fetch hot path."""
+    req = json.dumps({"version": PROTOCOL_VERSION, "op": op})
+    try:
+        proc = subprocess.run(
+            [str(exe)], input=req,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout or "")
+    except json.JSONDecodeError:
+        return None
+    val = payload.get(field) if isinstance(payload, dict) else None
+    return val if isinstance(val, str) and val else None
+
+
+def _describe(exe: Path) -> str | None:
+    """One-line description (the `describe` op), for `provider list`."""
+    return _ask(exe, "describe", "description")
+
+
+def _help(exe: Path) -> str | None:
+    """Longer-form usage help (the `help` op), for `provider show`."""
+    return _ask(exe, "help", "help")
 
 
 def _resolve_in(dir_: Path, name: str) -> Path | None:
@@ -97,7 +133,8 @@ def list_providers() -> list[Provider]:
         for entry in base.iterdir():
             exe = _resolve_in(base, entry.name)
             if exe is not None:
-                seen[entry.name] = Provider(entry.name, exe, source)
+                seen[entry.name] = Provider(
+                    entry.name, exe, source, _describe(exe))
     return [seen[n] for n in sorted(seen)]
 
 

@@ -13,6 +13,12 @@ breaking existing providers. The spawning parent is **not** part of the
 contract: today the CLI execs the provider, but a future daemon may take that
 role. A provider must not assume who its parent is.
 
+Scaffold a starting point with `credproxy provider scaffold NAME` (Python) or
+`credproxy provider scaffold NAME --lang sh` (POSIX shell + `jq`). Both emit the
+same protocol in the same shape — a metadata block (`NAME`/`DESCRIPTION`/`HELP`/
+version), a `fetch`/`get` function to fill in for your backend, and an identical
+protocol footer — so they diff cleanly and the language choice is yours.
+
 ## Discovery
 
 A provider is referenced by `<name>`. Lookup order (first match wins, so a
@@ -36,9 +42,9 @@ vault provider can coalesce same-item refs into one fetch.
 
 - `version` — protocol version. Currently `1`. A provider that does not
   understand the version must exit `3`.
-- `op` — the operation. Currently only `get` (fetch the listed secrets). The
-  field exists so future operations (`list`, `describe`, …) can be added; an
-  unknown `op` must exit `3`.
+- `op` — the operation: `get` (fetch the listed secrets), `describe` (a one-line
+  description), or `help` (longer usage text). See "Describe and help" below.
+  An unknown `op` must exit `3`.
 - `secrets` — a list of opaque secret references, each interpreted entirely by
   the provider (a vault path, an env-var name, an item ref, …). credproxy never
   parses them. A single value is just a list of one.
@@ -55,6 +61,33 @@ On success, **stdout must contain nothing but** a single JSON object mapping
 Every ref in the request must appear in `values` as a string, or the CLI treats
 it as a protocol error. Anything else on stdout (banners, debug logging,
 prompts) corrupts the response — see the note on interactive tools below.
+
+## Describe and help (optional)
+
+Two metadata ops let a provider document itself. Both **run the provider**, so
+each must be cheap and side-effect-free — return the text without touching the
+backend (the bundled `keychain`/`op` providers answer them *before* invoking
+`security`/`op`, so listing/showing never triggers a Keychain prompt or a
+1Password unlock). A provider that doesn't implement an op simply exits `3` and
+the field is omitted, so older providers keep working. Neither is ever called on
+the fetch path.
+
+- **`describe`** — `credproxy provider list` runs each provider with
+  `{"version": 1, "op": "describe"}`; the provider returns a one-line summary:
+
+  ```json
+  {"description": "1Password (op CLI)"}
+  ```
+
+- **`help`** — `credproxy provider show NAME` runs the provider with
+  `{"version": 1, "op": "help"}`; the provider returns longer usage text (ref
+  format, prerequisites, an example):
+
+  ```json
+  {"help": "Reads secrets from 1Password (op CLI).\n  ref: op://<vault>/<item>/<field>\n  ..."}
+  ```
+
+  `provider show` also prints the provider's source and resolved path.
 
 ## Failure
 
