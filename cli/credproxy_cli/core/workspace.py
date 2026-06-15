@@ -10,6 +10,7 @@ Storage layout (XDG):
   Config:  $XDG_CONFIG_HOME/credproxy/workspaces/<name>.toml
   State:   $XDG_STATE_HOME/credproxy/workspaces/<name>/
              auth.token         -- bearer token for the proxy API
+             setup_done         -- container id that last COMPLETED setup
 """
 from __future__ import annotations
 
@@ -63,6 +64,14 @@ class Workspace:
     @property
     def token_path(self) -> Path:
         return self.state_dir / "auth.token"
+
+    @property
+    def setup_done_path(self) -> Path:
+        """Marker file recording the container id that last COMPLETED setup.
+        Written only on success, so a failed setup re-runs on the next start;
+        keyed on container id, so a plain stop/start (same id) skips setup but a
+        recreate (new id) re-runs it."""
+        return self.state_dir / "setup_done"
 
     @property
     def applied_spec_path(self) -> Path:

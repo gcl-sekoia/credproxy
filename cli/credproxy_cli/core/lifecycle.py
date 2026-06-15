@@ -5,11 +5,13 @@ surfaced via an optional `notify: Callable[[str], None]`. Porcelain wires
 it to stderr rendering (the `[credproxy] ` prefix); when omitted, progress
 is silently dropped. The core never imports porcelain and never prints.
 
-Setup commands (config key `setup`) run on every freshly created workspace
-container -- first create, a spec-drift recreate, or a manual `docker rm` +
-`start`. They do NOT re-run on a plain `start`/`stop` of an existing container
-(its writable layer is intact). Because a recreate re-runs them, setup commands
-should be idempotent.
+Setup commands (config key `setup`) run once per container instance: on a
+freshly created/recreated container, and on the next `start` after a failed
+attempt (the <state_dir>/setup_done marker records the container id that
+COMPLETED setup, written only on success -- so a failure retries). A plain
+`start`/`stop` of an existing container does NOT re-run them (same id, writable
+layer intact). Because a recreate re-runs them, setup commands should be
+idempotent.
 
 Applied-state records (written by this module, no side effects on read):
   <state_dir>/applied-spec.json   — the spec dict that fed the last
@@ -206,12 +208,31 @@ def create_ws_container(
     _write_applied_spec(ws, cfg, proxy_id)
 
 
+def _read_setup_marker(ws: Workspace) -> str | None:
+    """The container id that last COMPLETED setup, or None."""
+    p = ws.setup_done_path
+    return p.read_text().strip() if p.exists() else None
+
+
+def _write_setup_marker(ws: Workspace, container_id: str) -> None:
+    ws.ensure_state_dir()
+    ws.setup_done_path.write_text(container_id + "\n")
+
+
+def _setup_needed(marker: str | None, container_id: str) -> bool:
+    """Setup is needed when this container hasn't recorded a completed run: a
+    new/recreated container (different id), or one where a prior attempt failed
+    (no marker written). A plain stop/start keeps the id, so setup is skipped."""
+    return bool(container_id) and marker != container_id
+
+
 def run_setup(ws: Workspace, cfg: dict, notify: Notify) -> None:
     """Run the `setup` commands in the workspace container, as root (the image's
-    default user) via `docker exec`. Called only on a freshly created container
-    (see start_workspace) -- so it runs once per container instance, which is
-    what a fresh, empty writable layer needs. A failing command raises
-    DockerError and leaves the container running for debugging.
+    default user) via `docker exec`. Called from start_workspace when the
+    container hasn't recorded a completed setup (see `_setup_needed`): a fresh
+    container, or a prior attempt that failed. A failing command raises
+    DockerError and leaves the container running for debugging -- and, since the
+    success marker isn't written, the next `start` retries setup.
 
     Setup commands should be idempotent: a container recreate (spec drift or a
     manual `docker rm`) re-runs them, while the persistent home volume
@@ -355,7 +376,6 @@ def start_workspace(ws: Workspace, notify: Notify = _noop,
     proxy_id = docker.inspect(ws.proxy_container, "{{.Id}}")
     spec_hash = workspace_spec_hash(cfg, proxy_id)
     status = docker.container_status(ws.ws_container)
-    is_new_container = False
     if status is not None:
         current = docker.inspect(
             ws.ws_container, '{{index .Config.Labels "credproxy.spec"}}'
@@ -367,13 +387,18 @@ def start_workspace(ws: Workspace, notify: Notify = _noop,
     if status is None:
         notify("starting workspace container...")
         create_ws_container(ws, cfg, spec_hash, proxy_id=proxy_id)
-        is_new_container = True
     elif status != "running":
         docker.docker(["start", ws.ws_container])
 
-    # ---- setup (runs on every freshly created workspace container) ----
-    if is_new_container:
+    # ---- setup (once per container instance; retries a failed prior attempt) ----
+    # Gate on the container id: a freshly created/recreated container has a new
+    # id (-> run), a plain stop/start keeps the same id (-> skip), and the marker
+    # is written only AFTER setup succeeds -- so a failed setup re-runs on the
+    # next `start`.
+    container_id = docker.inspect(ws.ws_container, "{{.Id}}")
+    if _setup_needed(_read_setup_marker(ws), container_id):
         run_setup(ws, cfg, notify)
+        _write_setup_marker(ws, container_id)
 
 
 def delete_workspace(ws: Workspace) -> None:

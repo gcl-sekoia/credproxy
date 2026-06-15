@@ -534,3 +534,18 @@ def test_enter_push_flag_threads(xdg, ws_factory, monkeypatch):
     assert captured["push"] is False          # default: no forced push
     _run(["workspace", "w", "enter", "--push", "--", "true"])
     assert captured["push"] is True           # --push forces it
+
+
+def test_setup_marker_and_retry(xdg, ws_factory):
+    """Setup gate keyed on container id: no marker (fresh OR a failed prior
+    attempt) -> run; same id after success -> skip; new id (recreate) -> run."""
+    from credproxy_cli.core.lifecycle import (
+        _read_setup_marker, _setup_needed, _write_setup_marker)
+    ws = ws_factory("a")
+    assert _read_setup_marker(ws) is None
+    assert _setup_needed(None, "cid1") is True          # fresh / prior failure
+    _write_setup_marker(ws, "cid1")                     # setup succeeded
+    assert _read_setup_marker(ws) == "cid1"
+    assert _setup_needed("cid1", "cid1") is False       # plain restart -> skip
+    assert _setup_needed("cid1", "cid2") is True        # recreate -> re-run
+    assert _setup_needed(None, "") is False             # defensive: no container
