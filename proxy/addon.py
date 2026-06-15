@@ -68,7 +68,11 @@ class HostnameLogger:
             marker = " (no-inject)"
         else:
             marker = ""
-        print(f"[http] {req.method} {host}{req.path}{marker}", flush=True)
+        # Log the path WITHOUT the query string: query params routinely carry
+        # secrets (OAuth `?code=`, presigned-URL signatures, API keys), and this
+        # line goes to the proxy's stdout -> `docker logs`.
+        path = req.path.split("?", 1)[0]
+        print(f"[http] {req.method} {host}{path}{marker}", flush=True)
 
     def response(self, flow: http.HTTPFlow) -> None:
         # Re-seal seam (design-v3): plumbed from day one, no-op until a scheme

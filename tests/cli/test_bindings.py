@@ -769,3 +769,16 @@ def test_test_bindings_preserves_order(xdg, workspaces_dir):
     results = test_bindings(bindings, fetch_many=lambda p, refs: {r: "xy" for r in refs})
     assert [r.name for r in results] == ["a", "b", "c"]
     assert all(r.ok for r in results)
+
+
+def test_atomic_write_text(tmp_path):
+    """_atomic_write_text writes correct content and leaves no temp file (the
+    workspace TOML is the single source of truth -- a partial write would lose
+    it)."""
+    from credproxy_cli.core.bindings import _atomic_write_text
+    p = tmp_path / "x.toml"
+    _atomic_write_text(p, "hello")
+    assert p.read_text() == "hello"
+    _atomic_write_text(p, "world")          # overwrite
+    assert p.read_text() == "world"
+    assert list(tmp_path.glob("*.tmp")) == []   # no leftover temp

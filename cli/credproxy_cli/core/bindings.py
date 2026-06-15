@@ -20,6 +20,7 @@ Generated names/placeholders are written back, not held in memory.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -38,6 +39,15 @@ Notify = Callable[[str], None]
 
 def _noop(_msg: str) -> None:
     pass
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` via a same-dir temp file + atomic rename, so an
+    interrupted write never truncates the file. The workspace TOML is the single
+    source of truth with no in-memory backup -- a partial write would lose it."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 @dataclass(frozen=True)
@@ -415,7 +425,7 @@ def materialize_bindings(ws: Workspace, notify: Notify = _noop) -> list[Binding]
                 changed = True
 
     if changed:
-        ws.config_path.write_text(text)
+        _atomic_write_text(ws.config_path, text)
 
     validate(resolved, source)
     return resolved
@@ -458,7 +468,8 @@ def append_bindings(ws: Workspace, bindings: list[Binding]) -> None:
     text = ws.config_path.read_text()
     if text and not text.endswith("\n"):
         text += "\n"
-    ws.config_path.write_text(text + "".join(_render_binding_block(b) for b in bindings))
+    _atomic_write_text(
+        ws.config_path, text + "".join(_render_binding_block(b) for b in bindings))
 
 
 def append_binding(ws: Workspace, binding: Binding) -> None:
@@ -484,7 +495,7 @@ def remove_binding(ws: Workspace, name: str) -> None:
     if start > 0 and lines[start - 1].strip() == "":
         start -= 1
     del lines[start:end]
-    ws.config_path.write_text("".join(lines))
+    _atomic_write_text(ws.config_path, "".join(lines))
 
 
 # ---- test (dry-run secret fetch) --------------------------------------------
