@@ -875,8 +875,19 @@ def _enter_exec_cmd(cfg: dict, container: str, cmd: list[str], *,
         out += ["-u", user_override]
     out += ["--interactive=true", f"--tty={'true' if isatty else 'false'}", "--detach=false"]
     out.append(container)
+    if not cmd:
+        # No explicit `-- CMD`: run the config `shell`, defaulting to a login
+        # shell. `enter` is "log into the workspace" (ssh model), so the
+        # interactive entry sources the full login env; an explicit command
+        # stays bare/non-login (the ssh `host cmd` model).
+        cmd = list(cfg.get("shell") or DEFAULT_ENTER_CMD)
     out += _enter_command(cfg, cmd)
     return out
+
+
+# Default `enter` command when none is given and no `shell` is configured: a
+# LOGIN shell, so interactive entry behaves like logging into the box.
+DEFAULT_ENTER_CMD = ["bash", "-l"]
 
 
 # Default `enter` env shim: source the proxy's bootstrap-written env file (CA
@@ -923,6 +934,7 @@ def effective_config(cfg: dict) -> dict:
     out["workdir"] = cfg.get("workdir") or cfg.get("home")
     ep = cfg.get("enter_prelude")
     out["enter_prelude"] = DEFAULT_ENTER_PRELUDE if ep is None else ep
+    out["shell"] = list(cfg.get("shell") or DEFAULT_ENTER_CMD)
     return out
 
 

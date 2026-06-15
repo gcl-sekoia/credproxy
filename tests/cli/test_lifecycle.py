@@ -620,6 +620,13 @@ def test_effective_config_preserves_explicit_values(xdg):
     assert eff["enter_prelude"] == ""
 
 
+def test_effective_config_resolves_shell(xdg):
+    """shell -> the login-shell default when unset, explicit when set."""
+    from credproxy_cli.core.lifecycle import effective_config, DEFAULT_ENTER_CMD
+    assert effective_config({"home": "/h"})["shell"] == DEFAULT_ENTER_CMD
+    assert effective_config({"home": "/h", "shell": ["zsh"]})["shell"] == ["zsh"]
+
+
 def test_run_setup_runs_every_call(xdg, ws_factory, monkeypatch):
     """run_setup has no per-spec skip: invoked twice (as it would be on two
     successive fresh containers), it re-runs all commands both times."""

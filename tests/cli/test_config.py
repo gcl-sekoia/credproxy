@@ -385,7 +385,7 @@ def test_spec_hash_ignores_user_and_exec_flags(xdg):
 
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     withuser = {**base, "user": "dev", "exec_flags": ["--workdir", "/srv"],
-                "workdir": "/code", "enter_prelude": "export X=1"}
+                "workdir": "/code", "enter_prelude": "export X=1", "shell": ["zsh"]}
     assert workspace_spec_hash(base, "p") == workspace_spec_hash(withuser, "p")
 
 
@@ -501,6 +501,43 @@ def test_load_config_enter_prelude_not_string(xdg, workspaces_dir):
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nenter_prelude = 42\n')
     with pytest.raises(ConfigError, match="`enter_prelude` must be a string"):
+        load_config(Workspace("b"))
+
+
+# ---- shell -------------------------------------------------------------------
+
+
+def test_load_config_shell(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "s", 'image = "alpine:3"\nshell = ["zsh"]\n')
+    assert load_config(Workspace("s"))["shell"] == ["zsh"]
+
+
+def test_load_config_shell_default_none(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "sd", 'image = "alpine:3"\n')
+    assert load_config(Workspace("sd"))["shell"] is None
+
+
+def test_load_config_shell_not_list(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nshell = "zsh"\n')
+    with pytest.raises(ConfigError, match="`shell` must be a non-empty array"):
+        load_config(Workspace("b"))
+
+
+def test_load_config_shell_empty(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nshell = []\n')
+    with pytest.raises(ConfigError, match="`shell` must be a non-empty array"):
         load_config(Workspace("b"))
 
 

@@ -13,6 +13,7 @@ Schema:
   run_flags = ["--userns=keep-id"]     # list[str], optional; spliced into docker run
   map_host_user = true                 # bool, optional; non-root `user` owns mounts
   user   = "dev"                       # str, optional; user `enter` execs as
+  shell  = ["zsh"]                     # list[str], optional; default `enter` command
   workdir = "/code"                    # str, optional; dir `enter` starts in
   enter_prelude = "..."                # str, optional; shell run before exec on enter
 
@@ -73,6 +74,11 @@ image = "{image}"
 # container on change. Don't combine with a --userns in run_flags -- pick one
 # owner of the user namespace.
 {map_line}
+
+# Command `enter` runs when you don't pass `-- CMD` (argv list). Defaults to a
+# login shell, `["bash", "-l"]` -- entering the workspace is like logging in, so
+# you get the full login environment. `enter -- CMD` still runs a bare command.
+# shell = ["zsh"]
 
 # Directory `enter` starts in (the workspaceFolder analog). Defaults to `home`,
 # so you land in your home dir rather than the image's WORKDIR; point it at a
@@ -249,6 +255,20 @@ def load_config(ws: Workspace) -> dict:
     if enter_prelude is not None and not isinstance(enter_prelude, str):
         raise ConfigError(f"{ws.config_path}: `enter_prelude` must be a string")
 
+    # shell: the command `enter` runs when no `-- CMD` is given (argv list).
+    # Defaults to a LOGIN shell (`["bash", "-l"]`) -- semantically `enter` is
+    # "log into the workspace" (the ssh model), so the interactive entry sources
+    # the full login environment; `enter -- CMD` stays a bare, non-login command
+    # (the ssh `host cmd` model). Exec-only -> not part of the spec hash.
+    shell = raw.get("shell")
+    if shell is not None and (
+        not isinstance(shell, list) or not shell
+        or not all(isinstance(s, str) and s for s in shell)
+    ):
+        raise ConfigError(
+            f"{ws.config_path}: `shell` must be a non-empty array of non-empty strings"
+        )
+
     # run_flags: escape hatch -- extra flags spliced into the workspace
     # `docker run` (e.g. ["--userns=keep-id:uid=1000,gid=1000"] for rootless
     # podman, or a custom idmapped mount). Unlike `exec_flags`, these shape the
@@ -278,6 +298,7 @@ def load_config(ws: Workspace) -> dict:
         "user": user,
         "workdir": workdir,
         "enter_prelude": enter_prelude,
+        "shell": shell,
         "exec_flags": exec_flags,
         "run_flags": run_flags,
         "map_host_user": map_host_user,

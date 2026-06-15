@@ -111,7 +111,7 @@ Two entry points:
 - `credproxy workspace use NAME` — set the default workspace pointer (loose surface only).
 - `credproxy current` — print the default workspace pointer (`{"default": ...}` under `--json`); the read-only companion to `use`.
 - `credproxy workspace list [FILTER]` (or `credproxy list`) — workspaces with running status and image; current default marked.
-- `credproxy workspace NAME enter [-- CMD...]` — hot path: start if needed, `docker exec` into the workspace (default `bash`). Tracks auto-stop sessions. The primary verb.
+- `credproxy workspace NAME enter [-- CMD...]` — hot path: start if needed, `docker exec` into the workspace. With no `-- CMD` it runs the config `shell` (default a login shell, `bash -l` — entering is "logging in", the ssh model); `-- CMD` runs a bare, non-login command (the ssh `host cmd` model). Tracks auto-stop sessions. The primary verb.
 - `credproxy workspace NAME start` — (re)start the proxy container, wait for `/health`, push bindings config, then (re)start the workspace container. Auto-creates if missing. Recreates a container when its spec drifts (proxy: image changed; workspace: image/home/mounts/env/setup or proxy netns peer changed, tracked via `credproxy.spec` label).
 - `credproxy workspace NAME stop` — `docker stop -t 1` both containers; kept, not removed.
 - `credproxy workspace NAME delete` — remove both containers, home volume, config file, and state dir. In loose mode, prompts when targeting the default workspace.

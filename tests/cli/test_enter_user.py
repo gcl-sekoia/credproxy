@@ -31,6 +31,33 @@ def test_config_user():
     assert "ctr" in out
 
 
+# ---- default enter command (login shell) + `shell` field ---------------------
+
+
+def test_default_enter_is_login_shell():
+    """No `-- CMD` -> a login shell (`bash -l`), wrapped by the env shim."""
+    from credproxy_cli.core.lifecycle import _enter_exec_cmd
+    out = _enter_exec_cmd({}, "ctr", [], user_override=None, isatty=True)
+    assert out[-2:] == ["bash", "-l"]
+    assert out[out.index("ctr") + 1] == "sh"   # still shim-wrapped
+
+
+def test_shell_field_overrides_default():
+    from credproxy_cli.core.lifecycle import _enter_exec_cmd
+    out = _enter_exec_cmd({"shell": ["zsh"]}, "ctr", [], user_override=None, isatty=True)
+    assert out[-1] == "zsh"
+    assert "-l" not in out
+
+
+def test_explicit_command_is_bare_and_beats_shell():
+    """`enter -- CMD` runs bare (non-login) and overrides `shell`."""
+    from credproxy_cli.core.lifecycle import _enter_exec_cmd
+    out = _enter_exec_cmd({"shell": ["zsh"]}, "ctr", ["npm", "test"],
+                          user_override=None, isatty=True)
+    assert out[-2:] == ["npm", "test"]
+    assert "zsh" not in out and "-l" not in out
+
+
 # ---- enter env shim ----------------------------------------------------------
 
 

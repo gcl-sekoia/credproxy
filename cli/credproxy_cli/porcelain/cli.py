@@ -163,9 +163,11 @@ def do_enter(ctx: Ctx, name: str | None, trailing: list[str],
     if ctx.json:
         fail("enter does not support --json (it execs an interactive shell)")
     ws = _resolve_ws(ctx, name)
-    cmd = trailing or ["bash"]
+    # Empty trailing -> the core runs the config `shell` (default: a login
+    # shell); an explicit `-- CMD` runs bare. Resolved in _enter_exec_cmd, which
+    # has the loaded config.
     exit_code = lifecycle.enter_workspace(
-        ws, cmd, notify=say, user_override=user_override, push=push)
+        ws, trailing, notify=say, user_override=user_override, push=push)
     sys.exit(exit_code)
 
 
