@@ -332,6 +332,73 @@ def test_bundled_bw_provider_missing_item_exit2(xdg, monkeypatch, tmp_path):
         fetch("bw", "ghost")
 
 
+# ---- bundled gh-cli provider (fake `gh` on PATH, no real CLI needed) ----------
+
+
+def _fake_gh(tmp_path, *, token="gho_faketoken", known=("github.com",)) -> Path:
+    """Write a fake `gh` onto a fresh bin dir, logging argv. `auth token` prints
+    the token for a known `--hostname` (or no hostname = default host); an
+    unknown host exits 1 like a missing login."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    calls = tmp_path / "gh-calls.log"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + chr(10))\n"
+        "a = sys.argv[1:]\n"
+        "if a[:2] != ['auth', 'token']: sys.exit(2)\n"
+        "host = a[a.index('--hostname') + 1] if '--hostname' in a else ''\n"
+        f"known = set({list(known)!r}) | {{''}}\n"
+        f"print({token!r}) if host in known else sys.exit(1)\n"
+    )
+    gh.chmod(0o755)
+    return fake_bin, calls
+
+
+def test_bundled_gh_cli_provider_returns_token(xdg, monkeypatch, tmp_path):
+    """gh-cli resolves a hostname ref to the token and passes `--hostname`."""
+    fake_bin, calls = _fake_gh(tmp_path, token="gho_realtoken")
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    from credproxy_cli.core.providers import fetch
+    assert fetch("gh-cli", "github.com") == "gho_realtoken"
+    assert "auth token --hostname github.com" in calls.read_text()
+
+
+def test_bundled_gh_cli_provider_empty_ref_default_host(xdg, monkeypatch, tmp_path):
+    """An empty ref uses gh's default host -- no `--hostname` is passed."""
+    fake_bin, calls = _fake_gh(tmp_path)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    from credproxy_cli.core.providers import fetch
+    assert fetch("gh-cli", "") == "gho_faketoken"
+    assert "--hostname" not in calls.read_text()
+
+
+def test_bundled_gh_cli_provider_dedups_repeated_host(xdg, monkeypatch, tmp_path):
+    """A host requested twice in one batch shells out to `gh` only once."""
+    fake_bin, calls = _fake_gh(tmp_path)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    from credproxy_cli.core.providers import fetch_many
+    vals = fetch_many("gh-cli", ["github.com", "github.com"])
+    assert vals == {"github.com": "gho_faketoken"}
+    assert calls.read_text().count("auth token") == 1
+
+
+def test_bundled_gh_cli_provider_unknown_host_exit2(xdg, monkeypatch, tmp_path):
+    """A host with no login is a not-found (exit 2) -> ProviderError."""
+    fake_bin, _ = _fake_gh(tmp_path, known=("github.com",))
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    from credproxy_cli.core.errors import ProviderError
+    from credproxy_cli.core.providers import fetch
+    with pytest.raises(ProviderError, match="not found"):
+        fetch("gh-cli", "ghe.example.invalid")
+
+
 # ---- list_providers ----------------------------------------------------------
 
 
@@ -363,6 +430,8 @@ def test_bundled_providers_describe(xdg):
     # bw's describe is static -- it must NOT shell out to `bw` (so `provider
     # list` never pops an unlock prompt), hence this passes with no bw on PATH.
     assert desc["bw"] == "Bitwarden (bw CLI)"
+    # gh-cli's describe is likewise static (no `gh` call on list).
+    assert desc["gh-cli"] == "GitHub auth token (gh CLI)"
 
 
 def test_user_provider_describe_supported(xdg):

@@ -130,6 +130,15 @@ provider into one invocation and `bw` reads the whole vault in a single
 `bw list items`, that prompt (and the decrypt behind it) happens **once** per
 resolve no matter how many bindings draw from the vault.
 
+A provider that wraps an already-authenticated session need not be interactive
+at all: the bundled `gh-cli` provider returns `gh auth token --hostname <ref>`
+(ref = a GitHub hostname; empty = gh's default host), reading gh's own keyring
+without prompting. Its `describe`/`help` are static — like every provider, the
+backend is touched only in the `get` path, so `provider list`/`show` never
+shells out. It pairs with the `github` preset, which defaults its provider to
+`gh-cli` and its secret to `github.com`, so `binding add --preset github` wires
+GitHub API + git + ghcr off one existing login with no further flags.
+
 ## Example: the bundled `env` provider
 
 The simplest possible provider reads host environment variables named by the

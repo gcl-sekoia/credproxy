@@ -356,6 +356,9 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     if not a.host:
         fail("`binding add --injector` needs at least one --host")
 
+    if not a.provider:
+        fail("`binding add --injector` needs --provider")
+
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
 
@@ -410,22 +413,44 @@ def _do_binding_preset(ctx: Ctx, name: str | None, a: argparse.Namespace) -> Non
     """Generate a coordinated binding set from a preset (e.g. github) and
     append all of them, sharing one placeholder."""
     from ..core import bindings as core_bindings
-    from ..core.presets import build_preset
+    from ..core.presets import PRESETS, build_preset
     from ..core.providers import find_provider
 
     if a.binding_name or a.placeholder or a.env or a.host:
         fail("--preset manages name/placeholder/env/host itself; drop those flags")
+
+    spec = PRESETS.get(a.preset)
+    if spec is None:
+        fail(f"unknown preset '{a.preset}'; known presets: "
+             f"{', '.join(sorted(PRESETS))}")
+
+    # Provider: the explicit flag, else the preset's default.
+    provider = a.provider or spec.default_provider
+    if provider is None:
+        fail("`binding add --preset` needs --provider "
+             "(this preset has no default provider)")
+
+    # Secret: the explicit flag, else the preset's default -- but that default
+    # ref is only meaningful for the provider it was written for (a ref is a gh
+    # hostname for gh-cli, an env-var name for env, an op:// path for op), so any
+    # other provider must still pass --secret.
     secret = _parse_secret_args(a.secret)
-    if not isinstance(secret, str):
+    if secret is None:
+        if provider == spec.default_provider and spec.default_secret is not None:
+            secret = spec.default_secret
+        else:
+            fail("`binding add --preset` needs --secret "
+                 "(its meaning depends on --provider)")
+    elif not isinstance(secret, str):
         fail("`binding add --preset` needs a single --secret REF")
-    find_provider(a.provider)
+    find_provider(provider)
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
 
     existing = core_bindings.load_bindings(ws)
     taken = {b.name for b in existing}
-    new = build_preset(a.preset, a.provider, secret)
+    new = build_preset(a.preset, provider, secret)
     for b in new:
         if b.name in taken:
             fail(f"binding name '{b.name}' already exists in workspace '{ws.name}'")
@@ -704,7 +729,9 @@ def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     # so the error is a friendly message rather than argparse usage spew).
     p.add_argument("--preset", default=None)
     p.add_argument("--injector", default=None)
-    p.add_argument("--provider", required=True)
+    # Optional at the parser level: required with --injector, but a preset may
+    # supply a default provider (e.g. github -> gh-cli). Enforced in the handler.
+    p.add_argument("--provider", default=None)
     # Repeatable: a single bare REF is single-slot; one or more `slot=ref`
     # values form a multi-slot secret table.
     p.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
@@ -832,11 +859,14 @@ _BINDING_ADD_HELP = (
     "  --preset PRESET   a coordinated multi-binding set (e.g. github expands to\n"
     "                    three bindings sharing one token). The preset owns\n"
     "                    name/placeholder/env/host. See `credproxy preset list`.\n"
-    "  --provider PROV   where the value comes from (REQUIRED).\n"
-    "                    See `credproxy provider list`.\n"
+    "                    `github` defaults provider->gh-cli, secret->github.com,\n"
+    "                    so `binding add --preset github` needs no other flags.\n"
+    "  --provider PROV   where the value comes from. Required, except a preset\n"
+    "                    may supply a default. See `credproxy provider list`.\n"
     "  --secret REF      the reference the provider resolves. For the `env`\n"
     "                    provider REF is the host env var NAME (not the value).\n"
-    "                    Repeat as SLOT=REF for a multi-slot secret.\n"
+    "                    Repeat as SLOT=REF for a multi-slot secret. May be\n"
+    "                    defaulted by a preset (only for its default provider).\n"
     "  --host HOST       host this binding applies to; repeatable. Required\n"
     "                    with --injector (the preset sets its own hosts).\n"
     "  --name NAME       binding name (auto: <injector>-<provider>[-N]).\n"

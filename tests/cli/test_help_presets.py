@@ -153,6 +153,53 @@ def test_preset_add_announces_expansion(ws_factory):
     assert "expands to 3 bindings" in (out + err)
 
 
+# ---- preset default provider / secret ----------------------------------------
+
+
+def test_preset_github_defaults_provider_and_secret(ws_factory):
+    """`binding add --preset github` with no flags wires all three bindings off
+    the gh-cli provider with the github.com host as the ref."""
+    ws = ws_factory("demo")
+    code, out, err = _run(["workspace", "demo", "binding", "add", "--preset", "github"])
+    assert code == 0, out + err
+    from credproxy_cli.core.bindings import load_bindings
+    bindings = load_bindings(ws)
+    assert {b.name for b in bindings} == {"github-api", "github-git", "github-ghcr"}
+    assert all(b.provider == "gh-cli" and b.secret == "github.com" for b in bindings)
+
+
+def test_preset_github_secret_override_keeps_default_provider(ws_factory):
+    """An explicit --secret (e.g. an Enterprise host) overrides the ref while the
+    provider still defaults to gh-cli."""
+    ws = ws_factory("demo")
+    code, out, err = _run(["workspace", "demo", "binding", "add",
+                           "--preset", "github", "--secret", "ghe.corp.com"])
+    assert code == 0, out + err
+    from credproxy_cli.core.bindings import load_bindings
+    assert all(b.provider == "gh-cli" and b.secret == "ghe.corp.com"
+               for b in load_bindings(ws))
+
+
+def test_preset_nondefault_provider_requires_secret(ws_factory):
+    """A non-default provider can't borrow the default ref -- a ref's meaning is
+    provider-specific -- so --secret stays required."""
+    ws_factory("demo")
+    code, out, err = _run(["workspace", "demo", "binding", "add",
+                           "--preset", "github", "--provider", "env"])
+    assert code == 1
+    assert "needs --secret" in (out + err)
+
+
+def test_injector_add_still_requires_provider(ws_factory):
+    """With --provider now optional at the parser level (so presets can default
+    it), the --injector path must still demand it explicitly."""
+    ws_factory("demo")
+    code, out, err = _run(["workspace", "demo", "binding", "add", "--injector",
+                           "bearer", "--secret", "TOK", "--host", "api.example.com"])
+    assert code == 1
+    assert "needs --provider" in (out + err)
+
+
 # ---- scaffolded template hygiene ---------------------------------------------
 
 

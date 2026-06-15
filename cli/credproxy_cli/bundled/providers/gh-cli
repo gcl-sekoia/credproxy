@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+# credproxy provider: gh-cli (GitHub CLI)  —  protocol: docs/providers.md
+#
+# A provider is a standalone executable speaking the batch protocol. Everything
+# specific to THIS provider is the metadata block and the get() function; the
+# protocol footer is identical across providers. Copy this file as a starting
+# point with `credproxy provider scaffold NAME`.
+import json
+import subprocess
+import sys
+
+# ════ metadata ═══════════════════════════════════════════════════════
+NAME = "gh-cli"
+DESCRIPTION = "GitHub auth token (gh CLI)"
+PROTOCOL_VERSION = 1
+HELP = """\
+Returns the GitHub auth token for an already-logged-in `gh` session.
+  ref:     a GitHub hostname (github.com, or an Enterprise host). An empty ref
+           uses gh's default host. The real token never enters the workspace.
+  example: --provider gh-cli --secret github.com
+Pairs with the `github` preset (`binding add --preset github`, which defaults
+its provider to gh-cli): one already-authenticated session wires API (bearer) +
+git + ghcr (basic). Requires `gh` on PATH and an existing login (`gh auth
+login`). `gh auth token` is non-interactive -- it reads gh's own keyring, never
+prompting -- so listing/showing providers is side-effect free.
+"""
+
+# ════ fetch one secret (the only provider-specific logic) ═════════════
+class NotFound(Exception):
+    """A host with no usable login -> exit 2."""
+
+
+class GhError(Exception):
+    """A backend failure (gh missing / crash) -> exit 1."""
+
+
+# Cached for the lifetime of one invocation, so a host requested by several
+# bindings only ever shells out to `gh` once.
+_CACHE: dict[str, str] = {}
+
+
+def get(ref):
+    host = ref.strip()
+    if host in _CACHE:
+        return _CACHE[host]
+    args = ["gh", "auth", "token"] + (["--hostname", host] if host else [])
+    try:
+        r = subprocess.run(args, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise GhError("`gh` is not on PATH (install the GitHub CLI)")
+    if r.returncode != 0:
+        where = repr(host) if host else "gh's default host"
+        raise NotFound(
+            f"gh has no token for {where} (run `gh auth login`): "
+            f"{r.stderr.strip()}"
+        )
+    # `gh auth token` prints the token with a single trailing newline.
+    token = _CACHE[host] = r.stdout.removesuffix("\n")
+    if not token:
+        raise NotFound(f"gh returned an empty token for {host or 'the default host'}")
+    return token
+
+
+# ════ protocol footer (identical for every provider — skip on a scan) ═
+def _fail(msg, code):
+    print(f"{NAME} provider: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def main():
+    try:
+        req = json.load(sys.stdin)
+    except Exception as e:
+        _fail(f"bad request JSON: {e}", 1)
+    if req.get("version") != PROTOCOL_VERSION:
+        _fail("unsupported version", 3)
+    op = req.get("op")
+    if op == "describe":
+        json.dump({"description": DESCRIPTION}, sys.stdout)
+    elif op == "help":
+        json.dump({"help": HELP}, sys.stdout)
+    elif op == "get":
+        values = {}
+        try:
+            for ref in req.get("secrets") or []:
+                values[ref] = get(ref)
+        except NotFound as e:
+            _fail(str(e), 2)
+        except GhError as e:
+            _fail(str(e), 1)
+        json.dump({"values": values}, sys.stdout)
+    else:
+        _fail("unsupported op", 3)
+
+
+main()

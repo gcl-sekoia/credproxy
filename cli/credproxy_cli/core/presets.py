@@ -30,11 +30,20 @@ class PresetSpec:
     name: str
     placeholder: Placeholder  # the shared, service-shaped sentinel
     parts: tuple[_Part, ...]
+    # A canonical source so the common case needs no flags. `default_provider`
+    # fills an omitted `--provider`. `default_secret` fills an omitted `--secret`
+    # but ONLY when the resolved provider is `default_provider` -- a secret ref's
+    # meaning is provider-specific (a gh hostname is not an env-var name nor an
+    # op:// path), so it can't be defaulted for an arbitrary provider.
+    default_provider: str | None = None
+    default_secret: str | None = None
 
 
 PRESETS: dict[str, PresetSpec] = {
     # A classic-PAT-shaped placeholder (ghp_ + 36 alnum = 40) shared across all
-    # three bindings, so client-side token-format checks still pass.
+    # three bindings, so client-side token-format checks still pass. Defaults to
+    # the bundled `gh-cli` provider with `github.com` as its ref, so a bare
+    # `binding add --preset github` wires all three off an existing gh login.
     "github": PresetSpec(
         name="github",
         placeholder=Placeholder("ghp_", 40, "alnumeric"),
@@ -43,6 +52,8 @@ PRESETS: dict[str, PresetSpec] = {
             _Part("git", "basic", ("github.com",), None),
             _Part("ghcr", "basic", ("ghcr.io",), None),
         ),
+        default_provider="gh-cli",
+        default_secret="github.com",
     ),
 }
 

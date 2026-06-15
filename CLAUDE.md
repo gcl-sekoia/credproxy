@@ -123,7 +123,7 @@ Two entry points:
 **Binding commands (through a workspace):**
 
 - `credproxy workspace NAME binding add --injector INJ --provider PROV --secret REF --host HOST [--host HOST...] [--name NAME] [--placeholder PH] [--env VAR]` — `--secret` repeats as `SLOT=REF` for a multi-slot secret (bare `REF` = single-slot).
-- `credproxy workspace NAME binding add --preset PRESET --provider PROV --secret REF` — generate a coordinated binding set (e.g. `github`: bearer@api + basic@github/ghcr sharing one placeholder). The preset owns name/placeholder/env/host.
+- `credproxy workspace NAME binding add --preset PRESET --provider PROV --secret REF` — generate a coordinated binding set (e.g. `github`: bearer@api + basic@github/ghcr sharing one placeholder). The preset owns name/placeholder/env/host. A preset may carry a default provider/secret: `github` defaults `--provider gh-cli` and `--secret github.com`, so a bare `binding add --preset github` wires all three off an existing `gh` login. The default secret applies only for the default provider (a ref's meaning is provider-specific), so a non-default `--provider` still requires `--secret`.
 - `credproxy workspace NAME binding remove BINDING_NAME`
 - `credproxy workspace NAME binding list`
 - `credproxy workspace NAME binding test [BINDING_NAME]` — dry-run fetch via provider (reports secret length, not value); exit 1 if any fail.
