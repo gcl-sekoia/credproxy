@@ -288,7 +288,8 @@ def test_render_template_defaults_apply(xdg, workspaces_dir):
     assert cfg["image"] == DEFAULT_WORKSPACE_IMAGE
     assert cfg["mounts"] == []
     assert cfg["env"] == {}
-    assert cfg["setup"] == []
+    # default image scaffolds an active setup (the CA bootstrap)
+    assert cfg["setup"] == ["curl -fsSL http://proxy.local/bootstrap.sh | sh"]
 
 
 def test_render_template_default_image_wires_nonroot_user(xdg, workspaces_dir):
@@ -320,6 +321,30 @@ def test_render_template_custom_image_keeps_user_commented(xdg, workspaces_dir):
     assert cfg["user"] is None
     assert cfg["home"] == DEFAULT_HOME
     assert cfg["map_host_user"] is False
+
+
+def test_render_template_default_image_bootstraps_ca(xdg, workspaces_dir):
+    """The default image has curl + ca tooling, so the scaffold's setup installs
+    the proxy CA -- HTTPS interception works right after enter, no manual step."""
+    from credproxy_cli.core.config import load_config, render_template
+    from credproxy_cli.core.paths import DEFAULT_WORKSPACE_IMAGE
+    from credproxy_cli.core.workspace import Workspace
+
+    text = render_template("dc", DEFAULT_WORKSPACE_IMAGE)
+    (workspaces_dir / "dc.toml").write_text(text)
+    cfg = load_config(Workspace("dc"))
+    assert cfg["setup"] == ["curl -fsSL http://proxy.local/bootstrap.sh | sh"]
+
+
+def test_render_template_custom_image_no_active_setup(xdg, workspaces_dir):
+    """A --image override leaves setup commented (its curl/ca tooling is
+    unknown), so nothing auto-runs."""
+    from credproxy_cli.core.config import load_config, render_template
+    from credproxy_cli.core.workspace import Workspace
+
+    text = render_template("custom", "alpine:3")
+    (workspaces_dir / "custom.toml").write_text(text)
+    assert load_config(Workspace("custom"))["setup"] == []
 
 
 # ---- spec hash ---------------------------------------------------------------

@@ -98,12 +98,7 @@ image = "{image}"
 # Extra environment variables injected into the workspace container.
 # env = {{ GH_DEBUG = "1" }}
 
-# Shell commands run on each freshly (re)created workspace container (as root),
-# so make them idempotent. A failing command stops start and leaves the
-# container for debugging.
-# setup = [
-#   "npm ci",
-# ]
+{setup_block}
 
 # Automatically stop the workspace when the last `enter` session exits.
 # Off by default. Changing this mid-session takes effect immediately (live
@@ -310,11 +305,34 @@ def render_template(name: str, image: str) -> str:
         home_line = f'home = "{DEFAULT_WORKSPACE_USER_HOME}"'
         user_line = f'user = "{DEFAULT_WORKSPACE_USER}"'
         map_line = "map_host_user = true"
+        # The default image has curl + update-ca-certificates, so the proxy CA
+        # can be installed automatically -- HTTPS interception works right after
+        # `enter`, no manual bootstrap. Runs as root on each (re)create.
+        setup_block = (
+            "# Commands run as root on each (re)created container; make them\n"
+            "# idempotent. The default installs the proxy CA so HTTPS interception\n"
+            '# works immediately; add your own (e.g. "npm ci") to the list.\n'
+            "setup = [\n"
+            '  "curl -fsSL http://proxy.local/bootstrap.sh | sh",\n'
+            "]"
+        )
     else:
         home_line = '# home = "/root"'
         user_line = '# user = "dev"'
         map_line = "# map_host_user = true"
+        # Unknown image: leave setup commented. If it has curl +
+        # update-ca-certificates, add the CA bootstrap so interception works.
+        setup_block = (
+            "# Commands run as root on each (re)created container; make them\n"
+            "# idempotent. A failing command stops start and leaves the container\n"
+            "# for debugging. On an image with curl + update-ca-certificates, add\n"
+            '# the proxy-CA bootstrap so HTTPS interception works:\n'
+            '#   "curl -fsSL http://proxy.local/bootstrap.sh | sh"\n'
+            "# setup = [\n"
+            '#   "npm ci",\n'
+            "# ]"
+        )
     return CONFIG_TEMPLATE.format(
-        name=name, image=image,
-        home_line=home_line, user_line=user_line, map_line=map_line,
+        name=name, image=image, home_line=home_line, user_line=user_line,
+        map_line=map_line, setup_block=setup_block,
     )
