@@ -205,6 +205,97 @@ def test_map_host_user_noop_on_docker(xdg, ws_factory, monkeypatch):
     assert not any(a.startswith("--userns") for a in calls[-1])
 
 
+def _nested_cfg(**over):
+    cfg = {"image": "x", "home": "/home/vscode",
+           "mounts": [{"source": "/h/src/proj", "target": "/home/vscode/src/proj",
+                       "readonly": False}],
+           "env": {}, "setup": [], "user": "vscode", "map_host_user": True}
+    cfg.update(over)
+    return cfg
+
+
+def test_mount_parent_dirs_nested_yields_intermediate(xdg):
+    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    assert _mount_parent_dirs(_nested_cfg()) == ["/home/vscode/src"]
+
+
+def test_mount_parent_dirs_deep_nesting_yields_all_ancestors(xdg):
+    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    cfg = _nested_cfg(mounts=[{"source": "x", "target": "/home/vscode/a/b/proj",
+                               "readonly": False}])
+    assert _mount_parent_dirs(cfg) == ["/home/vscode/a", "/home/vscode/a/b"]
+
+
+def test_mount_parent_dirs_one_level_under_home_is_empty(xdg):
+    """A target whose parent IS the home volume fabricates nothing."""
+    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    cfg = _nested_cfg(mounts=[{"source": "x", "target": "/home/vscode/proj",
+                               "readonly": False}])
+    assert _mount_parent_dirs(cfg) == []
+
+
+def test_mount_parent_dirs_outside_home_skipped(xdg):
+    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    cfg = _nested_cfg(mounts=[{"source": "x", "target": "/srv/a/proj",
+                               "readonly": False}])
+    assert _mount_parent_dirs(cfg) == []
+
+
+def test_owns_user_mapping(xdg):
+    from credproxy_cli.core.lifecycle import _credproxy_owns_user_mapping
+    assert _credproxy_owns_user_mapping(_nested_cfg()) is True
+    assert _credproxy_owns_user_mapping(_nested_cfg(map_host_user=False)) is False
+    assert _credproxy_owns_user_mapping(_nested_cfg(user="root")) is False
+    assert _credproxy_owns_user_mapping(_nested_cfg(user=None)) is False
+
+
+def test_chown_mount_parents_uses_mapped_uid(xdg, ws_factory, monkeypatch):
+    """The chown targets the MAPPED uid (user_uid), same as keep-id -- NOT the
+    host uid, so the fabricated parent lands on the user that runs inside."""
+    import os
+    if not hasattr(os, "getuid"):
+        import pytest
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a"); ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    lifecycle.chown_mount_parents(ws, _nested_cfg(user_uid=1000), lambda *_: None)
+    args = calls[-1]
+    assert args[:4] == ["exec", "-u", "0", ws.ws_container]
+    assert args[4:6] == ["chown", f"1000:{os.getgid()}"]   # user_uid, not os.getuid()
+    assert args[-1] == "/home/vscode/src"
+
+
+def test_chown_mount_parents_falls_back_to_host_uid(xdg, ws_factory, monkeypatch):
+    import os
+    if not hasattr(os, "getuid"):
+        import pytest
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a"); ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    lifecycle.chown_mount_parents(ws, _nested_cfg(), lambda *_: None)  # no user_uid
+    assert calls[-1][4:6] == ["chown", f"{os.getuid()}:{os.getgid()}"]
+
+
+def test_chown_mount_parents_noop_without_mapping(xdg, ws_factory, monkeypatch):
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a"); ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    lifecycle.chown_mount_parents(ws, _nested_cfg(map_host_user=False), lambda *_: None)
+    assert calls == []
+
+
+def test_chown_mount_parents_noop_when_no_fabricated_parents(xdg, ws_factory, monkeypatch):
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a"); ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = _nested_cfg(mounts=[{"source": "x", "target": "/home/vscode/proj",
+                               "readonly": False}])
+    lifecycle.chown_mount_parents(ws, cfg, lambda *_: None)
+    assert calls == []
+
+
 def test_map_host_user_noop_without_user(xdg, ws_factory, monkeypatch):
     """map_host_user with no non-root `user` is a no-op (root already owns the
     mounts) and short-circuits before the runtime probe."""

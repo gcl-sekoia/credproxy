@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import subprocess
 from dataclasses import dataclass
 from typing import Callable
@@ -167,6 +168,29 @@ def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
     docker.docker(args)
 
 
+def _credproxy_owns_user_mapping(cfg: dict) -> bool:
+    """True when credproxy owns this workspace's uid mapping: `map_host_user` is
+    set and the workspace runs as a non-root `user`.
+
+    The precondition for both levers that assume host-you maps onto the container
+    user -- the `--userns=keep-id` flag (rootless podman) and the mount-parent
+    chown (every runtime). Outside this mode credproxy must not presume the
+    mapped uid is the right owner: a root workspace already owns everything, and
+    a user-supplied `run_flags` namespace is theirs to map."""
+    user = cfg.get("user")
+    return bool(cfg.get("map_host_user") and user and user not in ("root", "0"))
+
+
+def _mapped_uid(cfg: dict) -> int:
+    """The workspace user's in-container uid -- the uid host-you maps onto under
+    `map_host_user`, so the owner that keep-id targets AND the mount-parent chown
+    must use. `user_uid` if set (a baked user like vscode=1000), else the host
+    uid (a user provisioned as $CREDPROXY_HOST_UID in `setup`). Callers guard
+    `hasattr(os, "getuid")` before relying on the fallback."""
+    uid = cfg.get("user_uid")
+    return os.getuid() if uid is None else uid
+
+
 def _host_user_run_flags(cfg: dict) -> list[str]:
     """The userns flag that makes a non-root `user` own the bind mounts when
     `map_host_user` is set -- runtime-specific, host ownership untouched.
@@ -184,19 +208,63 @@ def _host_user_run_flags(cfg: dict) -> list[str]:
     `setup` as $CREDPROXY_HOST_UID). host uid and the user's uid may differ
     freely -- keep-id maps across them; they need not be equal.
 
-    A no-op without a non-root `user`: the default root workspace already owns
-    the mounts on every runtime, so there is nothing to map (and we skip the
-    runtime probe). Checked before the probe so the common root workspace pays
-    no daemon round-trip."""
-    if not cfg.get("map_host_user") or not cfg.get("user") or not hasattr(os, "getuid"):
+    A no-op without credproxy-owned mapping: the default root workspace already
+    owns the mounts on every runtime, so there is nothing to map (and we skip the
+    runtime probe). Checked before the probe so the common root workspace pays no
+    daemon round-trip."""
+    if not _credproxy_owns_user_mapping(cfg) or not hasattr(os, "getuid"):
         return []
     from .runtime import is_podman_rootless
     if not is_podman_rootless():
         return []
-    uid = cfg.get("user_uid")
-    if uid is None:
-        uid = os.getuid()
-    return [f"--userns=keep-id:uid={uid},gid={os.getgid()}"]
+    return [f"--userns=keep-id:uid={_mapped_uid(cfg)},gid={os.getgid()}"]
+
+
+def _mount_parent_dirs(cfg: dict) -> list[str]:
+    """Directories the container runtime fabricates (as container-root) for bind
+    targets nested under `home` -- the intermediate path components between the
+    home volume and each mount point.
+
+    Derived from cfg["mounts"], the same list that produced the --mount flags, so
+    it matches exactly what the runtime created -- no in-container mountinfo scan.
+    A target one level under home (its parent IS the home volume) fabricates
+    nothing and is correctly owned; only deeper nesting yields work. Targets
+    outside home live in the ephemeral container layer and are skipped: inside the
+    credproxy-managed home volume the chown is provably host-safe."""
+    home = cfg["home"].rstrip("/")
+    dirs: set[str] = set()
+    for m in cfg["mounts"]:
+        target = m["target"].rstrip("/")
+        if not target.startswith(home + "/"):
+            continue
+        d = posixpath.dirname(target)
+        while d != home and d != "/":
+            dirs.add(d)
+            d = posixpath.dirname(d)
+    return sorted(dirs)
+
+
+def chown_mount_parents(ws: Workspace, cfg: dict, notify: Notify) -> None:
+    """Re-own the runtime-fabricated parents of nested bind mounts to the
+    workspace user, so `map_host_user`'s promise (the non-root user owns the
+    mounts) holds for the dirs the runtime invented as container-root too.
+
+    Gated on credproxy owning the uid mapping; the chown target is the mapped uid
+    (`user_uid`/host uid -- the same uid keep-id uses, so the parents land on the
+    user that runs inside). Runtime-agnostic, unlike the keep-id flag: the
+    fabricated parent is container-root on rootless podman AND rootful Docker
+    (uid 0 is host root), so a non-root user is locked out on both. Non-recursive
+    -- chowns only the intermediate dirs, never a mount point, so host files are
+    untouched. Idempotent (everything under the home volume should be user-owned
+    anyway), so re-chowning pre-existing ancestors is a harmless no-op."""
+    if not _credproxy_owns_user_mapping(cfg) or not hasattr(os, "getuid"):
+        return
+    parents = _mount_parent_dirs(cfg)
+    if not parents:
+        return
+    notify(f"fixing ownership of {len(parents)} mount parent dir(s)...")
+    docker.docker(["exec", "-u", "0", ws.ws_container,
+                   "chown", f"{_mapped_uid(cfg)}:{os.getgid()}", *parents])
 
 
 def create_ws_container(
@@ -465,6 +533,11 @@ def start_workspace(ws: Workspace, notify: Notify = _noop,
     # next `start`.
     container_id = docker.inspect(ws.ws_container, "{{.Id}}")
     if _setup_needed(_read_setup_marker(ws), container_id):
+        # Before setup, since a setup command's user phase may write into a
+        # nested mount's parent (e.g. clone a sibling repo under ~/src). Same
+        # cadence as setup: runs once per fresh/recreated container (the
+        # fabricated parents live in the home volume, so idempotent thereafter).
+        chown_mount_parents(ws, cfg, notify)
         run_setup(ws, cfg, notify)
         _write_setup_marker(ws, container_id)
 

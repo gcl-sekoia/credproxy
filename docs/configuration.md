@@ -164,6 +164,16 @@ depends on the runtime:
 - **Rootless Docker:** no `keep-id` equivalent — **not covered**; you'd need
   idmapped bind mounts.
 
+**Nested mount parents.** A bind target nested below `home`
+(`~/src/proj:/home/vscode/src/proj`) makes the runtime fabricate the intermediate
+`/home/vscode/src` as container-root — so even though the mount itself ends up
+user-owned, that parent isn't, and the user can't create siblings there (a second
+clone under `~/src`). Under `map_host_user` credproxy re-owns those fabricated
+parents to the user's uid on each (re)create — a non-recursive `chown` of only the
+dirs between `home` and the target (never the mount point, never host files),
+runtime-agnostic (the parent is root on podman *and* rootful Docker). On the
+manual `run_flags` path it's yours to handle (the namespace is yours).
+
 So `user_uid` is the one knob, and it bites in exactly one place: it's the
 in-container uid that keep-id targets on rootless podman. Set it wrong and the
 mount shows up owned by the wrong uid inside (keep-id maps host-you onto *exactly*
