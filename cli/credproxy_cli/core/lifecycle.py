@@ -274,12 +274,20 @@ def _setup_needed(marker: str | None, container_id: str) -> bool:
 
 
 def run_setup(ws: Workspace, cfg: dict, notify: Notify) -> None:
-    """Run the `setup` commands in the workspace container, as root (the image's
-    default user) via `docker exec`. Called from start_workspace when the
-    container hasn't recorded a completed setup (see `_setup_needed`): a fresh
-    container, or a prior attempt that failed. A failing command raises
-    DockerError and leaves the container running for debugging -- and, since the
-    success marker isn't written, the next `start` retries setup.
+    """Run the `setup` commands in the workspace container, as root (`-u 0`) via
+    `docker exec`. Called from start_workspace when the container hasn't recorded
+    a completed setup (see `_setup_needed`): a fresh container, or a prior
+    attempt that failed. A failing command raises DockerError and leaves the
+    container running for debugging -- and, since the success marker isn't
+    written, the next `start` retries setup.
+
+    Root is pinned with `-u 0` rather than inherited from the image default,
+    because the container's default run-user is not always root: `map_host_user`
+    adds `--userns=keep-id`, under which podman runs the container as the mapped
+    (non-root) uid, and a user could bake `USER dev` into their image. setup is
+    the place to provision (useradd, apt, chown the home volume), so it must be
+    root regardless; uid 0 is root-in-namespace even under keep-id (where it maps
+    to a subuid). `enter` pins its own `-u <user>`, so the two never collide.
 
     Setup commands should be idempotent: a container recreate (spec drift or a
     manual `docker rm`) re-runs them, while the persistent home volume
@@ -292,7 +300,7 @@ def run_setup(ws: Workspace, cfg: dict, notify: Notify) -> None:
     for i, cmd in enumerate(setup):
         notify(f"  setup[{i}]: {cmd}")
         r = subprocess.run(
-            ["docker", "exec", ws.ws_container, "sh", "-lc", cmd],
+            ["docker", "exec", "-u", "0", ws.ws_container, "sh", "-lc", cmd],
             check=False,
         )
         if r.returncode != 0:

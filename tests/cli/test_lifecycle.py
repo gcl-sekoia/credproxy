@@ -613,8 +613,23 @@ def test_run_setup_runs_every_call(xdg, ws_factory, monkeypatch):
     lifecycle.run_setup(ws, cfg, notify=lambda *_: None)
     lifecycle.run_setup(ws, cfg, notify=lambda *_: None)
     assert len(calls) == 4  # 2 commands x 2 invocations
-    assert calls[0][:3] == ["docker", "exec", ws.ws_container]
+    # setup is pinned to root (-u 0), not the container's default run-user
+    # (which keep-id / a baked `USER` could make non-root).
+    assert calls[0][:5] == ["docker", "exec", "-u", "0", ws.ws_container]
     assert "echo one" in calls[0]
+
+
+def test_run_setup_pins_root(xdg, ws_factory, monkeypatch):
+    """Every setup exec carries `-u 0` so provisioning is root regardless of the
+    container's default user (keep-id under map_host_user, or a baked USER)."""
+    from credproxy_cli.core import lifecycle
+    calls = []
+    monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run(calls))
+    ws = ws_factory("a")
+    lifecycle.run_setup(ws, {"setup": ["id -u"]}, notify=lambda *_: None)
+    cmd = calls[0]
+    assert cmd[cmd.index("-u") + 1] == "0"
+    assert cmd.index("-u") < cmd.index(ws.ws_container)
 
 
 def test_run_setup_noop_without_commands(xdg, ws_factory, monkeypatch):
