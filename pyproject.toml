@@ -1,0 +1,35 @@
+# Dev-only project metadata. Normal CLI use needs NO installation -- the
+# `bin/credproxy` / `bin/credp` shims put `cli/` on sys.path and run the stdlib
+# CLI directly. This file makes the dev/test loop discoverable and uv-managed:
+#   uv sync                 # create .venv with the CLI (editable) + pytest
+#   uv run pytest           # host CLI tests (tests/cli)
+#   uv run credproxy ...    # the CLI, via the installed console script
+# The proxy is a separate deploy unit; its deps live in proxy/requirements.txt
+# and its tests run in-image (`credproxy dev test --proxy`).
+[project]
+name = "credproxy"
+version = "0.1.0"
+description = "credproxy host CLI: workspace manager for the credential-injecting egress proxy"
+requires-python = ">=3.11"            # stdlib tomllib
+dependencies = []                     # the CLI is standard-library only, by design
+
+[project.scripts]
+credproxy = "credproxy_cli.porcelain.cli:main"        # strict surface
+credp = "credproxy_cli.porcelain.cli:main_loose"      # loose surface
+
+[build-system]
+requires = ["uv_build>=0.9,<0.10"]
+build-backend = "uv_build"
+
+# The package lives under cli/ rather than the default src/ layout.
+[tool.uv.build-backend]
+module-root = "cli"
+module-name = "credproxy_cli"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+# `uv run pytest` (no args) runs the host CLI suite. The proxy suite (tests/)
+# runs in-image via `credproxy dev test --proxy` and has its own tests/pytest.ini.
+testpaths = ["tests/cli"]

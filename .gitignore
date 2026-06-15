@@ -2,3 +2,6 @@ proxy/config.yaml
 .run/
 __pycache__/
 *.pyc
+
+# uv
+.venv/

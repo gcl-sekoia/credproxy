@@ -1164,6 +1164,13 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
 # ---- main --------------------------------------------------------------------
 
 
+def main_loose() -> None:
+    """Console-script entry point for the loose surface (`credp`), equivalent to
+    `credproxy --loose`. The strict surface uses `main` directly. (The `bin/`
+    shims call `main(loose_default=...)` and stay the no-install path.)"""
+    main(loose_default=True)
+
+
 def main(loose_default: bool = False) -> None:
     argv = sys.argv[1:]
 
