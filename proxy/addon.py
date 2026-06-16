@@ -47,13 +47,13 @@ class HostnameLogger:
         req = flow.request
         host = req.pretty_host
         applied: list[str] = []
-        fired: list[str] = []
+        fired: list = []  # the request-time Transform objects whose on_request fired
         for t in creds.transforms_for(host):
             ctx = RequestCtx(req, t.secrets, t.params, t.placeholder)
             try:
                 if t.scheme.on_request(ctx):
                     applied.append(t.scheme.name)
-                    fired.append(t.name)
+                    fired.append(t)
             except Exception as e:  # a scheme must never take the flow down
                 print(f"[scheme] {t.scheme.name} on {host} failed: {e}", flush=True)
 
@@ -61,6 +61,11 @@ class HostnameLogger:
         # for them. A binding keys on its own placeholder, so only the one that
         # matched this request fires -- that's how re-seal bindings sharing a
         # token endpoint are disambiguated (the response carries no binding id).
+        # We stash the request-time Transform OBJECTS, not just their names: the
+        # response hook must re-seal against the exact binding that fired even if
+        # POST /admin/config swaps state.creds while the token request is in
+        # flight (otherwise a stale-name lookup could miss and let the real token
+        # through). See response().
         if fired:
             flow.metadata["credproxy_fired"] = fired
 
@@ -77,24 +82,21 @@ class HostnameLogger:
         print(f"[http] {req.method} {host}{path}{marker}", flush=True)
 
     def response(self, flow: http.HTTPFlow) -> None:
-        # Re-seal seam: plumbed from day one, no-op until a scheme
-        # uses on_response. Iterate the same transforms so a future re-seal
-        # scheme can mint a token from the response and register a dynamic
-        # placeholder via creds.register_runtime(...).
-        # Only run on_response for bindings whose on_request fired on THIS flow
-        # (recorded in the request hook). No fired binding -> nothing to do.
+        # Re-seal seam: a re-seal scheme mints a token from this response and
+        # registers a dynamic placeholder via the minter. Run on_response only
+        # for the bindings whose on_request fired on THIS flow (the request-time
+        # Transform objects recorded above). No fired binding -> nothing to do.
         fired = flow.metadata.get("credproxy_fired")
         if not fired:
             return
-        fired_set = set(fired)
-        creds = self._state.creds
+        # Mint into the LIVE creds (so later API-host requests see the dynamic
+        # placeholder), but re-seal using the request-time transforms -- NOT a
+        # fresh transforms_for() lookup -- so a config swap that landed between
+        # the token request and this response can't drop the binding and let the
+        # real token through.
         host = flow.request.pretty_host
-        # The minter lets a re-seal scheme register a dynamic placeholder
-        # (placeholder -> minted token, TTL) on the API hosts via creds.
-        minter = RuntimeMinter(creds, placeholders.generate)
-        for t in creds.transforms_for(host):
-            if t.name not in fired_set:
-                continue
+        minter = RuntimeMinter(self._state.creds, placeholders.generate)
+        for t in fired:
             # ResponseCtx wraps the whole flow: a re-seal scheme can read the
             # request it answered (host/path) AND read/mutate the response.
             ctx = ResponseCtx(flow, t.secrets, t.params, t.placeholder, minter=minter)
@@ -103,3 +105,16 @@ class HostnameLogger:
             except Exception as e:
                 print(f"[scheme] {t.scheme.name} response on {host} failed: {e}",
                       flush=True)
+                # FAIL CLOSED for the re-seal family: this binding's on_request
+                # fired, so this is a token-endpoint response that MUST be
+                # re-sealed. We couldn't, and the original body may still carry
+                # the real minted token -- so withhold it from the workspace
+                # rather than forward it. (Substitute/sign schemes don't mutate
+                # the response, so a failure there leaks nothing and we forward.)
+                if getattr(t.scheme, "mutates_response", False):
+                    flow.response = http.Response.make(
+                        502,
+                        b"credproxy: re-seal failed; original response withheld\n",
+                        {"Content-Type": "text/plain"},
+                    )
+                    return

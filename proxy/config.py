@@ -356,6 +356,17 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
             if isinstance(pv, list) and all(isinstance(x, str) and x for x in pv):
                 continue
             _fail(f"{source}: {where}.params['{pk}'] must be a string or array of strings")
+        # Required params: some schemes (re-seal) declare params they cannot run
+        # without. For re-seal that gap is a fail-OPEN -- on_response would raise
+        # and the original token-endpoint response (carrying the real minted
+        # token) would otherwise reach the workspace -- so reject the binding at
+        # load rather than at the first token response. A present-but-empty value
+        # (missing key, "", or []) counts as absent.
+        for rp in getattr(scheme, "required_params", ()):
+            pv = params.get(rp)
+            if pv is None or (isinstance(pv, (str, list)) and len(pv) == 0):
+                _fail(f"{source}: {where} scheme '{scheme_name}' requires a "
+                      f"non-empty param '{rp}'")
 
         # --- secret (slot -> value) ---
         secret = entry.get("secret")

@@ -251,7 +251,7 @@ def test_multi_reseal_disambiguation_routes_response_to_the_right_binding():
     log.request(flow)
     assert "client_secret=SECRET_A" in flow.request.text   # A injected its secret
     assert "ph_b" not in flow.request.text and "SECRET_B" not in flow.request.text
-    assert flow.metadata["credproxy_fired"] == ["A"]
+    assert [t.name for t in flow.metadata["credproxy_fired"]] == ["A"]
 
     # Token response -> only A re-seals.
     flow.response.status_code = 200
@@ -284,3 +284,128 @@ def test_response_hook_skips_when_no_binding_fired():
     log.response(flow)
     assert creds.transforms_for("api-a.com") == []
     assert json.loads(flow.response.text)["access_token"] == "TOKEN_A"  # not rewritten
+
+
+# ---- C1: re-seal must never leak the real minted token to the workspace ------
+
+def test_oauth2_reseal_requires_api_hosts_at_config_load():
+    """`api_hosts` is load-bearing: without it on_response can't mint, raises, and
+    the original token response would otherwise reach the workspace. Reject the
+    binding at config load (missing key OR present-but-empty list) rather than
+    failing open at the first token response."""
+    base = {"name": "oauth", "hosts": ["oauth.example.com"],
+            "scheme": "oauth2-reseal", "secret": {"value": "CS"},
+            "placeholder": "cs_PH"}
+    with pytest.raises(config.ConfigError, match="api_hosts"):       # missing
+        config.load_resolved({"bindings": [dict(base)]})
+    with pytest.raises(config.ConfigError, match="api_hosts"):       # empty list
+        config.load_resolved({"bindings": [dict(base, params={"api_hosts": []})]})
+
+
+def test_oauth2_reseal_real_token_absent_from_workspace_body():
+    """The happy path must scrub: the real minted token is gone from the body the
+    workspace receives (a placeholder takes its place)."""
+    creds = _reseal_creds()
+    [t] = creds.transforms_for("oauth.example.com")
+    flow = tflow.tflow(resp=True)
+    flow.response.status_code = 200
+    flow.response.text = json.dumps({"access_token": "MINTED-TOKEN", "expires_in": 3600})
+    minter = config.RuntimeMinter(creds, placeholders.generate)
+    ctx = schemes.ResponseCtx(flow, t.secrets, t.params, t.placeholder, minter=minter)
+    assert t.scheme.on_response(ctx) is True
+    assert "MINTED-TOKEN" not in flow.response.text
+
+
+class _RaisingReseal:
+    """A re-seal-family scheme whose on_response always raises AFTER on_request
+    fired -- models a mint/rewrite failure on a token-endpoint response."""
+    name = "boom"
+    family = "substitute"
+    slots = ("value",)
+    location_kind = "body"
+    header_default = None
+    mutates_response = True
+
+    def on_request(self, ctx) -> bool:
+        return True
+
+    def on_response(self, ctx) -> bool:
+        raise RuntimeError("mint blew up")
+
+
+class _OneTransform:
+    """Minimal Credentials exposing a single transform on one host."""
+    def __init__(self, host, transform):
+        self._host, self._t = host, transform
+
+    def intercepts(self, sni):
+        return sni == self._host
+
+    def intercept_hosts(self):
+        return {self._host}
+
+    def transforms_for(self, host):
+        return [self._t] if host == self._host else []
+
+    def inward_bindings(self):
+        return []
+
+    def register_runtime(self, host, transform, ttl=None):
+        pass
+
+
+def test_response_fails_closed_when_reseal_scheme_raises():
+    """If a response-mutating (re-seal) binding fired but its on_response raises,
+    the addon must WITHHOLD the original token-endpoint body -- the workspace gets
+    a 502, never the real minted token."""
+    t = config.Transform("boom", _RaisingReseal(), {}, "PH", {"value": "CS"})
+    log = addon.HostnameLogger(SimpleNamespace(creds=_OneTransform("login.example.com", t)))
+    req = tutils.treq(host="login.example.com", method=b"POST", path=b"/token",
+                      content=b"x")
+    flow = tflow.tflow(req=req, resp=True)
+    log.request(flow)
+    assert [x.name for x in flow.metadata["credproxy_fired"]] == ["boom"]
+    flow.response.status_code = 200
+    flow.response.text = json.dumps({"access_token": "REAL-MINTED-TOKEN"})
+    log.response(flow)
+    assert flow.response.status_code == 502
+    assert b"REAL-MINTED-TOKEN" not in flow.response.content
+
+
+def test_response_does_not_fail_closed_for_substitute_scheme_error():
+    """A substitute/sign scheme doesn't mutate the response, so an on_response
+    error there leaks nothing -- the addon forwards the response untouched."""
+    class _RaisingBearer(_RaisingReseal):
+        name = "bsub"
+        mutates_response = False
+
+    t = config.Transform("bsub", _RaisingBearer(), {}, "PH", {"value": "CS"})
+    log = addon.HostnameLogger(SimpleNamespace(creds=_OneTransform("api.example.com", t)))
+    req = tutils.treq(host="api.example.com", method=b"GET", path=b"/x")
+    flow = tflow.tflow(req=req, resp=True)
+    log.request(flow)
+    flow.response.status_code = 200
+    flow.response.text = "ok"
+    log.response(flow)
+    assert flow.response.status_code == 200      # forwarded, not withheld
+    assert flow.response.text == "ok"
+
+
+def test_response_reseals_against_request_time_binding_after_config_swap():
+    """A POST /admin/config landing between the token request and its response
+    must NOT let the real token through: the response hook re-seals against the
+    request-time binding, not a fresh lookup in the swapped-in config."""
+    state = SimpleNamespace(creds=_reseal_creds())
+    log = addon.HostnameLogger(state)
+    req = tutils.treq(host="oauth.example.com", method=b"POST", path=b"/token",
+                      content=b"grant_type=client_credentials&client_secret=cs_PH")
+    flow = tflow.tflow(req=req, resp=True)
+    log.request(flow)
+    assert flow.metadata.get("credproxy_fired")          # binding A fired
+    # Config swapped out from under the in-flight token request.
+    state.creds = config.load_resolved({"bindings": []})
+    flow.response.status_code = 200
+    flow.response.text = json.dumps({"access_token": "MINTED-TOKEN", "expires_in": 3600})
+    log.response(flow)
+    assert "MINTED-TOKEN" not in flow.response.text       # still scrubbed
+    assert json.loads(flow.response.text)["access_token"].startswith("credproxy_")

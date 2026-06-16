@@ -214,6 +214,16 @@ class Scheme(Protocol):
     # location_key(); mirrored on the CLI's SchemeSpec.
     location_kind: str
     header_default: str | None
+    # True if `on_response` MUTATES the response the workspace receives (the
+    # re-seal family: it pulls the minted token out of the body and swaps in a
+    # placeholder). The addon uses this to FAIL CLOSED: if such a scheme fired on
+    # the request but its `on_response` raises, the original body may still carry
+    # the real minted token, so the addon must withhold it rather than forward.
+    # False for the substitute/sign families (their `on_response` is a no-op).
+    mutates_response: bool
+    # Params that MUST be present and non-empty for the binding to be valid;
+    # enforced at config load (see config.load_resolved). Empty for most schemes.
+    required_params: tuple[str, ...] = ()
 
     def on_request(self, ctx: RequestCtx) -> bool: ...
     def on_response(self, ctx: ResponseCtx) -> bool: ...
@@ -235,6 +245,7 @@ class _SubstituteScheme:
 
     family = "substitute"
     slots = ("value",)
+    mutates_response = False
 
     def on_response(self, ctx: ResponseCtx) -> bool:  # noqa: D401 - no-op seam
         return False
@@ -476,6 +487,7 @@ class SigV4Scheme:
     # come from the request), so the header is always the default.
     location_kind = "header"
     header_default = "Authorization"
+    mutates_response = False
 
     def on_request(self, ctx: RequestCtx) -> bool:
         auth = ctx.header_get("Authorization")
@@ -562,6 +574,12 @@ class OAuth2ResealScheme:
     slots = ("value",)
     location_kind = "body"           # the token-endpoint request body
     header_default = None
+    # on_response rewrites the token-endpoint body the workspace receives.
+    mutates_response = True
+    # api_hosts is load-bearing: without it on_response can't mint, would raise,
+    # and the addon would withhold the response. Reject the binding at config
+    # load instead of failing at the first token response.
+    required_params = ("api_hosts",)
 
     def on_request(self, ctx: RequestCtx) -> bool:
         text = ctx.body_text()
