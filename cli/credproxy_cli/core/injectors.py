@@ -89,30 +89,41 @@ class Injector:
     api: int = 1
 
 
-def _placeholder_from(raw: dict, name: str) -> Placeholder:
-    p = raw.get("placeholder")
+def validate_placeholder(p: dict | None, label: str) -> Placeholder:
+    """Validate a `[placeholder]` sub-table (None -> defaults) into a Placeholder.
+
+    Shared by injector AND preset parsing so a bad charset or a length that
+    doesn't exceed the prefix fails at LOAD with a clear error -- rather than
+    later as a `KeyError` inside `generate()` (unknown charset) or, worse, a
+    silent ZERO-ENTROPY sentinel (length <= prefix yields just the prefix,
+    identical across workspaces, defeating placeholder uniqueness). `label`
+    prefixes the message (e.g. "injector 'x'" or "preset 'y' (path)")."""
     if p is None:
         return Placeholder(DEFAULT_PREFIX, DEFAULT_LENGTH, DEFAULT_CHARSET)
     if not isinstance(p, dict):
-        raise InjectorError(f"injector '{name}': [placeholder] must be a table")
+        raise InjectorError(f"{label}: [placeholder] must be a table")
     prefix = p.get("prefix", DEFAULT_PREFIX)
     length = p.get("length", DEFAULT_LENGTH)
     charset = p.get("charset", DEFAULT_CHARSET)
     if not isinstance(prefix, str):
-        raise InjectorError(f"injector '{name}': placeholder.prefix must be a string")
+        raise InjectorError(f"{label}: placeholder.prefix must be a string")
     if not isinstance(length, int) or isinstance(length, bool):
-        raise InjectorError(f"injector '{name}': placeholder.length must be an integer")
+        raise InjectorError(f"{label}: placeholder.length must be an integer")
     if charset not in _CHARSETS:
         raise InjectorError(
-            f"injector '{name}': placeholder.charset must be one of "
+            f"{label}: placeholder.charset must be one of "
             f"{', '.join(sorted(_CHARSETS))} (got {charset!r})"
         )
     if length <= len(prefix):
         raise InjectorError(
-            f"injector '{name}': placeholder.length ({length}) must exceed "
+            f"{label}: placeholder.length ({length}) must exceed "
             f"the prefix length ({len(prefix)})"
         )
     return Placeholder(prefix, length, charset)
+
+
+def _placeholder_from(raw: dict, name: str) -> Placeholder:
+    return validate_placeholder(raw.get("placeholder"), f"injector '{name}'")
 
 
 def _parse(path: Path, name: str, source: str) -> Injector:

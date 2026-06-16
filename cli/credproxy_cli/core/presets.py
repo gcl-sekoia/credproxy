@@ -20,8 +20,8 @@ import tomllib
 from dataclasses import dataclass
 
 from .bindings import Binding
-from .errors import ConfigError, CredproxyError
-from .injectors import Placeholder
+from .errors import ConfigError, CredproxyError, InjectorError
+from .injectors import Placeholder, validate_placeholder
 from .paths import layered_dirs
 
 
@@ -57,11 +57,13 @@ def _parse_preset(path, name: str) -> PresetSpec:
     ph = raw.get("placeholder")
     if not isinstance(ph, dict):
         raise ConfigError(f"{src}: missing [placeholder] table")
+    # Validate through the shared injector path so a bad charset or a
+    # length <= prefix (zero-entropy, non-unique placeholder) fails HERE, not as
+    # a KeyError in generate() or a silently-broken sentinel at build time.
     try:
-        placeholder = Placeholder(
-            prefix=ph["prefix"], length=ph["length"], charset=ph["charset"])
-    except KeyError as e:
-        raise ConfigError(f"{src}: [placeholder] missing {e}")
+        placeholder = validate_placeholder(ph, src)
+    except InjectorError as e:
+        raise ConfigError(str(e)) from e
 
     parts_raw = raw.get("part")
     if not isinstance(parts_raw, list) or not parts_raw:
