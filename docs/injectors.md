@@ -477,6 +477,41 @@ signature — so the script never hand-builds `b64url_encode(header) + "." + …
 and feeds it to a separate signer. That hand-assembly is the classic JWS
 footgun (mis-encoded padding, signing the wrong bytes) this primitive removes.
 
+**Optional placeholder gate (`ovh`, `jwt-bearer`).** By default these
+sign-family scripts build auth from scratch and inject it on
+**every** matching request — there is no placeholder, so no per-request opt-in
+and (because config rejects two no-placeholder bindings on one wire location)
+no way to run two identities on one host.
+
+Set a `--placeholder` on the binding to gate it: the workspace presents the
+placeholder, and the proxy injects **only** for requests that carry it, swapping
+in the real credential. With no placeholder the prior behavior is unchanged
+(fully backward compatible). Because the request carries one placeholder, two
+bindings can now share a host as long as each has a distinct placeholder (the
+config `by_ph` layer routes each request to the matching binding). The real
+secret still never enters the workspace.
+
+The **carrier** — *where* the workspace presents the placeholder — is a
+convention defined by each script, and it is the one piece `/setup` does **not**
+publish (the inward binding exposes `placeholder` but not the header it rides
+in), so configure it from here:
+
+| Injector | Workspace presents the placeholder as | On a match, the proxy… |
+|---|---|---|
+| `jwt-bearer` | `Authorization: Bearer <placeholder>` | mints the real JWT and replaces it |
+| `ovh` | `X-Ovh-Application: <placeholder>` (stand-in for the public app key) | signs and overwrites the four `X-Ovh-*` headers with the real app key |
+
+```sh
+# Per-request opt-in: only requests sending `Authorization: Bearer GCP-A` get
+# minted; a second identity can bind the same host with a different placeholder.
+credproxy workspace NAME binding add --injector jwt-bearer --provider env \
+    --secret private_key=GCP_SA_PRIVATE_KEY --host api.example.com \
+    --placeholder GCP-A
+```
+
+(The built-in `sigv4` scheme has no placeholder gate yet — see issue #12; this
+gate is the script-sign family's version of the same idea.)
+
 **`oauth-reseal`** — the scripted twin of the built-in `oauth2-reseal` scheme,
 demonstrating re-seal via the `mint` primitives. Its injector manifest sets
 `location_kind = "body"` and a `[params] api_hosts = [...]` list (copy it to your

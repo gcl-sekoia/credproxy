@@ -127,6 +127,21 @@ These shape how `enter` runs commands in the container; they are **exec-only**
 `setup` runs as root regardless of `user`, so it is the place to provision a
 non-root user (create it, grant sudo, chown its home).
 
+### Injected environment
+
+Beyond your `env` table, every workspace gets a few read-only breadcrumbs in its
+environment — handy for `setup` scripts, shell rc, and a tenant that wants to
+self-configure. They are stable per workspace/host, so (unlike `env`) they are
+**not** part of the container spec hash and never cause a recreate; an existing
+container picks up a newly added one on its next recreate. Your `env` is applied
+last, so a key you set there shadows the breadcrumb of the same name.
+
+| Variable | Value |
+|---|---|
+| `CREDPROXY_SETUP` | `http://proxy.local/llms.txt` — where a tenant (e.g. an agent) reads its own setup guidance. `proxy.local` resolves via `/etc/hosts`; `/setup` serves the machine-readable least-disclosure binding shape. |
+| `CREDPROXY_WORKSPACE` | The workspace's own name — so a setup script or prompt label can read it instead of templating the literal name (also available via `/setup`). |
+| `CREDPROXY_HOST_UID` / `CREDPROXY_HOST_GID` | The uid/gid the CLI runs as, i.e. the owner of your bind-mounted project dirs. The value to match a `setup`-created user to (`useradd -u $CREDPROXY_HOST_UID`) — see *Non-root user & mount ownership* below. |
+
 ### Non-root user & mount ownership
 
 Running the workspace as a non-root `user` (above) and bind-mounting host
@@ -136,9 +151,9 @@ models. credproxy never changes host-file ownership to paper over this; instead
 you pick the right lever per runtime. In every case the host bytes and ownership
 are left untouched.
 
-Every workspace gets `CREDPROXY_HOST_UID` / `CREDPROXY_HOST_GID` in its
-environment — the uid/gid the CLI runs as, i.e. the owner of your bind-mounted
-project dirs. It's the value to match a `setup`-created user to
+The lever here is `CREDPROXY_HOST_UID` / `CREDPROXY_HOST_GID` (see *Injected
+environment* above) — the uid/gid the CLI runs as, i.e. the owner of your
+bind-mounted project dirs. It's the value to match a `setup`-created user to
 (`useradd -u $CREDPROXY_HOST_UID`).
 
 #### The mental model
