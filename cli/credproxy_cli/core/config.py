@@ -123,7 +123,7 @@ def _parse_mount(m, where: str) -> dict:
 
 def load_config(ws: Workspace) -> dict:
     """Parse and validate the container-side settings of <name>.toml into a
-    normalized dict: {image, home, mounts: [{source, target, readonly}],
+    normalized dict: {image, home, directory, mounts: [{source, target, readonly}],
     env: {}, setup: []}. The `[[binding]]` array is handled separately by
     core/bindings.py."""
     if not ws.exists():
@@ -153,6 +153,17 @@ def load_config(ws: Workspace) -> dict:
     home = raw.get("home")
     if home is not None and (not isinstance(home, str) or not home.startswith("/")):
         raise ConfigError(f"{ws.config_path}: `home` must be an absolute path")
+
+    # directory: optional host path this workspace is "for". Pure resolution
+    # metadata for the loose surface -- `credp <verb>` with no NAME, run at or
+    # under this path, resolves to this workspace (see core/dirmatch.py). The
+    # name stays canonical; this is just another resolver, like the default
+    # pointer. Host-side only: never touches the container, so NOT part of the
+    # spec hash.
+    directory = raw.get("directory")
+    if directory is not None and (not isinstance(directory, str)
+                                  or not directory.startswith("/")):
+        raise ConfigError(f"{ws.config_path}: `directory` must be an absolute path")
 
     # mounts: typed list. A string is a host bind ("SRC:DST[:ro]"); a table is a
     # bind/volume/profile mount. The `home` sugar prepends the home volume so it
@@ -304,6 +315,7 @@ def load_config(ws: Workspace) -> dict:
     return {
         "image": image,
         "home": home,
+        "directory": directory,
         "mounts": mounts,
         "env": env,
         "setup": setup,
@@ -339,6 +351,53 @@ def quick_image(ws: Workspace) -> str:
         return raw.get("image") or "?"
     except Exception:
         return "?"
+
+
+def quick_directory(ws: Workspace) -> str | None:
+    """Best-effort `directory` read for cwd-resolution and `list`, tolerant of
+    an otherwise-invalid config (a half-edited peer workspace must not break
+    resolution for the rest). Returns None when absent or unreadable."""
+    try:
+        raw = tomllib.loads(ws.config_path.read_text())
+        d = raw.get("directory")
+        return d if isinstance(d, str) and d else None
+    except Exception:
+        return None
+
+
+def set_top_level_key(text: str, key: str, value: str) -> str:
+    """Insert or replace a top-level `key = "value"` string assignment in a TOML
+    document, preserving comments and ordering. Top-level keys must precede the
+    first table header, so a new key is inserted before the first `[...]` /
+    `[[...]]` line (or appended if there is none); an existing top-level
+    assignment is replaced in place. A surgical text edit, like placeholder
+    materialization -- the TOML file stays the single source of truth."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    assignment = f'{key} = "{escaped}"'
+    lines = text.splitlines(keepends=True)
+    header_re = re.compile(r"\s*\[")
+    key_re = re.compile(rf"\s*{re.escape(key)}\s*=")
+    first_header = next((i for i, ln in enumerate(lines) if header_re.match(ln)),
+                        len(lines))
+    # Replace an existing top-level assignment (before the first table header).
+    for i in range(first_header):
+        if key_re.match(lines[i]):
+            lines[i] = assignment + ("\n" if lines[i].endswith("\n") else "")
+            return "".join(lines)
+    # Otherwise insert before the first header (or append at end).
+    if first_header > 0 and not lines[first_header - 1].endswith("\n"):
+        lines[first_header - 1] += "\n"
+    lines.insert(first_header, assignment + "\n")
+    return "".join(lines)
+
+
+def associate_directory(ws: Workspace, directory: str) -> None:
+    """Persist the workspace's `directory` field (insert or replace) via an
+    atomic write that preserves comments and ordering."""
+    new = set_top_level_key(ws.config_path.read_text(), "directory", directory)
+    tmp = ws.config_path.with_name(ws.config_path.name + ".tmp")
+    tmp.write_text(new)
+    os.replace(tmp, ws.config_path)
 
 
 def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:

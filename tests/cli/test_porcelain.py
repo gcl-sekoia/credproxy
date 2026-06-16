@@ -128,6 +128,161 @@ def test_loose_no_default_fails(xdg, workspaces_dir):
     assert "no default workspace" in err or "credp use" in err
 
 
+# ---- loose: cwd-addressed resolution -----------------------------------------
+
+
+def test_loose_resolves_by_cwd_announced(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """A loose command run from a workspace's `directory` resolves to it, and
+    the cwd match is announced on stderr."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
+    monkeypatch.chdir(proj)
+    ec, out, err = _run_loose(["config"])  # `config` reads the TOML, no docker
+    assert ec == 0, f"stderr: {err}"
+    assert "proj" in err
+    assert "matched current directory" in err
+
+
+def test_loose_cwd_beats_default(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """cwd resolution takes precedence over the default pointer."""
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
+    (workspaces_dir / "other.toml").write_text('image = "x"\n')
+    set_default(Workspace("other"))
+    monkeypatch.chdir(proj)
+    ec, out, err = _run_loose(["config"])
+    assert ec == 0, f"stderr: {err}"
+    assert "matched current directory" in err
+    assert "proj" in err and "other" not in err
+
+
+def test_loose_falls_back_to_default_outside_any_dir(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """With no cwd match, resolution falls back to the default pointer."""
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+
+    (workspaces_dir / "deflt.toml").write_text('image = "x"\n')
+    set_default(Workspace("deflt"))
+    monkeypatch.chdir(tmp_path)  # unrelated dir
+    ec, out, err = _run_loose(["config"])
+    assert ec == 0, f"stderr: {err}"
+    assert "deflt" in err and "default" in err
+
+
+def test_strict_ignores_cwd(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """The strict surface never consults cwd -- a name is still required."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
+    monkeypatch.chdir(proj)
+    ec, out, err = _run(["workspace", "config"])  # strict, no name
+    assert ec != 0
+    assert "required" in err or "strict" in err or "usage" in err.lower()
+
+
+# ---- create --here / --dir ---------------------------------------------------
+
+
+def test_create_here_associates_cwd(xdg, workspaces_dir, tmp_path, monkeypatch):
+    import os
+    from credproxy_cli.core.config import quick_directory
+    from credproxy_cli.core.workspace import Workspace
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    ec, out, err = _run(["workspace", "create", "proj", "--here"])
+    assert ec == 0, f"stderr: {err}"
+    got = quick_directory(Workspace("proj"))
+    assert got and os.path.realpath(got) == os.path.realpath(str(proj))
+
+
+def test_create_dir_associates_path(xdg, workspaces_dir, tmp_path):
+    import os
+    from credproxy_cli.core.config import quick_directory
+    from credproxy_cli.core.workspace import Workspace
+
+    target = tmp_path / "code"
+    target.mkdir()
+    ec, out, err = _run(["workspace", "create", "w", "--dir", str(target)])
+    assert ec == 0, f"stderr: {err}"
+    got = quick_directory(Workspace("w"))
+    assert got and os.path.realpath(got) == os.path.realpath(str(target))
+
+
+def test_create_here_and_dir_conflict(xdg, workspaces_dir, tmp_path):
+    ec, out, err = _run(["workspace", "create", "w", "--here", "--dir", str(tmp_path)])
+    assert ec != 0
+    assert "not both" in err
+
+
+def test_create_here_then_resolves(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """End-to-end: create --here writes valid TOML that cwd-resolution reads."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    ec, out, err = _run(["workspace", "create", "proj", "--here"])
+    assert ec == 0, f"stderr: {err}"
+    ec, out, err = _run_loose(["config"])
+    assert ec == 0, f"stderr: {err}"
+    assert "matched current directory" in err
+
+
+# ---- bind-dir ----------------------------------------------------------------
+
+
+def test_bind_dir_defaults_to_cwd(xdg, workspaces_dir, tmp_path, monkeypatch):
+    import os
+    from credproxy_cli.core.config import quick_directory
+    from credproxy_cli.core.workspace import Workspace
+
+    (workspaces_dir / "w.toml").write_text('image = "x"\n')
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    ec, out, err = _run(["workspace", "w", "bind-dir"])
+    assert ec == 0, f"stderr: {err}"
+    got = quick_directory(Workspace("w"))
+    assert got and os.path.realpath(got) == os.path.realpath(str(proj))
+
+
+def test_bind_dir_explicit_path_replaces(xdg, workspaces_dir, tmp_path):
+    import os
+    from credproxy_cli.core.config import quick_directory
+    from credproxy_cli.core.workspace import Workspace
+
+    (workspaces_dir / "w.toml").write_text('image = "x"\ndirectory = "/old/path"\n')
+    target = tmp_path / "new"
+    target.mkdir()
+    ec, out, err = _run(["workspace", "w", "bind-dir", "--dir", str(target)])
+    assert ec == 0, f"stderr: {err}"
+    got = quick_directory(Workspace("w"))
+    assert os.path.realpath(got) == os.path.realpath(str(target))
+    assert "/old/path" not in (workspaces_dir / "w.toml").read_text()
+
+
+def test_bind_dir_loose_default_workspace(xdg, workspaces_dir, tmp_path, monkeypatch):
+    import os
+    from credproxy_cli.core.config import quick_directory
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+
+    (workspaces_dir / "w.toml").write_text('image = "x"\n')
+    set_default(Workspace("w"))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    ec, out, err = _run_loose(["bind-dir"])  # default workspace, cwd
+    assert ec == 0, f"stderr: {err}"
+    got = quick_directory(Workspace("w"))
+    assert got and os.path.realpath(got) == os.path.realpath(str(proj))
+
+
 # ---- reserved names rejected at create ---------------------------------------
 
 
@@ -212,6 +367,40 @@ def test_list_marks_default(xdg, workspaces_dir, monkeypatch):
     assert bravo_line is not None
     assert "*" in alpha_line
     assert "*" not in bravo_line
+    # No workspace has a directory -> the DIRECTORY column stays hidden (output
+    # unchanged from before the feature).
+    assert "DIRECTORY" not in out
+
+
+def test_list_shows_directory_and_cwd_marker(xdg, workspaces_dir, tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
+    (workspaces_dir / "plain.toml").write_text('image = "x"\n')
+    import credproxy_cli.core.docker as _docker_mod
+    monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
+    monkeypatch.chdir(proj)
+
+    ec, out, err = _run(["list"])
+    assert ec == 0, f"stderr: {err}"
+    assert "DIRECTORY" in out
+    cwd_line = next(l for l in out.splitlines() if "<- cwd" in l)
+    assert "proj" in cwd_line
+
+
+def test_list_json_includes_directory_and_here(xdg, workspaces_dir, tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
+    import credproxy_cli.core.docker as _docker_mod
+    monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
+    monkeypatch.chdir(proj)
+
+    ec, out, err = _run(["--json", "list"])
+    assert ec == 0, f"stderr: {err}"
+    row = next(r for r in json.loads(out) if r["name"] == "proj")
+    assert row["here"] is True
+    assert row["directory"]
 
 
 # ---- --json output shapes ----------------------------------------------------

@@ -49,6 +49,7 @@ These still apply — worth surfacing because they will tempt reconsideration:
 - **Placeholder materialization written back to the config file.** Generated names and placeholders are inserted as surgical TOML edits (preserving comments and ordering); the file is the single source of truth. Don't hold generated values in memory or a separate state file.
 - **Ephemeral proxy host port, resolved at call time.** The proxy container is launched with `-p 127.0.0.1:0:39998` (Docker assigns a free port); the CLI resolves it via `docker port` at each call rather than persisting it. This is what allows multiple workspaces to run concurrently without port conflicts. Don't hardcode the host port or cache it.
 - **Strict-by-default two-surface CLI.** `credproxy` is strict (explicit names, no defaults, no prompts, scriptable); `credp` is the human alias (`credproxy --loose`). Convenience lives in the alias, not the default binary behavior, so scripts that omit the flag fail safe. Don't flip the default.
+- **cwd-addressing is a loose-only resolver; the name stays canonical.** A workspace's optional `directory` field lets `credp` resolve an omitted NAME by current directory (walk-up, longest-prefix, cwd before the default pointer, announced). It's a resolver layered on top — never a rename of the addressing model. Don't let the strict surface consult cwd, don't move config/state into the project dir (state stays central under `$XDG_STATE_HOME`, keyed by name), and don't add a path→name index (the `directory` field in each TOML is the single source; resolution scans them tolerantly via `quick_directory`). `core/dirmatch.py`, consulted only in `_resolve_ws`.
 - **Proxy container holds the proxy core; host plugins (future) handle host-touchy things.** Don't push host-touchy logic into the proxy to "simplify"; it breaks cross-platform.
 
 ## Non-goals (don't accidentally implement)
@@ -117,8 +118,9 @@ Two entry points:
 
 **Workspace commands (canonical):**
 
-- `credproxy workspace create NAME` — scaffold `<name>.toml` + `auth.token`. Does not start anything. The scaffold sets a concrete `image` (the builtin/overlay `workspace.template.toml`); to use a different image, edit the generated file. On the loose surface only, if no default workspace is set yet, the new one becomes the default (announced); it never overrides an existing default.
+- `credproxy workspace create NAME [--here | --dir PATH]` — scaffold `<name>.toml` + `auth.token`. Does not start anything. The scaffold sets a concrete `image` (the builtin/overlay `workspace.template.toml`); to use a different image, edit the generated file. `--here`/`--dir` records a `directory` association (cwd-addressing; see below). On the loose surface only, if no default workspace is set yet, the new one becomes the default (announced); it never overrides an existing default.
 - `credproxy workspace use NAME` — set the default workspace pointer (loose surface only).
+- `credproxy workspace NAME bind-dir [--dir PATH]` — associate the workspace with a host `directory` (default: cwd), so the loose surface resolves it by cwd. Surgical edit of the `directory` field; the TOML stays the source of truth. See **cwd-addressing** below.
 - `credproxy current` — print the default workspace pointer (`{"default": ...}` under `--json`); the read-only companion to `use`.
 - `credproxy workspace list [FILTER]` (or `credproxy list`) — workspaces with running status and image; current default marked.
 - `credproxy workspace NAME enter [-- CMD...]` — hot path: start if needed, `docker exec` into the workspace. With no `-- CMD` it runs the config `shell` (default a login shell, `bash -l` — entering is "logging in", the ssh model); `-- CMD` runs a bare, non-login command (the ssh `host cmd` model). Tracks auto-stop sessions. The primary verb.
@@ -150,7 +152,9 @@ Two entry points:
 
 **Loose aliases** (loose surface / `credp` only):
 
-`credp enter [NAME]`, `credp start [NAME]`, `credp stop [NAME]`, `credp recreate [NAME] [--proxy] [--reset-volume NAME]`, `credp delete [NAME] [--keep-volumes]`, `credp apply [NAME]`, `credp inspect [NAME]`, `credp config [NAME] [--declared]`, `credp logs [NAME]`, `credp use NAME`, `credp create NAME`, `credp list [FILTER]`, `credp binding {add|remove|list|test} ...` — all resolve to the canonical workspace command with the current default as the implicit workspace. An explicit NAME overrides the default.
+`credp enter [NAME]`, `credp start [NAME]`, `credp stop [NAME]`, `credp recreate [NAME] [--proxy] [--reset-volume NAME]`, `credp delete [NAME] [--keep-volumes]`, `credp apply [NAME]`, `credp inspect [NAME]`, `credp config [NAME] [--declared]`, `credp logs [NAME]`, `credp bind-dir [NAME] [--dir PATH]`, `credp use NAME`, `credp create NAME [--here]`, `credp list [FILTER]`, `credp binding {add|remove|list|test} ...` — all resolve to the canonical workspace command with the **implicit workspace** as subject. An explicit NAME overrides resolution.
+
+**cwd-addressing (loose surface).** When NAME is omitted, the loose surface resolves the implicit workspace by **current directory first, then the default pointer**: a workspace whose `directory` field is an ancestor of (or equals) cwd matches, most-specific (longest-prefix) wins, and the choice is announced on stderr (`(matched current directory)` vs `(default)`). It's the `cd project && credp enter` ergonomic. The name stays canonical — `directory` is just another resolver, a sibling of the default pointer (`core/dirmatch.py`, consulted only in `_resolve_ws`). Strict `credproxy` never consults cwd. Ambiguity (two workspaces, same dir) errors; `/` and `$HOME` are ignored as too broad. The field is host-side resolution metadata only — never in the spec hash, no recreate. Set via `create --here`/`--dir` or `bind-dir`. See `docs/configuration.md`.
 
 **Harness commands** — `credproxy dev ...`, for hacking on credproxy itself; need the repo checkout:
 

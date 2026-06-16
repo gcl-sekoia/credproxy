@@ -59,18 +59,39 @@ class Renderer:
         if not rows:
             print("no workspaces")
             return
-        header = ("", "NAME", "STATUS", "IMAGE")
-        table = [header]
+        import os
+
+        # Show the DIRECTORY column only when some workspace has an association,
+        # so the common (unused) case renders exactly as before.
+        show_dir = any(r.get("directory") for r in rows)
+        home = os.path.expanduser("~")
+
+        def short(d: str | None) -> str:
+            if not d:
+                return ""
+            if d == home or d.startswith(home + os.sep):
+                return "~" + d[len(home):]
+            return d
+
+        table = [["", "NAME", "STATUS", "IMAGE"] + (["DIRECTORY"] if show_dir else [])]
         for r in rows:
-            mark = "*" if r["default"] else " "
-            status = "running" if r["running"] else "stopped"
-            table.append((mark, r["name"], status, r["image"]))
-        widths = [max(len(row[i]) for row in table) for i in range(3)]
+            row = [
+                "*" if r["default"] else " ",
+                r["name"],
+                "running" if r["running"] else "stopped",
+                r["image"],
+            ]
+            if show_dir:
+                d = short(r.get("directory"))
+                if d and r.get("here"):
+                    d += "  <- cwd"
+                row.append(d)
+            table.append(row)
+        last = len(table[0]) - 1
+        widths = [max(len(row[i]) for row in table) for i in range(last)]
         for row in table:
-            print(
-                f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  "
-                f"{row[2]:<{widths[2]}}  {row[3]}"
-            )
+            cols = [f"{row[i]:<{widths[i]}}" for i in range(last)] + [row[last]]
+            print("  ".join(cols))
 
     # -- create / use / generic name ack --
     def created(self, name: str, path: str) -> None:
@@ -79,6 +100,9 @@ class Renderer:
 
     def used(self, name: str) -> None:
         print(f"default workspace is now '{name}'")
+
+    def bound_dir(self, name: str, directory: str) -> None:
+        print(f"workspace '{name}' associated with {directory}")
 
     def current(self, name: str | None) -> None:
         print(name if name else "(no default workspace; run `credp use NAME`)")
@@ -323,6 +347,9 @@ class JsonRenderer(Renderer):
 
     def used(self, name: str) -> None:
         self._emit({"default": name})
+
+    def bound_dir(self, name: str, directory: str) -> None:
+        self._emit({"name": name, "directory": directory})
 
     def current(self, name: str | None) -> None:
         self._emit({"default": name})

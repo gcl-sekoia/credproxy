@@ -46,6 +46,12 @@ user = "vscode"
 # Directory `enter` starts in (the workspaceFolder analog). Defaults to `home`.
 workdir = "/code"
 
+# HOST directory this workspace is "for". On the loose surface (`credp`), a
+# command with no NAME run from at/under this path resolves to this workspace.
+# Pure CLI resolution metadata — never touches the container. Usually set via
+# `create --here`/`--dir` or `bind-dir` rather than by hand.
+directory = "/home/me/src/myproj"
+
 # Make `user` own the bind mounts without changing host ownership; credproxy
 # picks the per-runtime lever. No-op unless `user` is set. Recreates on change.
 map_host_user = true
@@ -130,6 +136,34 @@ These shape how `enter` runs commands in the container; they are **exec-only**
 
 `setup` runs as root regardless of `user`, so it is the place to provision a
 non-root user (create it, grant sudo, chown its home).
+
+### Directory association (cwd resolution)
+
+`directory` lets the **loose** surface (`credp`) resolve an omitted workspace
+from where you are: a `credp <verb>` with no NAME, run at or under a workspace's
+`directory`, resolves to that workspace. It's the `cd project && credp enter`
+ergonomic — layered on top of the canonical name, which stays primary. This is
+just another resolver, a sibling of the default-workspace pointer.
+
+| Aspect | Behavior |
+|---|---|
+| Match | **Walk-up, longest-prefix**: a workspace whose `directory` is an ancestor of (or equal to) cwd matches; the most specific wins, so `~/src` and `~/src/foo` nest cleanly. Both sides are canonicalized (symlinks, `..`). |
+| Order | **cwd before the default pointer** — "what I mean here" beats "what I usually mean". Whichever fires is announced on stderr (`workspace: foo (matched current directory)`). |
+| Surface | **Loose only.** Strict `credproxy` never consults cwd; it always requires an explicit NAME (the scriptable contract). The field is parsed on both surfaces — only the *resolution* is loose-only. |
+| Ambiguity | Two workspaces claiming the **same** directory is an error at resolve time (name one explicitly). |
+| Too broad | `/` and `$HOME` are ignored as associations (they would match almost everything). |
+| Container | None — host-side resolution metadata, not part of the spec hash, so changing it never recreates anything. |
+
+Set it without hand-editing:
+
+- `credproxy workspace create NAME --here` — associate the new workspace with the
+  current directory (`--dir PATH` for another).
+- `credproxy workspace NAME bind-dir [--dir PATH]` — associate an existing
+  workspace (defaults to the current directory).
+
+Both write `directory` as a surgical edit that preserves comments and ordering
+(the TOML stays the single source of truth). `credproxy list` shows each
+workspace's directory and marks the one matching your current directory.
 
 ### Injected environment
 

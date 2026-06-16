@@ -34,6 +34,7 @@ import argparse
 import os
 import sys
 
+from ..core import dirmatch
 from ..core import docker as core_docker
 from ..core import lifecycle
 from ..core import pointer
@@ -52,7 +53,7 @@ from .render import fail, say
 # Workspace-scoped verbs (the `workspace NAME <verb>` tail).
 _WS_VERBS = {
     "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
-    "config", "logs", "binding",
+    "config", "logs", "binding", "bind-dir",
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
@@ -78,12 +79,18 @@ def _resolve_ws(ctx: Ctx, name: str | None) -> Workspace:
     """Resolve an (optionally omitted) workspace name to a concrete Workspace.
 
     STRICT: a missing name is an error -- explicit naming is the contract.
-    LOOSE: a missing name falls back to the default pointer, and the
-    resolution is announced on stderr."""
+    LOOSE: a missing name resolves by current directory first (a workspace whose
+    `directory` is an ancestor of cwd), then the default pointer; either way the
+    resolution is announced on stderr. cwd wins because "what I mean here" beats
+    "what I usually mean"."""
     if name is not None:
         return for_name(name)
     if not ctx.loose:
         fail("workspace name required (strict mode names every workspace)")
+    ws = dirmatch.resolve_cwd()
+    if ws is not None:
+        say(f"workspace: {ws.name} (matched current directory)")
+        return ws
     ws = pointer.resolve_default()
     say(f"workspace: {ws.name} (default)")
     return ws
@@ -95,18 +102,19 @@ def _is_default(ws: Workspace) -> bool:
 
 def _confirm_destructive(ctx: Ctx, ws: Workspace, implicit: bool, verb: str) -> None:
     """The safety gate. Fires only when a destructive command targets an
-    IMPLICIT (defaulted) workspace, in LOOSE mode. Explicit targets never
-    prompt. `--yes` bypasses. Fails closed without a TTY."""
+    IMPLICIT (defaulted or cwd-matched) workspace, in LOOSE mode. Explicit
+    targets never prompt. `--yes` bypasses. Fails closed without a TTY."""
     if not (ctx.loose and implicit):
         return
     if ctx.assume_yes:
         return
     if not sys.stdin.isatty():
         fail(
-            f"refusing to {verb} the default workspace '{ws.name}' "
+            f"refusing to {verb} the implicitly-selected workspace '{ws.name}' "
             f"without confirmation: stdin is not a TTY (pass --yes)"
         )
-    suffix = "(current default)"
+    suffix = ("(current default)" if pointer.read_default() == ws.name
+              else "(matched current directory)")
     reply = input(f'{verb.capitalize()} workspace "{ws.name}" {suffix}? [y/N] ')
     if reply.strip().lower() not in ("y", "yes"):
         fail("aborted")
@@ -120,10 +128,22 @@ def _require_exists(ws: Workspace) -> None:
 # ---- workspace commands ------------------------------------------------------
 
 
-def do_create(ctx: Ctx, name: str) -> None:
+def do_create(ctx: Ctx, name: str, directory: str | None = None) -> None:
     ws = for_name(name)  # always explicit; reserved-name check happens here
     lifecycle.create_workspace_files(ws)
     render.OUT.created(ws.name, str(ws.config_path))
+    # Optional cwd-association (`--here`/`--dir`): record the directory this
+    # workspace is "for" so `credp <verb>` resolves it from there (dirmatch).
+    if directory is not None:
+        from ..core import config as core_config
+        real = os.path.realpath(directory)
+        if real == os.path.sep or real == os.path.realpath(os.path.expanduser("~")):
+            say(f"note: {directory} is too broad -- cwd resolution ignores it")
+        claimer = dirmatch.find_claimer(directory, exclude=ws.name)
+        if claimer:
+            say(f"note: directory {directory} is also claimed by '{claimer}'")
+        core_config.associate_directory(ws, directory)
+        say(f"associated with directory {directory}")
     # Loose convenience: seed the default-workspace pointer when it is unset,
     # so `credp enter` works immediately without a separate `use`. Only fills a
     # vacuum -- never overrides an existing selection -- and is announced. The
@@ -131,6 +151,26 @@ def do_create(ctx: Ctx, name: str) -> None:
     if ctx.loose and pointer.read_default() is None:
         pointer.set_default(ws)
         say(f"set '{ws.name}' as the default workspace")
+
+
+def do_bind_dir(ctx: Ctx, name: str | None, directory_flag: str | None) -> None:
+    """Associate a workspace with a host directory (default: cwd), so a loose
+    `credp <verb>` run from at/under it resolves here. Sugar over editing the
+    `directory` field; the TOML stays the source of truth."""
+    from ..core import config as core_config
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    directory = (os.path.abspath(os.path.expanduser(directory_flag))
+                 if directory_flag else os.getcwd())
+    real = os.path.realpath(directory)
+    if real == os.path.sep or real == os.path.realpath(os.path.expanduser("~")):
+        say(f"note: {directory} is too broad -- cwd resolution ignores it")
+    claimer = dirmatch.find_claimer(directory, exclude=ws.name)
+    if claimer:
+        say(f"note: directory {directory} is also claimed by '{claimer}'")
+    core_config.associate_directory(ws, directory)
+    render.OUT.bound_dir(ws.name, directory)
 
 
 def do_use(ctx: Ctx, name: str) -> None:
@@ -144,7 +184,16 @@ def do_current(ctx: Ctx) -> None:
 
 
 def do_list(ctx: Ctx, filter_: str | None) -> None:
+    from ..core import config as core_config
+
     default = pointer.read_default()
+    # Which workspace (if any) the current directory resolves to -- informational
+    # marker only. Tolerate ambiguity (don't crash `list` over it).
+    try:
+        here_ws = dirmatch.resolve_cwd()
+        here_name = here_ws.name if here_ws else None
+    except CredproxyError:
+        here_name = None
     rows = []
     for s in core_workspace.list_workspaces():
         if filter_ and filter_ not in s.name:
@@ -154,6 +203,8 @@ def do_list(ctx: Ctx, filter_: str | None) -> None:
             "running": s.running,
             "image": s.image,
             "default": s.name == default,
+            "directory": core_config.quick_directory(Workspace(s.name)),
+            "here": s.name == here_name,
         })
     render.OUT.workspace_list(rows)
 
@@ -833,6 +884,10 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     p_config.add_argument("--declared", action="store_true", dest="config_declared")
     sub.add_parser("logs")
 
+    p_bind = sub.add_parser("bind-dir")
+    # Defaults to the current directory; --dir associates a different one.
+    p_bind.add_argument("--dir", dest="bind_directory", default=None, metavar="PATH")
+
     binding = sub.add_parser("binding")
     bsub = binding.add_subparsers(dest="bindingcmd", required=True)
     _binding_subparsers(bsub)
@@ -861,6 +916,7 @@ _STRICT_HELP = (
     "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
     "  credproxy current                   (print the default workspace)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
+    "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
     "  credproxy workspace NAME binding add|remove|list|test ...\n"
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
@@ -882,10 +938,11 @@ _LOOSE_HELP = (
     "An omitted workspace resolves to the current default (announced on\n"
     "stderr); destructive actions on the default workspace ask first.\n"
     "\n"
-    "Workspaces (omit NAME to act on the default):\n"
+    "Workspaces (omit NAME to resolve by current directory, then the default):\n"
     "  credp use NAME                  set the default workspace\n"
     "  credp current                   print the default workspace\n"
-    "  credp create NAME (becomes the default if none is set yet)\n"
+    "  credp create NAME [--here]      (--here associates the current directory)\n"
+    "  credp bind-dir [NAME] [--dir PATH]  associate a workspace with a directory\n"
     "  credp list [FILTER]\n"
     "  credp enter|edit|start|stop|recreate|delete|apply|inspect|logs [NAME]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
@@ -948,6 +1005,10 @@ _CREATE_HELP = (
     "auth token (does not start anything). The scaffold sets a concrete image;\n"
     "edit the generated <name>.toml to change it (its comments show what to\n"
     "adjust), or override the template in a profile overlay (see docs/forking.md).\n"
+    "\n"
+    "  --here        associate the workspace with the current directory, so a\n"
+    "                loose `credp <verb>` run from at/under it resolves here.\n"
+    "  --dir PATH    associate with PATH instead of the current directory.\n"
 )
 
 
@@ -1054,6 +1115,12 @@ _VERB_HELP = {
         "credproxy workspace NAME logs -- follow the proxy container's logs\n"
         "(docker logs -f)."
     ),
+    "bind-dir": (
+        "credproxy workspace NAME bind-dir [--dir PATH] -- associate the workspace\n"
+        "with a host directory (default: the current directory), so a loose\n"
+        "`credp <verb>` run from at or under it resolves to NAME. Sugar over\n"
+        "editing the `directory` field in the .toml (the source of truth)."
+    ),
 }
 
 
@@ -1118,7 +1185,7 @@ def _dispatch_workspace(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
             say(_CREATE_HELP)
             return
         a = _parse_create(rest[1:])
-        do_create(ctx, a.name)
+        do_create(ctx, a.name, _create_dir(a))
         return
     if head == "use":
         if len(rest) != 2:
@@ -1171,6 +1238,8 @@ def _run_ws_verb(
         do_config(ctx, name, a.config_declared)
     elif verb == "logs":
         do_logs(ctx, name)
+    elif verb == "bind-dir":
+        do_bind_dir(ctx, name, a.bind_directory)
     elif verb == "binding":
         bc = a.bindingcmd
         if bc == "add":
@@ -1186,7 +1255,22 @@ def _run_ws_verb(
 def _parse_create(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="credproxy workspace create", add_help=False)
     p.add_argument("name")
+    # Associate the new workspace with a host directory, so `credp <verb>` run
+    # from at/under it resolves here. --here uses the current directory.
+    p.add_argument("--here", action="store_true")
+    p.add_argument("--dir", dest="directory", default=None, metavar="PATH")
     return p.parse_args(argv)
+
+
+def _create_dir(a: argparse.Namespace) -> str | None:
+    """Resolve the directory association from `create` flags (--here/--dir)."""
+    if a.here and a.directory is not None:
+        fail("give --here or --dir, not both")
+    if a.here:
+        return os.getcwd()
+    if a.directory is not None:
+        return os.path.abspath(os.path.expanduser(a.directory))
+    return None
 
 
 # ---- loose aliases -----------------------------------------------------------
@@ -1196,7 +1280,7 @@ def _parse_create(argv: list[str]) -> argparse.Namespace:
 
 _ALIAS_TO_WS_VERB = {
     "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
-    "config", "logs", "binding",
+    "config", "logs", "binding", "bind-dir",
 }
 
 
@@ -1213,7 +1297,7 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
             say(_CREATE_HELP)
             return
         a = _parse_create(rest)
-        do_create(ctx, a.name)
+        do_create(ctx, a.name, _create_dir(a))
         return
     if head == "list":
         do_list(ctx, rest[0] if rest else None)

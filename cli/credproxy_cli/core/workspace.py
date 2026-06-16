@@ -36,7 +36,7 @@ _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*$")
 RESERVED_NAMES = frozenset({
     # workspace-level verbs (used both name-before-verb and as bare verbs)
     "create", "use", "list", "enter", "edit", "start", "stop", "recreate",
-    "delete", "apply", "inspect", "config", "logs",
+    "delete", "apply", "inspect", "config", "logs", "bind-dir",
     # sub-noun
     "binding",
     # top-level meta commands (no workspace argument)

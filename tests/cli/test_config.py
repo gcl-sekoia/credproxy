@@ -150,6 +150,116 @@ def test_load_config_home_not_string(xdg, workspaces_dir):
         load_config(ws)
 
 
+# ---- directory (cwd-addressing) ----------------------------------------------
+
+
+def test_load_config_directory(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", 'image = "x"\ndirectory = "/home/me/proj"\n')
+    cfg = load_config(Workspace("w"))
+    assert cfg["directory"] == "/home/me/proj"
+
+
+def test_load_config_directory_absent_is_none(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", 'image = "x"\n')
+    assert load_config(Workspace("w"))["directory"] is None
+
+
+def test_load_config_directory_not_absolute(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "bad", 'image = "x"\ndirectory = "relative/path"\n')
+    with pytest.raises(ConfigError, match="`directory` must be an absolute path"):
+        load_config(Workspace("bad"))
+
+
+def test_directory_not_in_spec_hash(xdg, workspaces_dir):
+    """`directory` is host-side resolution metadata; changing it must not
+    recreate the container (must not alter the spec hash)."""
+    from credproxy_cli.core.config import load_config, workspace_spec_hash
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", 'image = "x"\n')
+    base = workspace_spec_hash(load_config(Workspace("w")), None)
+    _write(workspaces_dir, "w", 'image = "x"\ndirectory = "/home/me/proj"\n')
+    withdir = workspace_spec_hash(load_config(Workspace("w")), None)
+    assert base == withdir
+
+
+def test_quick_directory(xdg, workspaces_dir):
+    from credproxy_cli.core.config import quick_directory
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", 'image = "x"\ndirectory = "/p"\n')
+    assert quick_directory(Workspace("w")) == "/p"
+
+
+def test_quick_directory_absent(xdg, workspaces_dir):
+    from credproxy_cli.core.config import quick_directory
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", 'image = "x"\n')
+    assert quick_directory(Workspace("w")) is None
+
+
+def test_quick_directory_tolerant_of_bad_toml(xdg, workspaces_dir):
+    from credproxy_cli.core.config import quick_directory
+    from credproxy_cli.core.workspace import Workspace
+
+    (workspaces_dir / "w.toml").write_text("not = valid = toml [[[\n")
+    assert quick_directory(Workspace("w")) is None
+
+
+# ---- set_top_level_key (surgical write-back) ---------------------------------
+
+
+def test_set_top_level_key_appends_when_no_tables():
+    import tomllib
+    from credproxy_cli.core.config import set_top_level_key
+
+    out = set_top_level_key('image = "x"\n', "directory", "/p")
+    assert tomllib.loads(out)["directory"] == "/p"
+    assert tomllib.loads(out)["image"] == "x"
+
+
+def test_set_top_level_key_replaces_existing():
+    import tomllib
+    from credproxy_cli.core.config import set_top_level_key
+
+    out = set_top_level_key('image = "x"\ndirectory = "/old"\n', "directory", "/new")
+    assert tomllib.loads(out)["directory"] == "/new"
+    assert "/old" not in out
+
+
+def test_set_top_level_key_inserts_before_table():
+    """A new top-level key must land before the first table header to stay
+    in the root table (valid TOML)."""
+    import tomllib
+    from credproxy_cli.core.config import set_top_level_key
+
+    src = 'image = "x"\n\n[env]\nFOO = "bar"\n'
+    out = set_top_level_key(src, "directory", "/p")
+    parsed = tomllib.loads(out)
+    assert parsed["directory"] == "/p"
+    assert parsed["env"] == {"FOO": "bar"}
+
+
+def test_set_top_level_key_preserves_comments():
+    from credproxy_cli.core.config import set_top_level_key
+
+    src = '# my workspace\nimage = "x"  # the image\n'
+    out = set_top_level_key(src, "directory", "/p")
+    assert "# my workspace" in out
+    assert "# the image" in out
+
+
 def test_load_config_mounts_not_array(xdg, workspaces_dir):
     from credproxy_cli.core.config import load_config
     from credproxy_cli.core.errors import ConfigError
