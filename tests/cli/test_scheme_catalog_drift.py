@@ -57,3 +57,15 @@ def test_uses_placeholder_matches_family():
     for name, spec in cli_schemes.CATALOG.items():
         expected = proxy_schemes.SCHEMES[name].family == "substitute"
         assert spec.uses_placeholder == expected, f"uses_placeholder mismatch for {name}"
+
+
+def test_required_params_match_proxy():
+    """Required-param enforcement (e.g. oauth2-reseal's api_hosts) must match the
+    proxy, so a binding the CLI accepts isn't rejected at proxy push (or vice
+    versa)."""
+    from credproxy_cli.core import schemes as cli_schemes
+    proxy_schemes = _proxy_schemes()
+    for name, spec in cli_schemes.CATALOG.items():
+        proxy_req = tuple(getattr(proxy_schemes.SCHEMES[name], "required_params", ()))
+        assert tuple(spec.required_params) == proxy_req, \
+            f"required_params mismatch for {name}"

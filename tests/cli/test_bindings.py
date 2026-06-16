@@ -272,6 +272,35 @@ def test_validate_unknown_provider(xdg, workspaces_dir):
         validate([b], "test")
 
 
+def _write_injector(xdg_unused, name: str, body: str):
+    from credproxy_cli.core.paths import injectors_config_dir
+    d = injectors_config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.toml").write_text(body)
+
+
+def test_validate_rejects_oauth2_reseal_without_api_hosts(xdg, workspaces_dir):
+    """oauth2-reseal's api_hosts is required: missing it is a fail-OPEN at the
+    proxy, so the CLI must reject the binding at add/apply (parity with the proxy)."""
+    from credproxy_cli.core.bindings import Binding, validate
+    from credproxy_cli.core.errors import ConfigError
+    _write_injector(xdg, "reseal-noapi",
+                    'scheme = "oauth2-reseal"\n[params]\ntoken_field = "access_token"\n')
+    b = Binding(name="r", injector="reseal-noapi", provider="env",
+                secret="CS", hosts=("login.example.com",), placeholder="cs_PH", env=None)
+    with pytest.raises(ConfigError, match="api_hosts"):
+        validate([b], "test")
+
+
+def test_validate_accepts_oauth2_reseal_with_api_hosts(xdg, workspaces_dir):
+    from credproxy_cli.core.bindings import Binding, validate
+    _write_injector(xdg, "reseal-ok",
+                    'scheme = "oauth2-reseal"\n[params]\napi_hosts = ["api.example.com"]\n')
+    b = Binding(name="r", injector="reseal-ok", provider="env",
+                secret="CS", hosts=("login.example.com",), placeholder="cs_PH", env=None)
+    validate([b], "test")        # no raise
+
+
 # ---- _block_spans (surgical-edit boundary scan) ------------------------------
 #
 # The spans must be 1:1 with the [[binding]] tables tomllib parses, in order --

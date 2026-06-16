@@ -225,6 +225,18 @@ def validate(bindings: list[Binding], source: str) -> None:
                 raise ConfigError(f"{source}: binding '{b.name}': {e}")
         spec = injector.spec
 
+        # Required params (e.g. oauth2-reseal's api_hosts): missing/empty would be
+        # a fail-OPEN at the proxy (on_response can't mint, so the real token
+        # response would reach the workspace), so reject at add/apply time rather
+        # than only at proxy push. Mirrors proxy/config.load_resolved.
+        for rp in spec.required_params:
+            pv = injector.params.get(rp)
+            if pv is None or (isinstance(pv, (str, list)) and len(pv) == 0):
+                raise ConfigError(
+                    f"{source}: binding '{b.name}' injector '{b.injector}' "
+                    f"(scheme '{injector.scheme}') requires a non-empty param '{rp}'"
+                )
+
         # secret slots must match the scheme's declared slots.
         got = set(secret_refs(b))
         want = set(spec.slots)

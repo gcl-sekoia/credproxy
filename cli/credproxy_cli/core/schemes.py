@@ -34,6 +34,11 @@ class SchemeSpec:
     # collision detection without per-scheme name matching.
     location_kind: str = "header"
     header_default: str | None = "Authorization"
+    # Params that MUST be present and non-empty on the injector for a binding to
+    # be valid. Mirrors the proxy scheme's `required_params` so a binding the CLI
+    # accepts isn't rejected later at proxy push (and vice versa). Enforced in
+    # bindings.validate(); kept in parity by test_scheme_catalog_drift.
+    required_params: tuple[str, ...] = ()
 
     @property
     def uses_placeholder(self) -> bool:
@@ -62,7 +67,8 @@ CATALOG: dict[str, SchemeSpec] = {
         "oauth2-reseal", "substitute", ("value",),
         {"token_field": "access_token", "expires_field": "expires_in",
          "ttl": "3600", "reseal_header": "Authorization"},
-        location_kind="body", header_default=None),
+        location_kind="body", header_default=None,
+        required_params=("api_hosts",)),
 }
 
 
