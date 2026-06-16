@@ -1,4 +1,4 @@
-"""The bundled `op` (1Password) provider.
+"""The builtin `op` (1Password) provider.
 
 It shells out to the `op` CLI, so these tests run it against a fake `op` on
 PATH -- exercising request parsing, response shape, newline handling, and exit
@@ -16,8 +16,8 @@ _REF = "op://Private/Good/credential"
 
 
 def _op():
-    from credproxy_cli.core.paths import bundled_providers_dir
-    return bundled_providers_dir() / "op"
+    from credproxy_cli.core.paths import builtin_providers_dir
+    return builtin_providers_dir() / "op"
 
 
 @pytest.fixture

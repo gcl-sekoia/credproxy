@@ -83,7 +83,7 @@ def test_injector_list_shows_scheme_column(xdg):
     assert code == 0
     blob = out + err
     assert "SCHEME" in blob
-    # bundled bearer is a built-in; our scaffolded one is a script.
+    # builtin bearer is a built-in; our scaffolded one is a script.
     assert "bearer" in blob
     assert "script:sign" in blob
 

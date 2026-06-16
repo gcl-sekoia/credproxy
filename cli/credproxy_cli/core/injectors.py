@@ -5,9 +5,9 @@ which typed scheme the proxy runs, the scheme's params, and the shape of the
 inert placeholder the workspace holds. Unlike providers (executables),
 injectors are declarative TOML files -- passive, reusable, drop-in.
 
-Discovery (first match wins, user shadows bundled):
+Discovery (first match wins, user shadows builtin):
   1. $XDG_CONFIG_HOME/credproxy/injectors/<name>.toml
-  2. bundled  cli/credproxy_cli/bundled/injectors/<name>.toml
+  2. builtin  cli/credproxy_cli/builtin/injectors/<name>.toml
 
 Schema:
     scheme = "bearer"             # required: a scheme in core/schemes.CATALOG
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import InjectorError
-from .paths import bundled_injectors_dir, injectors_config_dir
+from .paths import layered_dirs
 from .schemes import SchemeSpec, build_script_spec, get_scheme, merge_params
 
 import tomllib
@@ -82,7 +82,7 @@ class Injector:
     params: dict
     env: str | None
     placeholder: Placeholder
-    source: str  # "user" or "bundled"
+    source: str  # "user" or "builtin"
     script: str | None = None
     # Primitive-API version a scripted injector targets (declared in the
     # manifest, pushed on the wire, validated by the proxy). 1 for built-ins.
@@ -189,23 +189,24 @@ def _parse(path: Path, name: str, source: str) -> Injector:
 
 
 def find_injector(name: str) -> Injector:
-    """Resolve an injector by name; user registry shadows bundled."""
-    for source, base in (("user", injectors_config_dir()),
-                         ("bundled", bundled_injectors_dir())):
+    """Resolve an injector by name across the layered registry: user shadows the
+    profile overlay, which shadows builtin (paths.layered_dirs). First wins."""
+    searched = layered_dirs("injectors")
+    for source, base in searched:
         path = base / f"{name}.toml"
         if path.is_file():
             return _parse(path, name, source)
+    where = ", ".join(str(b) for _, b in searched)
     raise InjectorError(
-        f"injector '{name}' not found (looked for {name}.toml in "
-        f"{injectors_config_dir()} and {bundled_injectors_dir()})"
+        f"injector '{name}' not found (looked for {name}.toml in {where})"
     )
 
 
 def list_injectors() -> list[Injector]:
-    """All resolvable injectors, user shadowing bundled, sorted by name."""
+    """All resolvable injectors, user shadowing profile shadowing builtin,
+    sorted by name."""
     seen: dict[str, Injector] = {}
-    for source, base in (("bundled", bundled_injectors_dir()),
-                         ("user", injectors_config_dir())):
+    for source, base in reversed(layered_dirs("injectors")):
         if not base.is_dir():
             continue
         for path in base.iterdir():

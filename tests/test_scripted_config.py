@@ -13,7 +13,7 @@ import config
 import schemes
 
 BEARER_STAR = (Path(__file__).resolve().parents[1]
-               / "cli" / "credproxy_cli" / "bundled" / "scripts" / "bearer.star").read_text()
+               / "cli" / "credproxy_cli" / "builtin" / "scripts" / "bearer.star").read_text()
 
 
 def _script_entry(**over):

@@ -22,11 +22,11 @@ protocol footer — so they diff cleanly and the language choice is yours.
 ## Discovery
 
 A provider is referenced by `<name>`. Lookup order (first match wins, so a
-user definition shadows a bundled one of the same name):
+user definition shadows a builtin one of the same name):
 
 1. `$XDG_CONFIG_HOME/credproxy/providers/<name>` — either an executable file,
    or a directory containing an executable `run`.
-2. Bundled with the tool at `cli/credproxy_cli/bundled/providers/<name>` (same
+2. Builtin with the tool at `cli/credproxy_cli/builtin/providers/<name>` (same
    two shapes).
 
 ## Request (stdin)
@@ -69,7 +69,7 @@ prompts) corrupts the response — see the note on interactive tools below.
 
 Two metadata ops let a provider document itself. Both **run the provider**, so
 each must be cheap and side-effect-free — return the text without touching the
-backend (the bundled `keychain`/`op` providers answer them *before* invoking
+backend (the builtin `keychain`/`op` providers answer them *before* invoking
 `security`/`op`, so listing/showing never triggers a Keychain prompt or a
 1Password unlock). A provider that doesn't implement an op simply exits `3` and
 the field is omitted, so older providers keep working. Neither is ever called on
@@ -123,7 +123,7 @@ a prompt to stdout would be parsed as part of the response and fail.
 The CLI uses a generous timeout (120s) precisely so an interactive prompt has
 time to be answered.
 
-The bundled `bw` (Bitwarden) provider is the canonical example: it reuses
+The builtin `bw` (Bitwarden) provider is the canonical example: it reuses
 `$BW_SESSION` when the vault is already unlocked, and otherwise prompts for the
 master password on the terminal. Because the CLI batches every binding on a
 provider into one invocation and `bw` reads the whole vault in a single
@@ -131,7 +131,7 @@ provider into one invocation and `bw` reads the whole vault in a single
 resolve no matter how many bindings draw from the vault.
 
 A provider that wraps an already-authenticated session need not be interactive
-at all: the bundled `gh-cli` provider returns `gh auth token --hostname <ref>`
+at all: the builtin `gh-cli` provider returns `gh auth token --hostname <ref>`
 (ref = a GitHub hostname; empty = gh's default host), reading gh's own keyring
 without prompting. Its `describe`/`help` are static — like every provider, the
 backend is touched only in the `get` path, so `provider list`/`show` never
@@ -139,7 +139,7 @@ shells out. It pairs with the `github` preset, which defaults its provider to
 `gh-cli` and its secret to `github.com`, so `binding add --preset github` wires
 GitHub API + git + ghcr off one existing login with no further flags.
 
-The bundled `docker-credential` provider adapts any `docker-credential-*` helper
+The builtin `docker-credential` provider adapts any `docker-credential-*` helper
 for registry auth: the ref is a registry host (the helper is resolved from
 `${DOCKER_CONFIG:-~/.docker}/config.json` — `credHelpers[host]`, else
 `credsStore`) or an explicit `<helper>|<host>`. It returns the helper's `Secret`
@@ -152,7 +152,7 @@ per-host, so unlike `bw`'s one-unlock-per-resolve a vault-backed helper prompts
 once per distinct host; the config is still read once per invocation and
 identical `(helper, host)` refs are de-duped.
 
-## Example: the bundled `env` provider
+## Example: the builtin `env` provider
 
 The simplest possible provider reads host environment variables named by the
 request's `secrets` refs:

@@ -1,4 +1,4 @@
-# credproxy bundled script: bearer
+# credproxy builtin script: bearer
 #
 # A Starlark re-implementation of the built-in `bearer` scheme -- an authoring
 # template for scripted injectors (and the Python-vs-Starlark benchmark

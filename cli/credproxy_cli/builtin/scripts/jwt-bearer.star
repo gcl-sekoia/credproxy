@@ -1,4 +1,4 @@
-# credproxy bundled script: jwt-bearer
+# credproxy builtin script: jwt-bearer
 #
 # Self-signed JWT bearer assertion (RS256). Mints a fresh JWT on every request
 # signed with the caller's RSA private key and sets Authorization: Bearer <jwt>.

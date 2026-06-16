@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-The product (codename "credproxy") is a transparent egress proxy for workspace containers — LLM-agent sandboxes, CI runners, dev shells, batch jobs. `design-v0.md` is the initial design sketch, `design-v1.md` is the previous instance-model CLI design, and `design-v2.md` is the current design (implemented). `design-v3.md` specifies the scheme-aware credential-injection model (the typed-scheme replacement for v2's substring-replace) — **fully implemented**: substitute family (`bearer`/`basic`/`body`), sign family (`sigv4`), and re-seal family (`oauth2-reseal` — mints the token-endpoint response into a TTL'd dynamic placeholder so even the short-lived token stays out of the workspace). The sandboxed Starlark escape hatch (`proxy/starlark_runtime.py`, via the `starlark-pyo3` proxy dependency) is wired through the scripted-injector authoring contract — an injector with `scheme = "script"` declares `family`/`slots`/`location` (+ an `api` version) in TOML and names a `.star` file (bundled examples in `cli/credproxy_cli/bundled/scripts/`); the CLI pushes the script source, the proxy compiles it into a `ScriptedScheme`. The script primitive API is the flat/implicit-ctx "option B" model: zero-arg `on_request()`/`on_response()` hooks, flat `req_*`/`resp_*` primitives reading a contextvar-bound ctx (no ctx threading), carrier crypto (so SigV4-class multi-round signing is expressible), `jwt_encode_sign`/`json_*`, and `mint`/`mint_into_json` for re-seal; bundled `ovh`/`jwt-bearer`/`oauth-reseal` worked examples ship and are tested. All are useful background; divergence from earlier docs is expected (learn-by-building). CLAUDE.md (this file) and the code are the living source of truth. The repo holds the proxy core under `proxy/`, the host CLI at `bin/credproxy` and `bin/credp`, the CLI package under `cli/credproxy_cli/`, tests under `tests/`, and `docs/`.
+The product (codename "credproxy") is a transparent egress proxy for workspace containers — LLM-agent sandboxes, CI runners, dev shells, batch jobs. `design-v0.md` is the initial design sketch, `design-v1.md` is the previous instance-model CLI design, and `design-v2.md` is the current design (implemented). `design-v3.md` specifies the scheme-aware credential-injection model (the typed-scheme replacement for v2's substring-replace) — **fully implemented**: substitute family (`bearer`/`basic`/`body`), sign family (`sigv4`), and re-seal family (`oauth2-reseal` — mints the token-endpoint response into a TTL'd dynamic placeholder so even the short-lived token stays out of the workspace). The sandboxed Starlark escape hatch (`proxy/starlark_runtime.py`, via the `starlark-pyo3` proxy dependency) is wired through the scripted-injector authoring contract — an injector with `scheme = "script"` declares `family`/`slots`/`location` (+ an `api` version) in TOML and names a `.star` file (builtin examples in `cli/credproxy_cli/builtin/scripts/`); the CLI pushes the script source, the proxy compiles it into a `ScriptedScheme`. The script primitive API is the flat/implicit-ctx "option B" model: zero-arg `on_request()`/`on_response()` hooks, flat `req_*`/`resp_*` primitives reading a contextvar-bound ctx (no ctx threading), carrier crypto (so SigV4-class multi-round signing is expressible), `jwt_encode_sign`/`json_*`, and `mint`/`mint_into_json` for re-seal; builtin `ovh`/`jwt-bearer`/`oauth-reseal` worked examples ship and are tested. All are useful background; divergence from earlier docs is expected (learn-by-building). CLAUDE.md (this file) and the code are the living source of truth. The repo holds the proxy core under `proxy/`, the host CLI at `bin/credproxy` and `bin/credp`, the CLI package under `cli/credproxy_cli/`, tests under `tests/`, and `docs/`.
 
 ## Big-picture architecture
 
@@ -81,8 +81,18 @@ XDG-based. Override with the XDG env vars (works for tests too).
 ```
 $XDG_CONFIG_HOME/credproxy/                      # default ~/.config/credproxy/
   workspaces/<name>.toml                          # per-workspace config
-  injectors/<name>.toml                           # user injector registry
+  injectors/<name>.toml                           # user injector registry (tier 1)
   providers/<name>  (or <name>/run)               # user provider registry
+  scripts/<name>.star                             # user script registry
+  presets/<name>.toml                             # user preset registry
+
+<repo>/profile/  (or $CREDPROXY_PROFILE_DIR)      # org overlay (tier 2), upstream-empty
+  profile.toml  workspace.template.toml           # singleton overrides
+  injectors/ providers/ scripts/ presets/         # registry overrides/additions
+
+cli/credproxy_cli/builtin/                        # upstream defaults (tier 3)
+  profile.toml  workspace.template.toml           # distribution constants + scaffold
+  injectors/ providers/ scripts/ presets/         # builtin definitions
 
 $XDG_STATE_HOME/credproxy/                        # default ~/.local/state/credproxy/
   default-workspace                               # current-default pointer (loose surface)
@@ -94,7 +104,7 @@ $XDG_STATE_HOME/credproxy/                        # default ~/.local/state/credp
     sessions/<pid>                                # pidfiles for auto-stop tracking
 ```
 
-Bundled injectors and providers ship with the CLI package at `cli/credproxy_cli/bundled/`; user definitions shadow bundled ones of the same name (first match wins).
+**Three-tier resolution (the fork/customization seam).** Every customizable asset resolves through one ordered search path, most specific first: **user** (`$XDG_CONFIG_HOME/credproxy/`, per-machine) → **profile** (the org overlay: `$CREDPROXY_PROFILE_DIR` or `<repo>/profile/`) → **builtin** (upstream defaults in `cli/credproxy_cli/builtin/`). A same-named file in a higher tier shadows the lower; a new name adds. This is `paths.layered_dirs()` for the registries (injectors, providers, scripts, presets) and `paths.resolve_singleton()` for the two singletons (`profile.toml` = distribution constants — default image, image tag, default user/home/uid, default setup — loaded by `core/profile.py`; `workspace.template.toml` = the scaffold `create` writes). The profile overlay is how an org customizes credproxy **without editing engine code or maintaining a conflicting fork** — upstream ships `profile/` empty, so a fork only ever adds files there (its whole diff lives in `profile/`) and `CREDPROXY_PROFILE_DIR` gives a no-fork path. **Don't reintroduce hardcoded distribution constants or a code-only template/preset** — they belong in `builtin/*.toml`, overridable by the overlay. See `docs/forking.md`.
 
 ## Commands
 
@@ -133,9 +143,9 @@ Two entry points:
 
 **Definition commands:**
 
-- `credproxy injector scaffold NAME` — copy the bundled `bearer` template to `$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml`.
+- `credproxy injector scaffold NAME` — copy the builtin `bearer` template to `$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml`.
 - `credproxy injector list`
-- `credproxy provider scaffold NAME` — copy the bundled `env` template to `$XDG_CONFIG_HOME/credproxy/providers/<name>`.
+- `credproxy provider scaffold NAME` — copy the builtin `env` template to `$XDG_CONFIG_HOME/credproxy/providers/<name>`.
 - `credproxy provider list`
 
 **Loose aliases** (loose surface / `credp` only):

@@ -1,4 +1,4 @@
-# credproxy bundled injector: basic
+# credproxy builtin injector: basic
 #
 # HTTP Basic injector. Runs the `basic` scheme: the proxy decodes the
 # `Authorization: Basic` blob, swaps the component equal to the placeholder

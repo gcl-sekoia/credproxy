@@ -1,4 +1,4 @@
-# credproxy bundled script: basic
+# credproxy builtin script: basic
 #
 # A Starlark re-implementation of the built-in `basic` scheme -- an authoring
 # template. HTTP Basic decode-and-swap: decode `Authorization: Basic`, swap the

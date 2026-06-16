@@ -72,10 +72,10 @@ one token endpoint (e.g. multiple OAuth2 apps on a multi-tenant IdP): each is
 told apart by its own placeholder in the request, and the response is re-sealed
 only for the binding that fired on that request — so app A's token only ever
 lands on app A's `api_hosts`. Because `api_hosts` is
-deployment-specific, you **copy** the bundled `oauth2-reseal` injector to
+deployment-specific, you **copy** the builtin `oauth2-reseal` injector to
 `$XDG_CONFIG_HOME/credproxy/injectors/` and edit `api_hosts` (a user injector
-shadows the bundled one) — the same copy-to-edit pattern as `jwt-bearer`. A
-bundled **scripted** twin, `oauth-reseal` (scheme `script`), demonstrates the
+shadows the builtin one) — the same copy-to-edit pattern as `jwt-bearer`. A
+builtin **scripted** twin, `oauth-reseal` (scheme `script`), demonstrates the
 same flow via the [`mint`](#scripted-injectors-the-escape-hatch) primitives; use
 it as the escape-hatch template when you need to customize re-seal beyond the
 built-in scheme's params.
@@ -83,14 +83,14 @@ built-in scheme's params.
 ## Discovery
 
 An injector is referenced by `<name>`. Lookup order (first match wins, so a user
-definition shadows a bundled one of the same name):
+definition shadows a builtin one of the same name):
 
 1. `$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml` (default
    `~/.config/credproxy/injectors/<name>.toml`)
-2. Bundled with the tool at `cli/credproxy_cli/bundled/injectors/<name>.toml`
+2. Builtin with the tool at `cli/credproxy_cli/builtin/injectors/<name>.toml`
 
 `credproxy injector list` shows every resolvable injector and its source
-(`user` or `bundled`).
+(`user` or `builtin`).
 
 ## Schema
 
@@ -150,7 +150,7 @@ for the service (e.g. `Authorization: Bearer <placeholder>`, or a
 scheme does the right transform in transit. There is no `format` field — the
 scheme owns the wire shape.
 
-## Bundled injectors
+## Builtin injectors
 
 | Name | Scheme | Params | Placeholder | env hint |
 |---|---|---|---|---|
@@ -187,7 +187,7 @@ bindings share one bare-token placeholder) — see
 
 ## Authoring your own
 
-`credproxy injector scaffold NAME` copies the bundled `bearer` template to
+`credproxy injector scaffold NAME` copies the builtin `bearer` template to
 `$XDG_CONFIG_HOME/credproxy/injectors/NAME.toml` (it refuses to overwrite an
 existing file). Edit it, then reference it from a binding:
 
@@ -234,7 +234,7 @@ declares the metadata the host CLI can't infer by reading Starlark (`family`,
 ```toml
 # ~/.config/credproxy/injectors/myservice.toml
 scheme = "script"
-script = "myservice"         # resolves myservice.star (user dir, then bundled)
+script = "myservice"         # resolves myservice.star (user dir, then builtin)
 api    = 1                   # primitive-API version the script targets (default 1)
 family = "sign"              # "substitute" (placeholder) | "sign" (no placeholder)
 slots  = ["value"]           # secret slot names the script reads
@@ -258,7 +258,7 @@ flat primitives below read and mutate it directly. A script never receives,
 holds, or passes a context handle.
 
 The script discovery mirrors injectors/providers (`$XDG_CONFIG_HOME/credproxy/
-scripts/<name>.star`, then the bundled set). At `start`/`apply`/`binding test`
+scripts/<name>.star`, then the builtin set). At `start`/`apply`/`binding test`
 the CLI reads the `.star` **source** and pushes it to the proxy with the config
 (the push model — the proxy stays stateless and compiles what it's given, so
 your scripts work with no mounts or image rebuilds).
@@ -420,9 +420,9 @@ expressible, ending the chain with `b64_to_hex(...)` for a hex signature. The
 Starlark environment has no JSON builtin or f-strings — use `json_encode()` /
 `json_decode()` for JSON and `+` for string concatenation.
 
-### Bundled scripted injectors
+### Builtin scripted injectors
 
-Two sign-family examples and a re-seal example ship as bundled injectors.
+Two sign-family examples and a re-seal example ship as builtin injectors.
 
 **`ovh`** — signs OVH API requests. Sets `X-Ovh-Application`,
 `X-Ovh-Consumer`, `X-Ovh-Timestamp`, and `X-Ovh-Signature` (`"$1$" +`
@@ -441,7 +441,7 @@ credproxy workspace NAME binding add --injector ovh --provider env \
 **`jwt-bearer`** — mints a self-signed RS256 JWT assertion from an RSA private
 key and sets `Authorization: Bearer <jwt>`. Slot: `private_key`. Params:
 `iss`, `aud`, `ttl` (set in the injector TOML; copy it to your user injectors
-dir to customize, since a user injector shadows the bundled one).
+dir to customize, since a user injector shadows the builtin one).
 
 ```sh
 credproxy workspace NAME binding add --injector jwt-bearer --provider env \
@@ -552,10 +552,10 @@ dangling runtime entry.
 > `hex_to_b64` for multi-round signing like AWS SigV4, plus `hmac_sha256_hex`,
 > `sha256_hex`, `sha1_hex`, `rs256_sign`), JWT (`jwt_encode_sign`,
 > `jwt_decode_or_none`), JSON (`json_encode`, `json_decode`, and the total
-> `resp_json()`), and request/response introspection — alongside the bundled
+> `resp_json()`), and request/response introspection — alongside the builtin
 > `ovh` and `jwt-bearer` examples. Phase-4 **re-seal** has landed: the
 > response-phase `mint`/`mint_into_json` primitives, the built-in
-> `oauth2-reseal` scheme, and the bundled `oauth-reseal` scripted twin all ship.
+> `oauth2-reseal` scheme, and the builtin `oauth-reseal` scripted twin all ship.
 > The runaway-deadline mechanism is wired and verified
 > against starlark-pyo3's call-path `check_cancelled` (feature-detected); it
 > activates automatically once a wheel carrying that support is published. Until

@@ -1,4 +1,4 @@
-# credproxy bundled injector: sigv4
+# credproxy builtin injector: sigv4
 #
 # AWS Signature Version 4 (sign family). The credential is a *signing key* that
 # never transits the wire, so there is no placeholder to swap: the workspace's

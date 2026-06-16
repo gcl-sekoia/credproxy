@@ -23,7 +23,7 @@ def _write(workspaces_dir: Path, name: str, content: str):
 def test_load_config_minimal(xdg, workspaces_dir):
     """Minimal config (image only) loads and applies defaults."""
     from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.paths import DEFAULT_HOME, DEFAULT_WORKSPACE_IMAGE
+    from credproxy_cli.core.profile import profile
     from credproxy_cli.core.workspace import Workspace
 
     _write(workspaces_dir, "myws", 'image = "alpine:3"\n')
@@ -31,7 +31,7 @@ def test_load_config_minimal(xdg, workspaces_dir):
     cfg = load_config(ws)
 
     assert cfg["image"] == "alpine:3"
-    assert cfg["home"] == DEFAULT_HOME
+    assert cfg["home"] == profile().generic_home
     assert cfg["mounts"] == []
     assert cfg["env"] == {}
     assert cfg["setup"] == []
@@ -40,14 +40,14 @@ def test_load_config_minimal(xdg, workspaces_dir):
 def test_load_config_default_image(xdg, workspaces_dir):
     """Empty image string falls back to the default."""
     from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.paths import DEFAULT_WORKSPACE_IMAGE
+    from credproxy_cli.core.profile import profile
     from credproxy_cli.core.workspace import Workspace
 
     # omitted image entirely
     _write(workspaces_dir, "noimg", "")
     ws = Workspace("noimg")
     cfg = load_config(ws)
-    assert cfg["image"] == DEFAULT_WORKSPACE_IMAGE
+    assert cfg["image"] == profile().default_image
 
 
 def test_load_config_full(xdg, tmp_path, workspaces_dir):
@@ -278,14 +278,14 @@ def test_render_template_is_valid_toml(xdg):
 def test_render_template_defaults_apply(xdg, workspaces_dir):
     """A scaffolded template with no edits loads cleanly via load_config."""
     from credproxy_cli.core.config import load_config, render_template
-    from credproxy_cli.core.paths import DEFAULT_WORKSPACE_IMAGE
+    from credproxy_cli.core.profile import profile
     from credproxy_cli.core.workspace import Workspace
 
-    text = render_template("scaffold_ws", DEFAULT_WORKSPACE_IMAGE)
+    text = render_template("scaffold_ws", profile().default_image)
     (workspaces_dir / "scaffold_ws.toml").write_text(text)
     ws = Workspace("scaffold_ws")
     cfg = load_config(ws)
-    assert cfg["image"] == DEFAULT_WORKSPACE_IMAGE
+    assert cfg["image"] == profile().default_image
     assert cfg["mounts"] == []
     assert cfg["env"] == {}
     # default image scaffolds an active setup (the CA bootstrap)
@@ -296,15 +296,14 @@ def test_render_template_default_image_wires_nonroot_user(xdg, workspaces_dir):
     """For the default (devcontainers) image, the scaffold activates the
     non-root vscode user, its home, and map_host_user -- no edits needed."""
     from credproxy_cli.core.config import load_config, render_template
-    from credproxy_cli.core.paths import (
-        DEFAULT_WORKSPACE_IMAGE, DEFAULT_WORKSPACE_USER, DEFAULT_WORKSPACE_USER_HOME)
+    from credproxy_cli.core.profile import profile
     from credproxy_cli.core.workspace import Workspace
 
-    text = render_template("dc", DEFAULT_WORKSPACE_IMAGE)
+    text = render_template("dc", profile().default_image)
     (workspaces_dir / "dc.toml").write_text(text)
     cfg = load_config(Workspace("dc"))
-    assert cfg["user"] == DEFAULT_WORKSPACE_USER
-    assert cfg["home"] == DEFAULT_WORKSPACE_USER_HOME
+    assert cfg["user"] == profile().default_user
+    assert cfg["home"] == profile().default_home
     assert cfg["map_host_user"] is True
     assert cfg["user_uid"] == 1000          # vscode's uid, so keep-id targets it
 
@@ -313,14 +312,14 @@ def test_render_template_custom_image_keeps_user_commented(xdg, workspaces_dir):
     """A --image override doesn't know the image's user, so user/home/
     map_host_user stay commented (root default, generic home)."""
     from credproxy_cli.core.config import load_config, render_template
-    from credproxy_cli.core.paths import DEFAULT_HOME
+    from credproxy_cli.core.profile import profile
     from credproxy_cli.core.workspace import Workspace
 
     text = render_template("custom", "alpine:3")
     (workspaces_dir / "custom.toml").write_text(text)
     cfg = load_config(Workspace("custom"))
     assert cfg["user"] is None
-    assert cfg["home"] == DEFAULT_HOME
+    assert cfg["home"] == profile().generic_home
     assert cfg["map_host_user"] is False
 
 
@@ -328,10 +327,10 @@ def test_render_template_default_image_bootstraps_ca(xdg, workspaces_dir):
     """The default image has curl + ca tooling, so the scaffold's setup installs
     the proxy CA -- HTTPS interception works right after enter, no manual step."""
     from credproxy_cli.core.config import load_config, render_template
-    from credproxy_cli.core.paths import DEFAULT_WORKSPACE_IMAGE
+    from credproxy_cli.core.profile import profile
     from credproxy_cli.core.workspace import Workspace
 
-    text = render_template("dc", DEFAULT_WORKSPACE_IMAGE)
+    text = render_template("dc", profile().default_image)
     (workspaces_dir / "dc.toml").write_text(text)
     cfg = load_config(Workspace("dc"))
     assert cfg["setup"] == ["curl -fsSL http://proxy.local/bootstrap.sh | sh"]

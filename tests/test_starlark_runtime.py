@@ -22,7 +22,7 @@ import schemes
 from starlark_runtime import ScriptedScheme
 
 SCRIPTS = (Path(__file__).resolve().parents[1]
-           / "cli" / "credproxy_cli" / "bundled" / "scripts")
+           / "cli" / "credproxy_cli" / "builtin" / "scripts")
 
 
 def _ctx(*, headers=None, body=None, secrets=None, params=None, ph="PH"):

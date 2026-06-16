@@ -1,0 +1,37 @@
+# credproxy builtin preset: github
+#
+# A preset emits a coordinated SET of bindings that one credential needs across
+# a service's hosts/schemes -- here a GitHub PAT is `bearer` on api.github.com
+# but HTTP `basic` on github.com / ghcr.io. All parts share ONE generated
+# placeholder (the `[placeholder]` shape below), so client-side token-format
+# checks still pass and there is no hand-computed base64.
+#
+# `default_provider` / `default_secret` make the common case flagless: a bare
+# `binding add --preset github` wires all three off an existing `gh` login.
+# `default_secret` applies only when the resolved provider is `default_provider`
+# (a ref's meaning is provider-specific). The preset's name is the filename stem.
+
+default_provider = "gh-cli"
+default_secret = "github.com"
+
+# The shared, service-shaped sentinel: ghp_ + 36 alnum = 40 chars (classic PAT).
+[placeholder]
+prefix = "ghp_"
+length = 40
+charset = "alnumeric"
+
+[[part]]
+suffix = "api"
+injector = "bearer"
+hosts = ["api.github.com"]
+env = "GITHUB_TOKEN"
+
+[[part]]
+suffix = "git"
+injector = "basic"
+hosts = ["github.com"]
+
+[[part]]
+suffix = "ghcr"
+injector = "basic"
+hosts = ["ghcr.io"]

@@ -1,4 +1,4 @@
-"""Tests for the bundled jwt-bearer Starlark script.
+"""Tests for the builtin jwt-bearer Starlark script.
 
 Verifies that on_request mints an RS256-signed JWT, injects it as
 Authorization: Bearer <jwt>, and that the JWT's header, claims, and signature
@@ -18,7 +18,7 @@ import schemes
 from starlark_runtime import ScriptedScheme
 
 JWT_STAR = (Path(__file__).resolve().parents[1]
-            / "cli" / "credproxy_cli" / "bundled" / "scripts" / "jwt-bearer.star").read_text()
+            / "cli" / "credproxy_cli" / "builtin" / "scripts" / "jwt-bearer.star").read_text()
 
 
 def _b64url_decode(s: str) -> bytes:

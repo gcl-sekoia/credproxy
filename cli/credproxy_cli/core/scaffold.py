@@ -1,6 +1,6 @@
-"""Scaffold a user injector/provider from a bundled template.
+"""Scaffold a user injector/provider from a builtin template.
 
-Bundled definitions double as starting points: `scaffold` copies one into the
+Builtin definitions double as starting points: `scaffold` copies one into the
 user registry under a new name so you can author from it. Filesystem-native --
 the copied file IS the registry entry, referenced by name.
 """
@@ -13,14 +13,14 @@ from pathlib import Path
 
 from .errors import CredproxyError
 from .paths import (
-    bundled_injectors_dir,
-    bundled_providers_dir,
+    builtin_injectors_dir,
+    builtin_providers_dir,
     injectors_config_dir,
     providers_config_dir,
     scripts_config_dir,
 )
 
-# Which bundled definition seeds each kind of scaffold.
+# Which builtin definition seeds each kind of scaffold.
 _INJECTOR_TEMPLATE = "bearer"  # generic bearer injector
 _PROVIDER_TEMPLATE = "env"     # env-var provider script (the python default)
 
@@ -29,7 +29,7 @@ PROVIDER_LANGS = ("python", "sh")
 # Second-language provider template: the env provider in POSIX sh + jq. Same
 # protocol and three-zone shape as the python default, so the two diff cleanly
 # (only fetch() and the dispatch syntax differ). Kept here, NOT under
-# bundled/providers/, so it doesn't show up as a real provider in `list`.
+# builtin/providers/, so it doesn't show up as a real provider in `list`.
 _PROVIDER_TEMPLATE_SH = '''#!/bin/sh
 # credproxy provider: env  —  protocol: docs/providers.md  (needs jq)
 #
@@ -97,7 +97,7 @@ def scaffold(kind: str, name: str, lang: str = "python") -> ScaffoldResult:
     if kind == "injector":
         if lang != "python":
             raise CredproxyError("--lang is only valid for `provider scaffold`")
-        src = bundled_injectors_dir() / f"{_INJECTOR_TEMPLATE}.toml"
+        src = builtin_injectors_dir() / f"{_INJECTOR_TEMPLATE}.toml"
         dst = injectors_config_dir() / f"{name}.toml"
         if dst.exists():
             raise CredproxyError(f"{dst} already exists; refusing to overwrite")
@@ -118,7 +118,7 @@ def scaffold(kind: str, name: str, lang: str = "python") -> ScaffoldResult:
     if lang == "sh":
         dst.write_text(_PROVIDER_TEMPLATE_SH)
     else:
-        shutil.copyfile(bundled_providers_dir() / _PROVIDER_TEMPLATE, dst)
+        shutil.copyfile(builtin_providers_dir() / _PROVIDER_TEMPLATE, dst)
     # Preserve/set the executable bit so the provider is directly runnable.
     dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return ScaffoldResult(kind=kind, name=name, path=dst)

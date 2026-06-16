@@ -14,7 +14,7 @@ def _write_injector(name: str, body: str):
     (d / f"{name}.toml").write_text(textwrap.dedent(body))
 
 
-def test_bundled_oauth2_reseal_injector(xdg):
+def test_builtin_oauth2_reseal_injector(xdg):
     from credproxy_cli.core.injectors import find_injector
 
     inj = find_injector("oauth2-reseal")
@@ -26,7 +26,7 @@ def test_bundled_oauth2_reseal_injector(xdg):
     assert inj.params["token_field"] == "access_token"
 
 
-def test_bundled_oauth_reseal_scripted_injector(xdg):
+def test_builtin_oauth_reseal_scripted_injector(xdg):
     from credproxy_cli.core.injectors import find_injector
     from credproxy_cli.core.scripts import find_script
 

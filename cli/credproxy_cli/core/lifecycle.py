@@ -39,11 +39,8 @@ from .config import (
 from .errors import DockerError, ImageError, ProxyError, WorkspaceError
 from .imageenv import ImageEnv
 from .workspace import Workspace, ensure_token
-from .paths import (
-    DEFAULT_WORKSPACE_IMAGE,
-    IMAGE_TAG,
-    PROXY_DIR,
-)
+from .paths import PROXY_DIR
+from .profile import profile
 from .proxy_http import proxy_status, push_config, wait_for_ready
 
 Notify = Callable[[str], None]
@@ -164,7 +161,7 @@ def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
     # relabel) so the proxy can read it under enforcing SELinux; no-op without.
     if PROXY_DIR.is_dir():
         args += ["-v", f"{PROXY_DIR}:{meta.source}:z"]
-    args.append(IMAGE_TAG)
+    args.append(profile().image_tag)
     docker.docker(args)
 
 
@@ -454,7 +451,7 @@ def start_workspace(ws: Workspace, notify: Notify = _noop,
 
     Progress is reported through `notify`."""
     if not ws.exists():
-        create_workspace_files(ws, DEFAULT_WORKSPACE_IMAGE)
+        create_workspace_files(ws, profile().default_image)
         notify(f"created workspace '{ws.name}'")
 
     meta = ImageEnv.load()
@@ -463,10 +460,11 @@ def start_workspace(ws: Workspace, notify: Notify = _noop,
     ensure_token(ws)
 
     # ---- proxy ----
-    image_id = docker.inspect(IMAGE_TAG, "{{.Id}}")
+    image_tag = profile().image_tag
+    image_id = docker.inspect(image_tag, "{{.Id}}")
     if image_id is None:
         raise ImageError(
-            f"image {IMAGE_TAG} not found; run `credproxy dev build` first"
+            f"image {image_tag} not found; run `credproxy dev build` first"
         )
 
     proxy_fresh = False  # created or started this call -> tmpfs config is empty

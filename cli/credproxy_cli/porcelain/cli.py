@@ -41,10 +41,10 @@ from ..core import workspace as core_workspace
 from ..core.errors import CredproxyError
 from ..core.workspace import RESERVED_NAMES, Workspace, for_name
 from ..core.paths import (
-    DEFAULT_WORKSPACE_IMAGE,
     PROXY_DIR,
     TESTS_DIR,
 )
+from ..core.profile import profile
 from . import render
 from .render import fail, say
 
@@ -450,16 +450,17 @@ def _do_binding_preset(ctx: Ctx, name: str | None, a: argparse.Namespace) -> Non
     """Generate a coordinated binding set from a preset (e.g. github) and
     append all of them, sharing one placeholder."""
     from ..core import bindings as core_bindings
-    from ..core.presets import PRESETS, build_preset
+    from ..core.presets import build_preset, load_presets
     from ..core.providers import find_provider
 
     if a.binding_name or a.placeholder or a.env or a.host:
         fail("--preset manages name/placeholder/env/host itself; drop those flags")
 
-    spec = PRESETS.get(a.preset)
+    presets = load_presets()
+    spec = presets.get(a.preset)
     if spec is None:
         fail(f"unknown preset '{a.preset}'; known presets: "
-             f"{', '.join(sorted(PRESETS))}")
+             f"{', '.join(sorted(presets)) or '(none)'}")
 
     # Provider: the explicit flag, else the preset's default.
     provider = a.provider or spec.default_provider
@@ -677,9 +678,8 @@ def do_provider_show(ctx: Ctx, name: str) -> None:
 def do_dev_build(ctx: Ctx) -> None:
     if not PROXY_DIR.is_dir():
         fail(f"{PROXY_DIR} not found -- `dev` commands need the repo checkout")
-    from ..core.paths import IMAGE_TAG
 
-    core_docker.docker(["build", "-t", IMAGE_TAG, str(PROXY_DIR)], stream=True)
+    core_docker.docker(["build", "-t", profile().image_tag, str(PROXY_DIR)], stream=True)
 
 
 def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False, proxy_only: bool = False) -> None:
@@ -695,7 +695,7 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False, proxy_onl
     import importlib.util
     import subprocess
     from ..core.imageenv import ImageEnv
-    from ..core.paths import IMAGE_TAG, TESTS_DIR, REPO_ROOT
+    from ..core.paths import TESTS_DIR, REPO_ROOT
 
     run_cli = not proxy_only
     run_proxy = not cli_only
@@ -728,13 +728,13 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False, proxy_onl
         "docker", "run", "--rm",
         "-v", f"{PROXY_DIR}:{meta.source}",
         "-v", f"{TESTS_DIR}:/opt/tests",
-        # Read-only so the proxy suite can validate the CLI's bundled scripts
+        # Read-only so the proxy suite can validate the CLI's builtin scripts
         # (the dogfood .star) against the Python built-ins -- single source of
         # truth, even though the proxy never reads cli/ at runtime.
         "-v", f"{REPO_ROOT / 'cli'}:/opt/cli:ro",
         "-w", "/opt",
         "--entrypoint", "python",
-        IMAGE_TAG,
+        profile().image_tag,
         "-m", "pytest", "-v", "tests/", "--ignore=tests/cli",
     ]
     cmd += trailing
@@ -938,14 +938,17 @@ _BINDING_TEST_HELP = (
     "                                bound (no workspace needed).\n"
 )
 
-_CREATE_HELP = (
-    "credproxy workspace create NAME [--image IMG] -- scaffold a workspace\n"
-    "config file and auth token. Does not start anything.\n"
-    "\n"
-    "  NAME         the workspace name (required).\n"
-    "  --image IMG  workspace container image (default: "
-    f"{DEFAULT_WORKSPACE_IMAGE}).\n"
-)
+def _create_help() -> str:
+    # A function (not a module constant) so the distribution's default image is
+    # read at call time -- respecting a profile overlay / CREDPROXY_PROFILE_DIR.
+    return (
+        "credproxy workspace create NAME [--image IMG] -- scaffold a workspace\n"
+        "config file and auth token. Does not start anything.\n"
+        "\n"
+        "  NAME         the workspace name (required).\n"
+        "  --image IMG  workspace container image (default: "
+        f"{profile().default_image}).\n"
+    )
 
 
 def _wants_help(argv: list[str]) -> bool:
@@ -956,7 +959,7 @@ def _wants_help(argv: list[str]) -> bool:
 
 def _scaffold_help(kind: str) -> str:
     s = (
-        f"credproxy {kind} scaffold NAME -- copy the bundled {kind} template "
+        f"credproxy {kind} scaffold NAME -- copy the builtin {kind} template "
         f"into\nyour registry as NAME, to author from. NAME must not start "
         f"with '-'."
     )
@@ -1109,7 +1112,7 @@ def _dispatch_workspace(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
 
     if head == "create":
         if _wants_help(rest):
-            say(_CREATE_HELP)
+            say(_create_help())
             return
         a = _parse_create(rest[1:])
         do_create(ctx, a.name, a.image)
@@ -1180,7 +1183,7 @@ def _run_ws_verb(
 def _parse_create(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="credproxy workspace create", add_help=False)
     p.add_argument("name")
-    p.add_argument("--image", default=DEFAULT_WORKSPACE_IMAGE)
+    p.add_argument("--image", default=profile().default_image)
     return p.parse_args(argv)
 
 
@@ -1205,7 +1208,7 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
         return
     if head == "create":
         if _wants_help(rest):
-            say(_CREATE_HELP)
+            say(_create_help())
             return
         a = _parse_create(rest)
         do_create(ctx, a.name, a.image)
@@ -1445,7 +1448,6 @@ def _compile_script_in_image(source: str) -> str | None:
     import os
     import subprocess
     import tempfile
-    from ..core.paths import IMAGE_TAG
 
     pycode = (
         "import sys\n"
@@ -1469,7 +1471,7 @@ def _compile_script_in_image(source: str) -> str | None:
         # otherwise the baked image's runtime is the contract.
         if PROXY_DIR.is_dir():
             cmd += ["-v", f"{PROXY_DIR}:/opt/proxy:ro"]
-        cmd += ["-w", "/opt/proxy", "--entrypoint", "python", IMAGE_TAG,
+        cmd += ["-w", "/opt/proxy", "--entrypoint", "python", profile().image_tag,
                 "-c", pycode]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True)
@@ -1479,7 +1481,7 @@ def _compile_script_in_image(source: str) -> str | None:
     if r.returncode == 0:
         return None
     if "Unable to find image" in out or "No such image" in out:
-        fail(f"proxy image '{IMAGE_TAG}' not found; build it with "
+        fail(f"proxy image '{profile().image_tag}' not found; build it with "
              f"`credproxy dev build`")
     return out or f"compile failed (exit {r.returncode})"
 

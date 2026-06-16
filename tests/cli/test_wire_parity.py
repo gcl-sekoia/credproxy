@@ -1,7 +1,7 @@
 """Parity: every wire config the CLI's wire_config() emits must be accepted by
 the proxy's load_resolved(). The CLI and proxy are separate deploy units (the
 CLI can't import the proxy), so the wire contract can drift silently -- this
-feeds REAL CLI output into the REAL proxy validator, per bundled injector.
+feeds REAL CLI output into the REAL proxy validator, per builtin injector.
 
 proxy/config.py + schemes.py import on the host (no mitmproxy/aiohttp dep), the
 same way tests/cli/test_scheme_catalog_drift.py reaches the proxy catalog.
@@ -38,7 +38,7 @@ def _minimal_binding(inj):
 
 
 def test_wire_config_round_trips_through_proxy(xdg):
-    """For every bundled built-in injector, CLI wire_config -> proxy
+    """For every builtin built-in injector, CLI wire_config -> proxy
     load_resolved with no error (catches wire-contract drift between units)."""
     from credproxy_cli.core.bindings import wire_config
     from credproxy_cli.core.injectors import list_injectors

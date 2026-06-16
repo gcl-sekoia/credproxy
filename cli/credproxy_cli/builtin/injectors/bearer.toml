@@ -1,4 +1,4 @@
-# credproxy bundled injector: bearer
+# credproxy builtin injector: bearer
 #
 # Generic bearer-token injector. Runs the `bearer` scheme: the proxy
 # substring-swaps the inert placeholder for the real credential inside the

@@ -1,4 +1,4 @@
-# credproxy bundled injector: oauth-reseal (scripted)
+# credproxy builtin injector: oauth-reseal (scripted)
 #
 # Scripted OAuth2 client-credentials re-seal -- the escape-hatch twin of the
 # built-in `oauth2-reseal`, showing how mint_into_json() composes in a .star.
@@ -7,7 +7,7 @@
 #
 # `api_hosts` is required and deployment-specific, so COPY this file to
 # $XDG_CONFIG_HOME/credproxy/injectors/ and edit it (a user injector of the same
-# name shadows the bundled one).
+# name shadows the builtin one).
 
 scheme        = "script"
 script        = "oauth-reseal"

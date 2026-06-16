@@ -1,4 +1,4 @@
-# credproxy bundled injector: ovh
+# credproxy builtin injector: ovh
 #
 # OVH API request signing. Computes the four OVH signature headers
 # (X-Ovh-Application, X-Ovh-Consumer, X-Ovh-Timestamp, X-Ovh-Signature) from

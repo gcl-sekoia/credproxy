@@ -25,16 +25,16 @@ def _write_script(name: str, body: str):
 # ---- scripts registry --------------------------------------------------------
 
 
-def test_find_bundled_scripts(xdg):
+def test_find_builtin_scripts(xdg):
     from credproxy_cli.core.scripts import find_script
 
     for name in ("bearer", "basic", "body"):
         s = find_script(name)
-        assert s.source_origin == "bundled"
+        assert s.source_origin == "builtin"
         assert "def on_request" in s.source
 
 
-def test_user_script_shadows_bundled(xdg):
+def test_user_script_shadows_builtin(xdg):
     _write_script("bearer", "def on_request():\n    return True\n")
     from credproxy_cli.core.scripts import find_script
 
@@ -50,17 +50,17 @@ def test_find_script_missing(xdg):
         find_script("nope_zzz")
 
 
-def test_list_scripts_includes_bundled(xdg):
+def test_list_scripts_includes_builtin(xdg):
     from credproxy_cli.core.scripts import list_scripts
 
     names = [s.name for s in list_scripts()]
     assert {"bearer", "basic", "body", "ovh", "jwt-bearer"} <= set(names)
 
 
-# ---- bundled scripted injectors (ovh, jwt-bearer) parse + resolve ------------
+# ---- builtin scripted injectors (ovh, jwt-bearer) parse + resolve ------------
 
 
-def test_bundled_ovh_injector(xdg):
+def test_builtin_ovh_injector(xdg):
     from credproxy_cli.core.injectors import find_injector
     from credproxy_cli.core.scripts import find_script
 
@@ -71,7 +71,7 @@ def test_bundled_ovh_injector(xdg):
     assert "def on_request" in find_script("ovh").source
 
 
-def test_bundled_jwt_bearer_injector(xdg):
+def test_builtin_jwt_bearer_injector(xdg):
     from credproxy_cli.core.injectors import find_injector
     from credproxy_cli.core.scripts import find_script
 

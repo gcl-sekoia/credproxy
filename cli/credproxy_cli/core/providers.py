@@ -13,9 +13,9 @@ credential resolves in a single exec -- an interactive provider prompts once,
 a vault provider can coalesce same-item refs. A single value is just a list of
 one; there is no single/batch duality on the wire.
 
-Discovery (first match wins, user shadows bundled):
+Discovery (first match wins, user shadows builtin):
   1. $XDG_CONFIG_HOME/credproxy/providers/<name>
-  2. bundled  cli/credproxy_cli/bundled/providers/<name>
+  2. builtin  cli/credproxy_cli/builtin/providers/<name>
 Each location is either an executable file, or a directory holding an
 executable `run`.
 """
@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import ProviderError
-from .paths import bundled_providers_dir, providers_config_dir
+from .paths import layered_dirs
 
 PROTOCOL_VERSION = 1
 
@@ -47,7 +47,7 @@ class Provider:
 
     name: str
     exe: Path
-    source: str  # "user" or "bundled" -- for diagnostics / `list`
+    source: str  # "user" or "builtin" -- for diagnostics / `list`
     description: str | None = None  # from the `describe` op, for `list`
 
 
@@ -101,33 +101,30 @@ def _resolve_in(dir_: Path, name: str) -> Path | None:
 
 
 def find_provider(name: str) -> Provider:
-    """Resolve a provider by name; user registry shadows bundled.
+    """Resolve a provider by name; user registry shadows builtin.
 
     Raises ProviderError if no executable provider is found (covers the
     case where a file exists but is not executable, with a hint)."""
-    for source, base in (("user", providers_config_dir()),
-                         ("bundled", bundled_providers_dir())):
+    searched = layered_dirs("providers")
+    for source, base in searched:
         exe = _resolve_in(base, name)
         if exe is not None:
             return Provider(name=name, exe=exe, source=source)
     # A clearer message if something is present but not runnable.
-    for base in (providers_config_dir(), bundled_providers_dir()):
+    for _, base in searched:
         if (base / name).exists():
             raise ProviderError(
                 f"provider '{name}' found at {base / name} but is not an "
                 f"executable file or a directory with an executable `run`"
             )
-    raise ProviderError(
-        f"provider '{name}' not found (looked in {providers_config_dir()} "
-        f"and {bundled_providers_dir()})"
-    )
+    where = ", ".join(str(b) for _, b in searched)
+    raise ProviderError(f"provider '{name}' not found (looked in {where})")
 
 
 def list_providers() -> list[Provider]:
-    """All resolvable providers, user shadowing bundled, sorted by name."""
+    """All resolvable providers, user shadowing builtin, sorted by name."""
     seen: dict[str, Provider] = {}
-    for source, base in (("bundled", bundled_providers_dir()),
-                         ("user", providers_config_dir())):
+    for source, base in reversed(layered_dirs("providers")):
         if not base.is_dir():
             continue
         for entry in base.iterdir():

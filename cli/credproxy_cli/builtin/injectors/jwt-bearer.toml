@@ -1,4 +1,4 @@
-# credproxy bundled injector: jwt-bearer
+# credproxy builtin injector: jwt-bearer
 #
 # Self-signed JWT bearer assertion (RS256). By default the proxy mints a fresh
 # JWT on every intercepted request, signed with an RSA private key sourced from
@@ -21,7 +21,7 @@
 #
 # To customize iss/aud/ttl, copy this injector to
 # $XDG_CONFIG_HOME/credproxy/injectors/ and edit [params] (a user injector of
-# the same name shadows the bundled one).
+# the same name shadows the builtin one).
 
 scheme         = "script"
 script         = "jwt-bearer"

@@ -1,14 +1,14 @@
 """Tests for core/injectors.py: scheme-based schema validation, placeholder
-generation, user-dir shadowing bundled."""
+generation, user-dir shadowing builtin."""
 from __future__ import annotations
 
 import pytest
 
 
-# ---- bundled injectors -------------------------------------------------------
+# ---- builtin injectors -------------------------------------------------------
 
 
-def test_find_bundled_bearer(xdg):
+def test_find_builtin_bearer(xdg):
     from credproxy_cli.core.injectors import find_injector
 
     inj = find_injector("bearer")
@@ -16,33 +16,33 @@ def test_find_bundled_bearer(xdg):
     assert inj.scheme == "bearer"
     assert inj.params == {"header": "Authorization"}  # default merged in
     assert inj.env is None
-    assert inj.source == "bundled"
+    assert inj.source == "builtin"
 
 
-def test_find_bundled_basic(xdg):
+def test_find_builtin_basic(xdg):
     from credproxy_cli.core.injectors import find_injector
 
     inj = find_injector("basic")
     assert inj.scheme == "basic"
     assert inj.params == {"header": "Authorization"}
-    assert inj.source == "bundled"
+    assert inj.source == "builtin"
 
 
-def test_find_bundled_body(xdg):
+def test_find_builtin_body(xdg):
     from credproxy_cli.core.injectors import find_injector
 
     inj = find_injector("body")
     assert inj.scheme == "body"
     assert inj.params == {}
-    assert inj.source == "bundled"
+    assert inj.source == "builtin"
 
 
-def test_find_bundled_sigv4(xdg):
+def test_find_builtin_sigv4(xdg):
     from credproxy_cli.core.injectors import find_injector
 
     inj = find_injector("sigv4")
     assert inj.scheme == "sigv4"
-    assert inj.source == "bundled"
+    assert inj.source == "builtin"
 
 
 def test_find_injector_not_found(xdg):
@@ -53,11 +53,11 @@ def test_find_injector_not_found(xdg):
         find_injector("totally_nonexistent_zzz")
 
 
-# ---- user injector shadows bundled -------------------------------------------
+# ---- user injector shadows builtin -------------------------------------------
 
 
-def test_user_injector_shadows_bundled(xdg, tmp_path, monkeypatch):
-    """A user injector with the same name takes precedence over bundled."""
+def test_user_injector_shadows_builtin(xdg, tmp_path, monkeypatch):
+    """A user injector with the same name takes precedence over builtin."""
     from credproxy_cli.core.paths import injectors_config_dir
 
     user_dir = injectors_config_dir()
@@ -202,7 +202,7 @@ def test_placeholder_generate_base64url_charset():
 # ---- list_injectors ----------------------------------------------------------
 
 
-def test_list_injectors_includes_bundled(xdg):
+def test_list_injectors_includes_builtin(xdg):
     from credproxy_cli.core.injectors import list_injectors
 
     names = [i.name for i in list_injectors()]
@@ -222,4 +222,4 @@ def test_list_injectors_user_shadows(xdg):
 
     injectors = {i.name: i for i in list_injectors()}
     assert injectors["bearer"].source == "user"
-    assert injectors["basic"].source == "bundled"
+    assert injectors["basic"].source == "builtin"

@@ -1,6 +1,6 @@
-"""Tests for the bundled OVH API scripted injector (ovh.star).
+"""Tests for the builtin OVH API scripted injector (ovh.star).
 
-Builds a ScriptedScheme directly from the bundled source and drives
+Builds a ScriptedScheme directly from the builtin source and drives
 on_request against a RequestCtx, then independently recomputes the
 expected SHA1 in Python to verify all four injected headers.
 """
@@ -14,7 +14,7 @@ import schemes
 from starlark_runtime import ScriptedScheme
 
 OVH = (Path(__file__).resolve().parents[1]
-       / "cli" / "credproxy_cli" / "bundled" / "scripts" / "ovh.star").read_text()
+       / "cli" / "credproxy_cli" / "builtin" / "scripts" / "ovh.star").read_text()
 
 _SLOTS = ("app_key", "app_secret", "consumer_key")
 

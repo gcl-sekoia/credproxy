@@ -1,4 +1,4 @@
-# credproxy bundled script: body
+# credproxy builtin script: body
 #
 # A Starlark re-implementation of the built-in `body` scheme -- an authoring
 # template. Substring-swap the placeholder for the real value anywhere in the

@@ -16,8 +16,8 @@ applies it. For the netns/bootstrap side of a running workspace see
 | Path | Holds |
 |---|---|
 | `$XDG_CONFIG_HOME/credproxy/workspaces/<name>.toml` | the workspace config (this doc). Default `~/.config/credproxy/workspaces/`. The file existing **is** the workspace existing. |
-| `$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml` | your injector definitions (shadow the bundled ones) |
-| `$XDG_CONFIG_HOME/credproxy/providers/<name>` | your provider executables (shadow the bundled ones) |
+| `$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml` | your injector definitions (shadow the builtin ones) |
+| `$XDG_CONFIG_HOME/credproxy/providers/<name>` | your provider executables (shadow the builtin ones) |
 | `$XDG_STATE_HOME/credproxy/workspaces/<name>/` | runtime state — `auth.token`, the last-applied spec/bindings, session pidfiles. Not hand-edited. Default `~/.local/state/credproxy/`. |
 | `$XDG_STATE_HOME/credproxy/default-workspace` | the current default-workspace pointer (loose surface) |
 
@@ -245,8 +245,8 @@ it for the real value on requests to the scoped hosts.
 
 | Field | Required | Notes |
 |---|---|---|
-| `injector` | yes | Name of an injector definition (`$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml`, falling back to bundled). Selects the scheme, its params, and the placeholder shape. Bundled: `bearer`, `basic`, `body`. |
-| `provider` | yes | Name of a provider executable (`$XDG_CONFIG_HOME/credproxy/providers/<name>`, falling back to bundled). Bundled: `env`. |
+| `injector` | yes | Name of an injector definition (`$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml`, falling back to builtin). Selects the scheme, its params, and the placeholder shape. Builtin: `bearer`, `basic`, `body`. |
+| `provider` | yes | Name of a provider executable (`$XDG_CONFIG_HOME/credproxy/providers/<name>`, falling back to builtin). Builtin: `env`. |
 | `secret` | yes | Either a bare ref string (single-slot), or an inline table mapping the scheme's slot names to refs (multi-slot). A ref is opaque to credproxy and meaningful only to the provider — an env-var name, a vault path, an item id. |
 | `hosts` | yes | Non-empty list of hostnames the credential may be injected on. This is the security scope: a request to any other host never sees the real value. Each entry is a literal hostname (exact match) **or** a glob pattern containing `*` — see *Host patterns* below. |
 | `name` | no | Handle used to address the binding (`binding remove`, `binding test NAME`). Auto-generated as `<injector>-<provider>`, with a `-2`, `-3`, … suffix on collision. |

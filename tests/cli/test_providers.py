@@ -1,5 +1,5 @@
 """Tests for core/providers.py: registry lookup, protocol invocation against
-real test provider scripts, bundled env provider, and error paths."""
+real test provider scripts, builtin env provider, and error paths."""
 from __future__ import annotations
 
 import json
@@ -36,12 +36,12 @@ def _make_dir_provider(providers_dir: Path, name: str, script: str) -> Path:
 # ---- find_provider / registry ------------------------------------------------
 
 
-def test_find_bundled_env(xdg):
+def test_find_builtin_env(xdg):
     from credproxy_cli.core.providers import find_provider
 
     p = find_provider("env")
     assert p.name == "env"
-    assert p.source == "bundled"
+    assert p.source == "builtin"
     assert p.exe.is_file()
     assert os.access(p.exe, os.X_OK)
 
@@ -70,8 +70,8 @@ def test_find_provider_file_not_executable(xdg):
         find_provider("notexec")
 
 
-def test_find_provider_user_shadows_bundled(xdg):
-    """A user provider with the same name as a bundled one takes precedence."""
+def test_find_provider_user_shadows_builtin(xdg):
+    """A user provider with the same name as a builtin one takes precedence."""
     from credproxy_cli.core.paths import providers_config_dir
     from credproxy_cli.core.providers import find_provider
 
@@ -245,11 +245,11 @@ def test_fetch_nonzero_exit_generic(xdg):
         fetch("crash_prov", "mysecret")
 
 
-# ---- bundled env provider (invoked directly) ---------------------------------
+# ---- builtin env provider (invoked directly) ---------------------------------
 
 
-def test_bundled_env_provider_happy_path(xdg, monkeypatch):
-    """Invoke the bundled env provider with a real env var."""
+def test_builtin_env_provider_happy_path(xdg, monkeypatch):
+    """Invoke the builtin env provider with a real env var."""
     monkeypatch.setenv("TEST_CRED_XYZ", "supersecret")
 
     from credproxy_cli.core.providers import fetch
@@ -257,7 +257,7 @@ def test_bundled_env_provider_happy_path(xdg, monkeypatch):
     assert value == "supersecret"
 
 
-def test_bundled_env_provider_not_set(xdg, monkeypatch):
+def test_builtin_env_provider_not_set(xdg, monkeypatch):
     """Unset env var -> ProviderError (exit 2 path)."""
     monkeypatch.delenv("UNSET_CRED_ZZZQQ", raising=False)
 
@@ -268,7 +268,7 @@ def test_bundled_env_provider_not_set(xdg, monkeypatch):
         fetch("env", "UNSET_CRED_ZZZQQ")
 
 
-# ---- bundled bw provider (fake `bw` on PATH, no real CLI needed) --------------
+# ---- builtin bw provider (fake `bw` on PATH, no real CLI needed) --------------
 
 
 def _fake_bw(tmp_path, items, *, status="unlocked") -> Path:
@@ -292,7 +292,7 @@ def _fake_bw(tmp_path, items, *, status="unlocked") -> Path:
     return fake_bin, calls
 
 
-def test_bundled_bw_provider_batches_and_extracts(xdg, monkeypatch, tmp_path):
+def test_builtin_bw_provider_batches_and_extracts(xdg, monkeypatch, tmp_path):
     """One `bw list items` resolves a whole multi-ref batch, across password /
     username / custom-field selectors -- the provider-side half of the batching
     win (the costly vault decrypt happens once, not once per ref)."""
@@ -320,7 +320,7 @@ def test_bundled_bw_provider_batches_and_extracts(xdg, monkeypatch, tmp_path):
     assert calls.read_text().splitlines().count("list items") == 1
 
 
-def test_bundled_bw_provider_missing_item_exit2(xdg, monkeypatch, tmp_path):
+def test_builtin_bw_provider_missing_item_exit2(xdg, monkeypatch, tmp_path):
     """An unknown item is a not-found (exit 2) -> ProviderError, not a crash."""
     fake_bin, _ = _fake_bw(tmp_path, [{"id": "id-gh", "name": "github",
                                        "login": {"password": "x"}, "fields": []}])
@@ -332,7 +332,7 @@ def test_bundled_bw_provider_missing_item_exit2(xdg, monkeypatch, tmp_path):
         fetch("bw", "ghost")
 
 
-# ---- bundled gh-cli provider (fake `gh` on PATH, no real CLI needed) ----------
+# ---- builtin gh-cli provider (fake `gh` on PATH, no real CLI needed) ----------
 
 
 def _fake_gh(tmp_path, *, token="gho_faketoken", known=("github.com",)) -> Path:
@@ -357,7 +357,7 @@ def _fake_gh(tmp_path, *, token="gho_faketoken", known=("github.com",)) -> Path:
     return fake_bin, calls
 
 
-def test_bundled_gh_cli_provider_returns_token(xdg, monkeypatch, tmp_path):
+def test_builtin_gh_cli_provider_returns_token(xdg, monkeypatch, tmp_path):
     """gh-cli resolves a hostname ref to the token and passes `--hostname`."""
     fake_bin, calls = _fake_gh(tmp_path, token="gho_realtoken")
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
@@ -367,7 +367,7 @@ def test_bundled_gh_cli_provider_returns_token(xdg, monkeypatch, tmp_path):
     assert "auth token --hostname github.com" in calls.read_text()
 
 
-def test_bundled_gh_cli_provider_empty_ref_default_host(xdg, monkeypatch, tmp_path):
+def test_builtin_gh_cli_provider_empty_ref_default_host(xdg, monkeypatch, tmp_path):
     """An empty ref uses gh's default host -- no `--hostname` is passed."""
     fake_bin, calls = _fake_gh(tmp_path)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
@@ -377,7 +377,7 @@ def test_bundled_gh_cli_provider_empty_ref_default_host(xdg, monkeypatch, tmp_pa
     assert "--hostname" not in calls.read_text()
 
 
-def test_bundled_gh_cli_provider_dedups_repeated_host(xdg, monkeypatch, tmp_path):
+def test_builtin_gh_cli_provider_dedups_repeated_host(xdg, monkeypatch, tmp_path):
     """A host requested twice in one batch shells out to `gh` only once."""
     fake_bin, calls = _fake_gh(tmp_path)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
@@ -388,7 +388,7 @@ def test_bundled_gh_cli_provider_dedups_repeated_host(xdg, monkeypatch, tmp_path
     assert calls.read_text().count("auth token") == 1
 
 
-def test_bundled_gh_cli_provider_unknown_host_exit2(xdg, monkeypatch, tmp_path):
+def test_builtin_gh_cli_provider_unknown_host_exit2(xdg, monkeypatch, tmp_path):
     """A host with no login is a not-found (exit 2) -> ProviderError."""
     fake_bin, _ = _fake_gh(tmp_path, known=("github.com",))
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
@@ -399,7 +399,7 @@ def test_bundled_gh_cli_provider_unknown_host_exit2(xdg, monkeypatch, tmp_path):
         fetch("gh-cli", "ghe.example.invalid")
 
 
-# ---- bundled docker-credential provider (fake helper + DOCKER_CONFIG) ---------
+# ---- builtin docker-credential provider (fake helper + DOCKER_CONFIG) ---------
 
 
 def _fake_docker_helper(tmp_path, creds, *, helper="faux", creds_store=None,
@@ -498,7 +498,7 @@ def test_docker_credential_dedups_same_helper_host(xdg, monkeypatch, tmp_path):
 # ---- list_providers ----------------------------------------------------------
 
 
-def test_list_providers_includes_bundled(xdg):
+def test_list_providers_includes_builtin(xdg):
     from credproxy_cli.core.providers import list_providers
 
     names = [p.name for p in list_providers()]
@@ -517,7 +517,7 @@ def test_list_providers_user_shadows(xdg):
 # ---- description via the `describe` op (provider IS executed on `list`) -------
 
 
-def test_bundled_providers_describe(xdg):
+def test_builtin_providers_describe(xdg):
     from credproxy_cli.core.providers import list_providers
     desc = {p.name: p.description for p in list_providers()}
     assert desc["env"] == "Host environment variables"
@@ -567,7 +567,7 @@ def test_describe_non_json_is_none(xdg):
 # ---- help op + `provider show` -----------------------------------------------
 
 
-def test_help_op_bundled(xdg):
+def test_help_op_builtin(xdg):
     from credproxy_cli.core.providers import find_provider, _help
     h = _help(find_provider("op").exe)
     assert h and "op://" in h  # the ref format is in the help
@@ -593,7 +593,7 @@ def test_provider_show_human(xdg):
     code, out, err = _run(["provider", "show", "op"])
     assert code == 0
     blob = out + err
-    assert "bundled" in blob
+    assert "builtin" in blob
     assert "/providers/op" in blob          # the resolved path is shown
     assert "op://" in blob                   # help text is shown
 
@@ -605,7 +605,7 @@ def test_provider_show_json(xdg):
     d = json.loads(out)
     assert d["name"] == "keychain"
     assert d["path"].endswith("/keychain")
-    assert d["source"] == "bundled"
+    assert d["source"] == "builtin"
     assert d["description"] and d["help"]
 
 

@@ -41,6 +41,20 @@ def config_dir() -> Path:
     return _xdg_config_home() / "credproxy"
 
 
+def profile_dir() -> Path:
+    """The distribution/org *profile* overlay: the middle tier between the
+    end-user's XDG config and the in-package `builtin` defaults. Holds an org's
+    customized scaffold, constants, and definitions (injectors/providers/
+    scripts/presets) -- see docs/forking.md.
+
+    Defaults to `<repo>/profile/` (a directory upstream ships empty, so a fork
+    only ever ADDS files there and never conflicts on merge). Override with
+    `CREDPROXY_PROFILE_DIR` to point at an external bundle -- the no-fork path,
+    and what tests use. Read at call time so the env var can change per test."""
+    env = os.environ.get("CREDPROXY_PROFILE_DIR")
+    return Path(env) if env else REPO_ROOT / "profile"
+
+
 def workspaces_config_dir() -> Path:
     """Directory that holds per-workspace TOML files."""
     return config_dir() / "workspaces"
@@ -63,20 +77,61 @@ def scripts_config_dir() -> Path:
     return config_dir() / "scripts"
 
 
-# Bundled definitions ship in the package; they double as scaffold templates.
-BUNDLED_DIR = Path(__file__).resolve().parent.parent / "bundled"
+# Builtin definitions ship in the package; they double as scaffold templates.
+BUILTIN_DIR = Path(__file__).resolve().parent.parent / "builtin"
 
 
-def bundled_providers_dir() -> Path:
-    return BUNDLED_DIR / "providers"
+def builtin_providers_dir() -> Path:
+    return BUILTIN_DIR / "providers"
 
 
-def bundled_injectors_dir() -> Path:
-    return BUNDLED_DIR / "injectors"
+def builtin_injectors_dir() -> Path:
+    return BUILTIN_DIR / "injectors"
 
 
-def bundled_scripts_dir() -> Path:
-    return BUNDLED_DIR / "scripts"
+def builtin_scripts_dir() -> Path:
+    return BUILTIN_DIR / "scripts"
+
+
+def builtin_presets_dir() -> Path:
+    return BUILTIN_DIR / "presets"
+
+
+# Singleton distribution assets (one file each; profile overrides builtin).
+def builtin_profile_file() -> Path:
+    """Built-in distribution constants (default image, image tag, user/home)."""
+    return BUILTIN_DIR / "profile.toml"
+
+
+def builtin_workspace_template_file() -> Path:
+    """Built-in workspace scaffold frame."""
+    return BUILTIN_DIR / "workspace.template.toml"
+
+
+def resolve_singleton(filename: str) -> Path | None:
+    """A singleton distribution file (profile.toml, workspace.template.toml):
+    the profile overlay's copy if present, else the builtin default, else None."""
+    cand = profile_dir() / filename
+    if cand.is_file():
+        return cand
+    cand = BUILTIN_DIR / filename
+    return cand if cand.is_file() else None
+
+
+def layered_dirs(kind: str) -> list[tuple[str, Path]]:
+    """The ordered search path for a *registry* asset kind (`injectors`,
+    `providers`, `scripts`, `presets`), most specific first:
+
+        user (XDG)  ->  profile (org overlay)  ->  builtin (upstream default)
+
+    First match wins, so the profile overlay shadows a builtin definition of
+    the same name and a user definition shadows both. The single seam every
+    `find_*`/`list_*` walks, so the three (now four) registries stay in sync."""
+    return [
+        ("user", config_dir() / kind),
+        ("profile", profile_dir() / kind),
+        ("builtin", BUILTIN_DIR / kind),
+    ]
 
 
 def state_dir() -> Path:
@@ -89,17 +144,8 @@ def workspaces_state_dir() -> Path:
     return state_dir() / "workspaces"
 
 
-# CLI-only conventions.
-IMAGE_TAG = "credproxy:dev"
+# CLI-only conventions. The distribution-customizable defaults (image tag,
+# default workspace image, the default image's user/home/uid, generic home,
+# default setup) moved to the distribution profile -- see profile.py and
+# builtin/profile.toml, overridable by a fork via the profile overlay.
 DEFAULT_WORKSPACE = "default"
-# The default workspace image is a devcontainers base: it ships a non-root sudo
-# user (`vscode`, uid 1000) plus curl + ca-certificates, so the documented
-# bootstrap (`curl ... | sh`) and a non-root shell work with no setup. The
-# scaffold wires up the matching `user`/`home` when this image is the default
-# (see render_template); a `--image` override falls back to the generic, all-
-# commented template since its user is unknown.
-DEFAULT_WORKSPACE_IMAGE = "mcr.microsoft.com/devcontainers/base:ubuntu"
-DEFAULT_WORKSPACE_USER = "vscode"
-DEFAULT_WORKSPACE_USER_HOME = "/home/vscode"
-DEFAULT_WORKSPACE_USER_UID = 1000  # the devcontainers `vscode` user's uid
-DEFAULT_HOME = "/root"  # generic fallback when `home` is omitted (custom images)

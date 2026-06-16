@@ -1,4 +1,4 @@
-# credproxy bundled injector: oauth2-reseal
+# credproxy builtin injector: oauth2-reseal
 #
 # OAuth2 client-credentials RE-SEAL. Scope the binding to the TOKEN ENDPOINT
 # host (--host). On the token request the proxy swaps the client_secret
@@ -11,7 +11,7 @@
 #
 # `api_hosts` is required and deployment-specific, so COPY this file to
 # $XDG_CONFIG_HOME/credproxy/injectors/ and edit it (a user injector of the same
-# name shadows the bundled one).
+# name shadows the builtin one).
 #
 # Bind it with (the durable client_secret is the single "value" slot):
 #   credproxy workspace NAME binding add --injector oauth2-reseal \

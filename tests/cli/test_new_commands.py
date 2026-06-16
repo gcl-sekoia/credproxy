@@ -2,7 +2,7 @@
 
 Both were added to close design-v2 naming-reference gaps: `current` prints
 the default workspace, and `binding test --provider/--secret` exercises a
-definition before it is bound (no workspace required). The bundled `env`
+definition before it is bound (no workspace required). The builtin `env`
 provider is used as the standalone subject under test.
 """
 from __future__ import annotations

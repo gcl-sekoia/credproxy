@@ -1,4 +1,4 @@
-# credproxy bundled script: ovh
+# credproxy builtin script: ovh
 #
 # OVH API request signing (sign family). Computes and injects the four headers
 # required by the OVH API HTTP signature scheme:

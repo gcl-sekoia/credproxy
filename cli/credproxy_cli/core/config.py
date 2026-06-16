@@ -35,112 +35,12 @@ import os
 from pathlib import Path
 
 from .errors import ConfigError
+from .paths import resolve_singleton
 from .workspace import Workspace
-from .paths import (
-    DEFAULT_HOME,
-    DEFAULT_WORKSPACE_IMAGE,
-    DEFAULT_WORKSPACE_USER,
-    DEFAULT_WORKSPACE_USER_HOME,
-    DEFAULT_WORKSPACE_USER_UID,
-)
+from .profile import profile
 
 import tomllib
 
-# TOML template scaffolded by `credproxy create`.
-# Required: image (defaulted). Everything else is optional / commented out.
-CONFIG_TEMPLATE = """\
-# credproxy workspace config.
-# Edit this file, then run `credproxy workspace {name} start` to apply.
-
-# Workspace image. Changing this (or mounts/env/setup) recreates the
-# workspace container on the next `start`.
-image = "{image}"
-
-# Where the persistent home volume mounts inside the workspace. Point this at
-# the `user` below so their home is the persistent volume (the default image
-# pre-creates /home/vscode owned by vscode, so it seeds correctly -- no chown).
-{home_line}
-
-# User that `enter` runs as (docker exec -u). The user must exist in the
-# image -- built in (the default image ships `vscode`, uid 1000, with
-# passwordless sudo), or created by `setup` (which always runs as root, so it
-# can `useradd` + chown the home volume). Exec-only: changing it never
-# recreates the container, and `enter --user NAME` overrides it per session.
-{user_line}
-
-# Make the non-root `user` above own your bind mounts, without changing
-# ownership on the host. credproxy picks the runtime-appropriate lever:
-# --userns=keep-id on rootless podman; on Docker the matching uid does it
-# (the default `vscode` is uid 1000; on a custom image create the user as
-# $CREDPROXY_HOST_UID in `setup`). Requires `user`. Recreates the container on
-# change. A --userns in run_flags overrides this (run_flags is the escape hatch
-# and wins), so you can hand-tune the mapping without unsetting it.
-{map_line}
-
-# The in-container uid of `user` -- the side map_host_user's keep-id maps your
-# host uid onto, so it's what `user` must be for the mapping to line up. Host
-# uid and this need not be equal. Defaults to your host uid (right for a user
-# made as $CREDPROXY_HOST_UID in `setup`); set it to a baked user's uid (the
-# default image's `vscode` is 1000). Recreates the container on change.
-{user_uid_line}
-
-# Command `enter` runs when you don't pass `-- CMD` (argv list). Defaults to a
-# login shell, `["bash", "-l"]` -- entering the workspace is like logging in, so
-# you get the full login environment. `enter -- CMD` still runs a bare command.
-# shell = ["zsh"]
-
-# Directory `enter` starts in (the workspaceFolder analog). Defaults to `home`,
-# so you land in your home dir rather than the image's WORKDIR; point it at a
-# bind-mounted project to land there instead. Exec-only -- no recreate.
-# workdir = "/code"
-
-# `enter` env shim. By default credproxy wraps the enter command in
-# `sh -c '<prelude>; exec "$@"'`, sourcing the proxy's CA-env file so HTTPS-CA
-# env vars reach an interactive shell, `enter -- cmd`, AND subprocesses (docker
-# exec is a bare execve -- no shell init). Override the snippet here, or set it
-# to "" to skip wrapping entirely (direct execve). Exec-only -- no recreate.
-# enter_prelude = ". /etc/profile.d/credproxy.sh 2>/dev/null"
-
-# Escape hatch: extra flags spliced into `docker exec` for `enter`
-# (e.g. a working dir or env). credproxy keeps control of -i/-t/-d. Exec-only.
-# exec_flags = ["--workdir", "/srv"]
-
-# Escape hatch: extra flags spliced into the workspace `docker run`. Unlike
-# exec_flags these shape the container, so changing them recreates it on the
-# next `start`. credproxy's --name/labels/--network/home volume win on conflict.
-# Useful for runtime-specific uid mapping so a non-root `user` can write bind
-# mounts without changing host ownership, e.g. on rootless podman:
-# run_flags = ["--userns=keep-id:uid=1000,gid=1000"]
-
-# Host paths bind-mounted into the workspace. Each entry is
-# "SRC:DST" or "SRC:DST:ro"; ~ is expanded on SRC.
-# mounts = [
-#   "~/code:/code",
-# ]
-
-# Extra environment variables injected into the workspace container.
-# env = {{ GH_DEBUG = "1" }}
-
-{setup_block}
-
-# Automatically stop the workspace when the last `enter` session exits.
-# Off by default. Changing this mid-session takes effect immediately (live
-# config edit). A stopped workspace is resumed automatically on the next `enter`.
-# auto_stop = true
-
-# Credential bindings. Each ties an injector (how a credential is shaped
-# into a request) to a provider (where the value comes from), scoped to one
-# or more hosts. The real secret never enters the workspace -- the proxy
-# swaps the placeholder for the real value on requests to these hosts.
-# Add them with `credproxy binding add` (or `--preset NAME` for a coordinated
-# set like github -- see `credproxy preset list`), or uncomment and edit:
-# [[binding]]
-# injector = "bearer"            # a scheme; see `credproxy injector list`
-# provider = "env"               # a value source; see `credproxy provider list`
-# secret   = "GITHUB_TOKEN"      # ref the provider resolves (env: a host env var name)
-# hosts    = ["api.github.com"]
-# name + placeholder + env are auto-generated; override here if needed.
-"""
 
 
 def load_config(ws: Workspace) -> dict:
@@ -161,12 +61,12 @@ def load_config(ws: Workspace) -> dict:
         raise ConfigError(f"{ws.config_path}: top level must be a table")
 
     # image
-    image = raw.get("image") or DEFAULT_WORKSPACE_IMAGE
+    image = raw.get("image") or profile().default_image
     if not isinstance(image, str):
         raise ConfigError(f"{ws.config_path}: `image` must be a string")
 
     # home
-    home = raw.get("home") or DEFAULT_HOME
+    home = raw.get("home") or profile().generic_home
     if not isinstance(home, str) or not home.startswith("/"):
         raise ConfigError(f"{ws.config_path}: `home` must be an absolute path")
 
@@ -361,7 +261,7 @@ def quick_image(ws: Workspace) -> str:
     """Best-effort `image` read for `list`, without full validation."""
     try:
         raw = tomllib.loads(ws.config_path.read_text())
-        return raw.get("image") or DEFAULT_WORKSPACE_IMAGE
+        return raw.get("image") or profile().default_image
     except Exception:
         return "?"
 
@@ -388,46 +288,61 @@ def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
     return hashlib.sha256(spec.encode()).hexdigest()[:16]
 
 
+def _active_setup_block(setup_cmds: tuple[str, ...]) -> str:
+    """The ACTIVE `setup = [...]` block for the distribution's default image,
+    seeded from the profile's `default_setup`."""
+    body = "".join(f'  "{c}",\n' for c in setup_cmds)
+    return (
+        "# Commands run as root on each (re)created container; make them\n"
+        "# idempotent. The default installs the proxy CA so HTTPS interception\n"
+        '# works immediately; add your own (e.g. "npm ci") to the list.\n'
+        "setup = [\n"
+        f"{body}"
+        "]"
+    )
+
+
+_COMMENTED_SETUP_BLOCK = (
+    "# Commands run as root on each (re)created container; make them\n"
+    "# idempotent. A failing command stops start and leaves the container\n"
+    "# for debugging. On an image with curl + update-ca-certificates, add\n"
+    '# the proxy-CA bootstrap so HTTPS interception works:\n'
+    '#   "curl -fsSL http://proxy.local/bootstrap.sh | sh"\n'
+    "# setup = [\n"
+    '#   "npm ci",\n'
+    "# ]"
+)
+
+
 def render_template(name: str, image: str) -> str:
-    """Scaffold a workspace TOML. For the default image (a devcontainers base
-    that ships the `vscode` sudo user) the user/home/map_host_user settings are
-    written ACTIVE, so a fresh workspace lands in a non-root sudo shell that owns
-    its bind mounts with no extra config. For a `--image` override the user is
-    unknown, so those lines stay commented hints."""
-    if image == DEFAULT_WORKSPACE_IMAGE:
-        home_line = f'home = "{DEFAULT_WORKSPACE_USER_HOME}"'
-        user_line = f'user = "{DEFAULT_WORKSPACE_USER}"'
-        map_line = "map_host_user = true"
-        user_uid_line = f"user_uid = {DEFAULT_WORKSPACE_USER_UID}"
-        # The default image has curl + update-ca-certificates, so the proxy CA
-        # can be installed automatically -- HTTPS interception works right after
-        # `enter`, no manual bootstrap. Runs as root on each (re)create.
-        setup_block = (
-            "# Commands run as root on each (re)created container; make them\n"
-            "# idempotent. The default installs the proxy CA so HTTPS interception\n"
-            '# works immediately; add your own (e.g. "npm ci") to the list.\n'
-            "setup = [\n"
-            '  "curl -fsSL http://proxy.local/bootstrap.sh | sh",\n'
-            "]"
+    """Scaffold a workspace TOML from the resolved template (profile overlay,
+    else builtin default). When `image` is the distribution's default image, the
+    user/home/map_host_user/setup lines are written ACTIVE (so a fresh workspace
+    lands in a non-root sudo shell that owns its bind mounts, with the proxy CA
+    installed); for any other `--image` the user is unknown, so those lines stay
+    commented hints. The frame and the distribution defaults are both data (the
+    template file + profile.toml), so a fork customizes them without code."""
+    p = profile()
+    path = resolve_singleton("workspace.template.toml")
+    if path is None:
+        raise ConfigError(
+            "no workspace.template.toml found (looked in the profile overlay "
+            "and builtin defaults)"
+        )
+    if image == p.default_image:
+        frag = dict(
+            home_line=f'home = "{p.default_home}"',
+            user_line=f'user = "{p.default_user}"',
+            map_line="map_host_user = true",
+            user_uid_line=f"user_uid = {p.default_uid}",
+            setup_block=_active_setup_block(p.default_setup),
         )
     else:
-        home_line = '# home = "/root"'
-        user_line = '# user = "dev"'
-        map_line = "# map_host_user = true"
-        user_uid_line = "# user_uid = 1000"
-        # Unknown image: leave setup commented. If it has curl +
-        # update-ca-certificates, add the CA bootstrap so interception works.
-        setup_block = (
-            "# Commands run as root on each (re)created container; make them\n"
-            "# idempotent. A failing command stops start and leaves the container\n"
-            "# for debugging. On an image with curl + update-ca-certificates, add\n"
-            '# the proxy-CA bootstrap so HTTPS interception works:\n'
-            '#   "curl -fsSL http://proxy.local/bootstrap.sh | sh"\n'
-            "# setup = [\n"
-            '#   "npm ci",\n'
-            "# ]"
+        frag = dict(
+            home_line=f'# home = "{p.generic_home}"',
+            user_line='# user = "dev"',
+            map_line="# map_host_user = true",
+            user_uid_line="# user_uid = 1000",
+            setup_block=_COMMENTED_SETUP_BLOCK,
         )
-    return CONFIG_TEMPLATE.format(
-        name=name, image=image, home_line=home_line, user_line=user_line,
-        map_line=map_line, user_uid_line=user_uid_line, setup_block=setup_block,
-    )
+    return path.read_text().format(name=name, image=image, **frag)

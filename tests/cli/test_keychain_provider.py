@@ -1,4 +1,4 @@
-"""The bundled macOS `keychain` provider.
+"""The builtin macOS `keychain` provider.
 
 It shells out to the `security` CLI, which only exists on macOS, so these tests
 run it against a fake `security` placed on PATH -- exercising the request
@@ -15,8 +15,8 @@ import pytest
 
 
 def _keychain():
-    from credproxy_cli.core.paths import bundled_providers_dir
-    return bundled_providers_dir() / "keychain"
+    from credproxy_cli.core.paths import builtin_providers_dir
+    return builtin_providers_dir() / "keychain"
 
 
 @pytest.fixture

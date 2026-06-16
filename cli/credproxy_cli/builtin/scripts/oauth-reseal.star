@@ -1,4 +1,4 @@
-# credproxy bundled script: oauth-reseal
+# credproxy builtin script: oauth-reseal
 #
 # OAuth2 client-credentials re-seal, scripted -- the escape-hatch twin of the
 # built-in oauth2-reseal scheme, and an authoring template for re-seal flows.
