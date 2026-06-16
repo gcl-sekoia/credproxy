@@ -409,3 +409,38 @@ def test_response_reseals_against_request_time_binding_after_config_swap():
     log.response(flow)
     assert "MINTED-TOKEN" not in flow.response.text       # still scrubbed
     assert json.loads(flow.response.text)["access_token"].startswith("credproxy_")
+
+
+# scripted re-seal: on_response that errors (no api_hosts -> mint raises) used to
+# swallow the error and forward the token; it now fails closed through the addon.
+_SCRIPTED_RESEAL_NO_API_HOSTS = (
+    "def on_request():\n"
+    "    t = req_body()\n"
+    "    ph = placeholder()\n"
+    "    if not t or ph == None or ph not in t:\n"
+    "        return False\n"
+    "    req_set_body(t.replace(ph, secret()))\n"
+    "    return True\n"
+    "def on_response():\n"
+    "    tok = resp_json()\n"
+    "    mint_into_json('access_token', tok['access_token'], 3600)\n"  # no api_hosts -> raises
+    "    return True\n"
+)
+
+
+def test_scripted_reseal_fails_closed_when_on_response_raises():
+    from starlark_runtime import ScriptedScheme
+    scheme = ScriptedScheme("reseal", _SCRIPTED_RESEAL_NO_API_HOSTS, family="substitute",
+                            slots=("value",), location_kind="body", header_default=None)
+    t = config.Transform("r", scheme, {}, "cs_PH", {"value": "CS"})   # params: no api_hosts
+    log = addon.HostnameLogger(SimpleNamespace(creds=_OneTransform("oauth.example.com", t)))
+    req = tutils.treq(host="oauth.example.com", method=b"POST", path=b"/token",
+                      content=b"grant_type=client_credentials&client_secret=cs_PH")
+    flow = tflow.tflow(req=req, resp=True)
+    log.request(flow)
+    assert flow.metadata.get("credproxy_fired")
+    flow.response.status_code = 200
+    flow.response.text = json.dumps({"access_token": "REAL-MINTED-TOKEN", "expires_in": 3600})
+    log.response(flow)
+    assert flow.response.status_code == 502
+    assert b"REAL-MINTED-TOKEN" not in flow.response.content

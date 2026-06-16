@@ -278,8 +278,9 @@ def test_req_host_returns_hostname_in_transparent_mode():
     assert req.headers["X-Seen-Host"] == "api.example.com"   # not 10.0.0.5
 
 
-def test_req_getters_readable_in_response_phase():
-    """`req_*` getters read the ANSWERED request during on_response."""
+def test_req_metadata_getters_readable_in_response_phase():
+    """Request METADATA getters (req_host/method/path -- no secret) read the
+    ANSWERED request during on_response. Content getters are gated (see below)."""
     src = ("def on_response():\n"
            "    resp_set_header('X-Host', req_host())\n"
            "    return True\n")
@@ -287,6 +288,31 @@ def test_req_getters_readable_in_response_phase():
     rc, flow = _resp_ctx()
     assert s.on_response(rc) is True
     assert flow.response.headers["X-Host"] == flow.request.host
+
+
+def test_secret_is_request_phase_only():
+    """secret() is unreachable in on_response: the durable secret must never be
+    movable into the response the workspace receives. The hook fails closed."""
+    from starlark_runtime import ScriptResponseError
+    s = ScriptedScheme(
+        "leak", "def on_response():\n    resp_set_body(secret())\n    return True\n")
+    rc, flow = _resp_ctx(secrets={"value": "SUPER-SECRET-XYZZY"}, body="orig")
+    with pytest.raises(ScriptResponseError):
+        s.on_response(rc)
+    assert flow.response.text == "orig"          # response left untouched
+    assert "SUPER-SECRET-XYZZY" not in flow.response.text
+
+
+def test_request_content_reads_are_request_phase_only():
+    """req_body()/req_header() are gated out of on_response: there they would read
+    the request the secret was injected into, a back-door to the same leak."""
+    from starlark_runtime import ScriptResponseError
+    for prim in ("req_body()", "req_header('Authorization')", "req_body_b64()"):
+        s = ScriptedScheme(
+            "g", f"def on_response():\n    resp_set_body({prim})\n    return True\n")
+        rc, _ = _resp_ctx(body="orig")
+        with pytest.raises(ScriptResponseError):
+            s.on_response(rc)
 
 
 def test_resp_primitive_in_request_phase_fails_closed():
@@ -298,10 +324,14 @@ def test_resp_primitive_in_request_phase_fails_closed():
 
 
 def test_req_mutation_in_response_phase_fails_closed():
-    """A request-mutating primitive in on_response hits the phase guard."""
+    """A request-mutating primitive in on_response hits the phase guard. The
+    response hook now RAISES (so the addon withholds the response) rather than
+    silently returning False and forwarding a possibly token-bearing body."""
+    from starlark_runtime import ScriptResponseError
     s = ScriptedScheme("g", "def on_response():\n    req_set_header('X', 'Y')\n    return True\n")
     rc, flow = _resp_ctx()
-    assert s.on_response(rc) is False
+    with pytest.raises(ScriptResponseError):
+        s.on_response(rc)
     assert "X" not in flow.response.headers
 
 
@@ -337,6 +367,19 @@ def test_script_error_does_not_leak_secret_to_stdout(capsys):
     ctx, _ = _ctx(secrets={"value": "SUPER-SECRET-XYZZY"})
     assert s.on_request(ctx) is False
     assert "SUPER-SECRET-XYZZY" not in capsys.readouterr().out
+
+
+def test_on_response_error_message_is_sanitized(capsys):
+    """A failing on_response raises ScriptResponseError carrying only a coarse
+    reason -- the underlying error message (which could be `fail(secret())`) must
+    not surface in the raised exception or on stdout, where the addon logs it."""
+    from starlark_runtime import ScriptResponseError
+    s = ScriptedScheme("boom", 'def on_response():\n    fail("DETAIL-LEAK-12345")\n')
+    rc, _ = _resp_ctx()
+    with pytest.raises(ScriptResponseError) as ei:
+        s.on_response(rc)
+    assert "DETAIL-LEAK-12345" not in str(ei.value)
+    assert "DETAIL-LEAK-12345" not in capsys.readouterr().out
 
 
 def test_primitive_outside_hook_raises_not_silent():

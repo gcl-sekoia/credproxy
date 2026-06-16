@@ -28,10 +28,16 @@ Why this is safe (the door model):
   third-party injector can't choose a destination or exfiltrate the secret.
 
 Non-exfiltration, concretely: `Globals.standard()` has no `print`, and a script
-error message is NEVER logged (only the exception type is) -- otherwise a script
-could `fail(secret())` and leak the value to proxy stdout. The only data channel
-a script has is the request itself, which is already host-scoped to the binding's
-destination.
+error message is NEVER logged (only the exception type/a coarse reason is) --
+otherwise a script could `fail(secret())` and leak the value to proxy stdout (or
+via a raised error). The script's outbound data channel is the request, which is
+already host-scoped to the binding's destination. on_response can also mutate the
+RESPONSE (the re-seal seam), a channel that points back at the workspace -- so
+`secret()` and the request-CONTENT reads (`req_header`/`req_body`/`req_body_b64`)
+are request-phase ONLY: the durable secret is unreachable in on_response and so
+can't be copied into the response. A re-seal script that fails to scrub its
+on_response (any error) fails CLOSED -- the addon withholds the response rather
+than forward a body that may still carry the real minted token.
 
 **Runaway scripts (the real resource-bounds gap).** A Python-thread timeout
 CANNOT preempt a CPU-bound script: starlark-pyo3 holds the GIL for the whole
@@ -149,14 +155,20 @@ _CALL_SUPPORTS_CANCEL = _detect_call_cancel()
 # ---- trusted primitives ------------------------------------------------------
 #
 # Stateful primitives read the implicit ctx (a RequestCtx/ResponseCtx) bound to
-# `_ctx_var` for the current hook. Request reads (`req_*` getters) work in both
-# phases (the live request in on_request, the answered request in on_response);
+# `_ctx_var` for the current hook. Request METADATA reads (`req_method`/
+# `req_path`/`req_host`) work in both phases; request CONTENT reads
+# (`req_header`/`req_body`/`req_body_b64`) and `secret()` are request-phase ONLY
+# (in on_response they would expose the injected secret to the response channel);
 # request mutation is request-phase only; `resp_*` is response-phase only. Pure
 # helpers take no ctx. `secret()` is the only door to the resolved value.
 
-# -- credential / binding (both phases) --
+# -- credential / binding --
 def _secret(slot="value"):
-    return _ctx().secret(slot)
+    # Request-phase ONLY: the durable secret must never be reachable in
+    # on_response, where it could be written into the response the workspace
+    # receives (resp_set_*). on_response re-seals the minted token from the
+    # RESPONSE body and never needs the durable secret.
+    return _require("request", "secret").secret(slot)
 
 
 def _param(key, default=None):
@@ -167,7 +179,8 @@ def _placeholder():
     return _ctx().placeholder
 
 
-# -- request reads (both phases) --
+# -- request METADATA reads (both phases): method/path/host carry no secret, so
+#    on_response may read them to know which endpoint it answered. --
 def _req_method():
     c = _ctx()
     return c.method if c.phase == "request" else c.request_method
@@ -183,19 +196,20 @@ def _req_host():
     return c.host if c.phase == "request" else c.request_host
 
 
+# -- request CONTENT reads (request phase ONLY): in on_response these would read
+#    the request AS SENT -- which on_request injected the real secret into -- so
+#    a script could copy it back into the response (resp_set_*) and leak it to
+#    the workspace. The phase guard closes that channel. --
 def _req_header(name):
-    c = _ctx()
-    return c.header_get(name) if c.phase == "request" else c.request_header_get(name)
+    return _require("request", "req_header").header_get(name)
 
 
 def _req_body():
-    c = _ctx()
-    return c.body_text() if c.phase == "request" else c.request_body_text()
+    return _require("request", "req_body").body_text()
 
 
 def _req_body_b64():
-    c = _ctx()
-    raw = c.body_bytes() if c.phase == "request" else c.request_body_bytes()
+    raw = _require("request", "req_body_b64").body_bytes()
     return base64.b64encode(raw).decode("ascii")
 
 
@@ -427,6 +441,14 @@ PRIMITIVES = {
 _HAS_ON_RESPONSE = re.compile(r"(?m)^def[ \t]+on_response\b")
 
 
+class ScriptResponseError(Exception):
+    """Raised by a scripted scheme's on_response when the hook fails, so the
+    addon FAILS CLOSED (withholds the response) instead of forwarding a body that
+    may still carry the real minted token. The message carries only the
+    scheme/hook name and a coarse reason -- NEVER the underlying error message,
+    which could be `fail(secret())` and leak the credential to proxy stdout."""
+
+
 class ScriptedScheme:
     """A Scheme (duck-typed) whose on_request/on_response logic is a sandboxed
     `.star` script. Metadata (name, family, slots, location) is supplied by the
@@ -465,13 +487,22 @@ class ScriptedScheme:
         starlark.eval(module, ast, _GLOBALS)
         self._frozen = module.freeze()
 
+    @property
+    def mutates_response(self) -> bool:
+        # A script with an on_response is treated as response-mutating: on a hook
+        # error the addon must withhold the (possibly token-bearing) response.
+        return self._has_on_response
+
     def on_request(self, ctx) -> bool:
         return self._invoke("on_request", ctx)
 
     def on_response(self, ctx) -> bool:
         if not self._has_on_response:
             return False
-        return self._invoke("on_response", ctx)
+        # Response-phase failure must NOT forward the (possibly token-bearing)
+        # response: raise so the addon fails closed. (on_request failure is safe
+        # to swallow -- the request just proceeds un-injected.)
+        return self._invoke("on_response", ctx, raise_on_error=True)
 
     def extra_intercept_hosts(self, params) -> list:
         """A scripted re-seal injector declares the API hosts it mints onto via
@@ -480,17 +511,22 @@ class ScriptedScheme:
         hosts = params.get("api_hosts") or []
         return [h for h in hosts if isinstance(h, str) and h]
 
-    def _invoke(self, fn_name: str, ctx) -> bool:
-        """Run the script hook, failing CLOSED on any error (return False, log).
-        Binds `ctx` to the contextvar for the duration of the call so the flat
-        primitives can reach it, then always unbinds. When the call path supports
-        check_cancelled, a wall-clock deadline aborts a runaway; otherwise a
-        non-terminating script hangs the proxy (documented ceiling -- a
-        Python-thread timeout can't preempt the GIL).
+    def _invoke(self, fn_name: str, ctx, raise_on_error: bool = False) -> bool:
+        """Run the script hook. Binds `ctx` to the contextvar for the duration of
+        the call so the flat primitives can reach it, then always unbinds. When
+        the call path supports check_cancelled, a wall-clock deadline aborts a
+        runaway; otherwise a non-terminating script hangs the proxy (documented
+        ceiling -- a Python-thread timeout can't preempt the GIL).
 
-        The error is logged by EXCEPTION TYPE ONLY -- never its message --
-        because a script could `fail(secret())` and the message would carry the
-        real credential to stdout, defeating the non-exfiltration guarantee.
+        On error: with `raise_on_error` (the response phase) we raise a SANITIZED
+        ScriptResponseError so the addon fails CLOSED and withholds the response;
+        otherwise (the request phase) we fail closed by returning False (the
+        request just proceeds un-injected).
+
+        The error is surfaced by EXCEPTION TYPE / a coarse reason ONLY -- never
+        the underlying message -- because a script could `fail(secret())` and the
+        message would carry the real credential (to stdout, or via the raised
+        error) and defeat the non-exfiltration guarantee.
         """
         cancel = make_deadline_cancel(self._timeout) if _CALL_SUPPORTS_CANCEL else None
         token = _ctx_var.set(ctx)
@@ -501,12 +537,16 @@ class ScriptedScheme:
                 else:
                     result = self._frozen.call(fn_name)
             except Exception as e:  # StarlarkError / primitive error / deadline abort
-                if cancel is not None and cancel.fired:
-                    print(f"[script] {self.name}.{fn_name} exceeded {self._timeout}s "
-                          f"deadline; failing closed", flush=True)
-                else:
-                    print(f"[script] {self.name}.{fn_name} raised {type(e).__name__}; "
-                          f"failing closed", flush=True)
+                reason = ("deadline" if cancel is not None and cancel.fired
+                          else type(e).__name__)
+                if raise_on_error:
+                    # `from None`: drop the chained cause so its (secret-bearing)
+                    # message can't surface in a traceback the addon logs.
+                    raise ScriptResponseError(
+                        f"{self.name}.{fn_name} failed ({reason}); "
+                        f"response withheld") from None
+                print(f"[script] {self.name}.{fn_name} failed ({reason}); "
+                      f"failing closed", flush=True)
                 return False
             return bool(result)
         finally:
