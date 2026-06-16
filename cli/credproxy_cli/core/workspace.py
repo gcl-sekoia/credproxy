@@ -14,13 +14,26 @@ Storage layout (XDG):
 """
 from __future__ import annotations
 
+import contextlib
+import os
 import re
 import secrets
+
+try:
+    import fcntl  # POSIX-only
+except ImportError:  # pragma: no cover - non-POSIX (e.g. Windows)
+    fcntl = None     # lock degrades to in-process reentrancy only
 from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import WorkspaceError
 from .paths import workspaces_config_dir, workspaces_state_dir
+
+# Reentrancy depth of the per-workspace lifecycle lock held by THIS process,
+# keyed by lock-file path. flock would deadlock a process against itself on a
+# nested acquire (recreate -> start, enter -> start), so we re-enter on a counter
+# and only flock/unflock at depth 0.
+_lock_depth: dict[str, int] = {}
 
 # Workspace names become container, volume, and directory names.
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -89,6 +102,48 @@ class Workspace:
     def sessions_dir(self) -> Path:
         """Directory holding per-session pidfiles for auto-stop tracking."""
         return self.state_dir / "sessions"
+
+    @property
+    def lock_path(self) -> Path:
+        """Advisory lock file serializing this workspace's lifecycle transitions."""
+        return self.state_dir / "lifecycle.lock"
+
+    @contextlib.contextmanager
+    def lock(self):
+        """Serialize this workspace's lifecycle transitions across processes.
+
+        An advisory `flock` on `lock_path`, held only around the SHORT transition
+        (create/start/stop/recreate/delete, config push, setup, state writes) --
+        NEVER around a blocking interactive `enter` session. Cross-process a
+        second `start`/`enter`/`delete` of the SAME workspace waits for the first
+        to finish rather than racing container creation, setup, and state writes.
+
+        Reentrant within a process (recreate -> start, enter -> start) via a depth
+        counter, so nested acquisitions don't deadlock against flock. Other
+        workspaces are unaffected -- the lock is per-name, so they still run
+        concurrently."""
+        self.ensure_state_dir()
+        key = str(self.lock_path)
+        if _lock_depth.get(key, 0) > 0:          # already held in THIS process
+            _lock_depth[key] += 1
+            try:
+                yield
+            finally:
+                _lock_depth[key] -= 1
+            return
+        fd = os.open(key, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            _lock_depth[key] = 1
+            try:
+                yield
+            finally:
+                _lock_depth.pop(key, None)
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     @property
     def proxy_container(self) -> str:

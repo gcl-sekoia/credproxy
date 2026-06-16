@@ -471,31 +471,35 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     if secret is None:
         fail("`binding add` needs --secret")
 
-    existing = core_bindings.load_bindings(ws)
-    taken = {b.name for b in existing}
-    bname = a.binding_name or core_bindings._auto_name(a.injector, a.provider, taken)
-    if bname in taken:
-        fail(f"binding name '{bname}' already exists in workspace '{ws.name}'")
+    # Lock the read-validate-write: two concurrent `binding add` must not both
+    # read the same file, pick the same auto-name, and last-writer-wins (the
+    # per-file atomic write prevents a torn file, not a lost update).
+    with ws.lock():
+        existing = core_bindings.load_bindings(ws)
+        taken = {b.name for b in existing}
+        bname = a.binding_name or core_bindings._auto_name(a.injector, a.provider, taken)
+        if bname in taken:
+            fail(f"binding name '{bname}' already exists in workspace '{ws.name}'")
 
-    # Sign schemes (sigv4, ...) hold no inert placeholder; only substitute
-    # schemes do, and only those get one auto-generated.
-    if injector.spec.uses_placeholder:
-        placeholder = a.placeholder or injector.placeholder.generate()
-    else:
-        placeholder = a.placeholder
-    env = a.env or injector.env
+        # Sign schemes (sigv4, ...) hold no inert placeholder; only substitute
+        # schemes do, and only those get one auto-generated.
+        if injector.spec.uses_placeholder:
+            placeholder = a.placeholder or injector.placeholder.generate()
+        else:
+            placeholder = a.placeholder
+        env = a.env or injector.env
 
-    binding = Binding(
-        name=bname,
-        injector=a.injector,
-        provider=a.provider,
-        secret=secret,
-        hosts=tuple(a.host),
-        placeholder=placeholder,
-        env=env,
-    )
-    core_bindings.validate(existing + [binding], str(ws.config_path))
-    core_bindings.append_binding(ws, binding)
+        binding = Binding(
+            name=bname,
+            injector=a.injector,
+            provider=a.provider,
+            secret=secret,
+            hosts=tuple(a.host),
+            placeholder=placeholder,
+            env=env,
+        )
+        core_bindings.validate(existing + [binding], str(ws.config_path))
+        core_bindings.append_binding(ws, binding)
 
     render.OUT.binding_added(bname, ws.name, {
         "name": bname,
@@ -548,14 +552,15 @@ def _do_binding_preset(ctx: Ctx, name: str | None, a: argparse.Namespace) -> Non
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
 
-    existing = core_bindings.load_bindings(ws)
-    taken = {b.name for b in existing}
-    new = build_preset(a.preset, provider, secret)
-    for b in new:
-        if b.name in taken:
-            fail(f"binding name '{b.name}' already exists in workspace '{ws.name}'")
-    core_bindings.validate(existing + new, str(ws.config_path))
-    core_bindings.append_bindings(ws, new)   # one atomic write
+    with ws.lock():                          # atomic read-validate-write (see do_binding_add)
+        existing = core_bindings.load_bindings(ws)
+        taken = {b.name for b in existing}
+        new = build_preset(a.preset, provider, secret)
+        for b in new:
+            if b.name in taken:
+                fail(f"binding name '{b.name}' already exists in workspace '{ws.name}'")
+        core_bindings.validate(existing + new, str(ws.config_path))
+        core_bindings.append_bindings(ws, new)   # one atomic write
     # A preset expands to several bindings; say so up front so the multiple
     # `added binding` lines that follow aren't a surprise.
     say(f"preset '{a.preset}' expands to {len(new)} bindings:")
@@ -578,7 +583,8 @@ def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
     _confirm_destructive(ctx, ws, implicit, "remove binding from")
-    core_bindings.remove_binding(ws, a.binding_name)
+    with ws.lock():                          # atomic read-modify-write of the TOML
+        core_bindings.remove_binding(ws, a.binding_name)
     render.OUT.binding_removed(a.binding_name, ws.name)
 
 

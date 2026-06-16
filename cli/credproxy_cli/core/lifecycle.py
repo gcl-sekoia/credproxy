@@ -414,8 +414,9 @@ def stop_workspace(ws: Workspace) -> None:
     proxy's netns). Best-effort -- absent containers are fine. A short
     timeout: PID 1 in both containers ignores SIGTERM, so the default
     10s grace would just delay the SIGKILL."""
-    docker.docker_quiet(["stop", "-t", "1", ws.ws_container])
-    docker.docker_quiet(["stop", "-t", "1", ws.proxy_container])
+    with ws.lock():
+        docker.docker_quiet(["stop", "-t", "1", ws.ws_container])
+        docker.docker_quiet(["stop", "-t", "1", ws.proxy_container])
 
 
 def _proxy_diagnostics(ws: Workspace) -> str:
@@ -456,6 +457,15 @@ def _should_push(force_push: bool, proxy_fresh: bool,
 
 def start_workspace(ws: Workspace, notify: Notify = _noop,
                     force_push: bool = True) -> None:
+    """Bring the workspace to fully-running, holding the per-workspace lifecycle
+    lock so a concurrent start/enter of the SAME workspace can't race container
+    creation, setup, and state writes. See _start_workspace_locked for the steps."""
+    with ws.lock():
+        _start_workspace_locked(ws, notify, force_push)
+
+
+def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
+                            force_push: bool = True) -> None:
     """Idempotently bring the workspace to fully-running. Auto-creates
     the workspace files if missing. Multiple workspaces run independently;
     other running workspaces are left untouched.
@@ -624,17 +634,21 @@ def recreate_workspace(ws: Workspace, notify: Notify = _noop,
     proxy gives it a new id -- part of the workspace's spec hash -- so
     `start_workspace` recreates the workspace alongside it regardless, and the
     workspace re-bootstraps CA trust against the proxy's regenerated CA."""
-    notify("recreating workspace container...")
-    docker.docker_quiet(["rm", "-f", ws.ws_container])
-    if include_proxy:
-        notify("recreating proxy container...")
-        docker.docker_quiet(["rm", "-f", ws.proxy_container])
-    for name in (reset_volumes or []):
-        # The container is already removed, so the volume is free to drop;
-        # `start_workspace` re-creates it, seeded from the image.
-        notify(f"resetting volume '{name}'...")
-        docker.docker_quiet(["volume", "rm", ws.volume(name)])
-    start_workspace(ws, notify=notify)
+    # Hold the lifecycle lock across remove-then-start so a concurrent start/enter
+    # can't slip in between (and re-create the container we just removed, or race
+    # the volume reset). start_workspace re-enters the same lock.
+    with ws.lock():
+        notify("recreating workspace container...")
+        docker.docker_quiet(["rm", "-f", ws.ws_container])
+        if include_proxy:
+            notify("recreating proxy container...")
+            docker.docker_quiet(["rm", "-f", ws.proxy_container])
+        for name in (reset_volumes or []):
+            # The container is already removed, so the volume is free to drop;
+            # `start_workspace` re-creates it, seeded from the image.
+            notify(f"resetting volume '{name}'...")
+            docker.docker_quiet(["volume", "rm", ws.volume(name)])
+        start_workspace(ws, notify=notify)
 
 
 def delete_workspace(ws: Workspace, keep_volumes: bool = False) -> None:
@@ -643,16 +657,18 @@ def delete_workspace(ws: Workspace, keep_volumes: bool = False) -> None:
     Docker objects (absent ones are fine)."""
     import shutil
 
-    docker.docker_quiet(["rm", "-f", ws.ws_container])
-    docker.docker_quiet(["rm", "-f", ws.proxy_container])
-    if not keep_volumes:
-        for vol in _workspace_volumes(ws):
-            docker.docker_quiet(["volume", "rm", vol])
-    # Remove config file
-    if ws.config_path.exists():
-        ws.config_path.unlink()
-    # Remove state dir
-    shutil.rmtree(ws.state_dir, ignore_errors=True)
+    with ws.lock():
+        docker.docker_quiet(["rm", "-f", ws.ws_container])
+        docker.docker_quiet(["rm", "-f", ws.proxy_container])
+        if not keep_volumes:
+            for vol in _workspace_volumes(ws):
+                docker.docker_quiet(["volume", "rm", vol])
+        # Remove config file
+        if ws.config_path.exists():
+            ws.config_path.unlink()
+        # Remove state dir (incl. the lock file we hold; our fd stays valid until
+        # we release on context exit).
+        shutil.rmtree(ws.state_dir, ignore_errors=True)
 
 
 @dataclass(frozen=True)
@@ -1160,19 +1176,22 @@ def enter_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop,
     import os
     import sys
 
-    start_workspace(ws, notify, force_push=push)
-    cfg = load_config(ws)
-
-    exec_cmd = _enter_exec_cmd(
-        cfg, ws.ws_container, cmd,
-        user_override=user_override, isatty=sys.stdin.isatty(),
-    )
-
-    # Register session pidfile.
     pid = os.getpid()
-    ws.sessions_dir.mkdir(parents=True, exist_ok=True)
-    pidfile = _session_pidfile(ws, pid)
-    pidfile.write_text(str(pid))
+    # Hold the lifecycle lock across start + session registration, then release it
+    # BEFORE the blocking session (the interactive exec must not serialize other
+    # enters). Registering the pidfile under the lock means a concurrent auto-stop
+    # counts this in-flight enter and can't stop the workspace during/just-after
+    # start, out from under us.
+    with ws.lock():
+        start_workspace(ws, notify, force_push=push)
+        cfg = load_config(ws)
+        exec_cmd = _enter_exec_cmd(
+            cfg, ws.ws_container, cmd,
+            user_override=user_override, isatty=sys.stdin.isatty(),
+        )
+        ws.sessions_dir.mkdir(parents=True, exist_ok=True)
+        pidfile = _session_pidfile(ws, pid)
+        pidfile.write_text(str(pid))
 
     try:
         result = subprocess.run(exec_cmd, check=False)
@@ -1201,11 +1220,13 @@ def _maybe_auto_stop(ws: Workspace, our_pid: int, notify: Notify) -> None:
     if not raw.get("auto_stop", False):
         return
 
-    # Clean up stale pidfiles; then check for other live sessions.
-    _clean_stale_sessions(ws)
-    other_sessions = _count_live_sessions(ws, exclude_pid=our_pid)
-    if other_sessions > 0:
-        return  # other sessions still alive; don't stop
-
-    notify(f"auto_stop: stopping workspace '{ws.name}'")
-    stop_workspace(ws)
+    # Decide-and-stop under the lifecycle lock so the "no other sessions -> stop"
+    # check is atomic against a concurrent enter registering its session: either
+    # we see its pidfile (and don't stop), or it waits for the lock and re-runs
+    # start after our stop -- never a stop racing a just-registered session.
+    with ws.lock():
+        _clean_stale_sessions(ws)
+        if _count_live_sessions(ws, exclude_pid=our_pid) > 0:
+            return  # other sessions still alive; don't stop
+        notify(f"auto_stop: stopping workspace '{ws.name}'")
+        stop_workspace(ws)

@@ -177,3 +177,41 @@ def test_derive_empty_raises(xdg, workspaces_dir):
     from credproxy_cli.core.workspace import derive_workspace_name
     with pytest.raises(WorkspaceError, match="could not derive"):
         derive_workspace_name("/a/@@@")
+
+
+# ---- lifecycle lock ----------------------------------------------------------
+
+
+def test_lock_is_reentrant_within_process(xdg):
+    """Nested acquisition (recreate -> start, enter -> start) must not deadlock,
+    and the depth registry is cleaned up on exit."""
+    from credproxy_cli.core import workspace as W
+    ws = W.for_name("a")
+    key = str(ws.lock_path)
+    with ws.lock():
+        assert W._lock_depth[key] == 1
+        with ws.lock():                       # would deadlock against raw flock
+            assert W._lock_depth[key] == 2
+        assert W._lock_depth[key] == 1
+    assert key not in W._lock_depth           # fully released
+
+
+def test_lock_excludes_other_holders(xdg):
+    """While the lock is held, a separate open-file-description on the same lock
+    file cannot take it (cross-process exclusion); it's free once released."""
+    import fcntl
+    import os
+
+    from credproxy_cli.core import workspace as W
+    ws = W.for_name("a")
+    ws.ensure_state_dir()
+    probe = os.open(str(ws.lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        with ws.lock():
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # released -> a non-blocking acquire now succeeds
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(probe, fcntl.LOCK_UN)
+    finally:
+        os.close(probe)
