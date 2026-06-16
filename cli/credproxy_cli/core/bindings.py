@@ -661,10 +661,13 @@ def test_binding(
 
 def config_fingerprint(bindings: list[Binding]) -> str:
     """A stable hash of the bindings' wire METADATA -- name, hosts, scheme,
-    params, placeholder, env, provider, the secret REFS (not resolved values),
-    and a scripted injector's source. Lets the host tell whether the proxy
-    already holds the intended config WITHOUT re-resolving any secret, so it is
-    cheap (injector/script TOML reads only, never a provider call).
+    params, placeholder, EFFECTIVE env, provider, the secret REFS (not resolved
+    values), and for a scripted injector its source + compile metadata
+    (api/family/slots/location_kind/header_default). Mirrors everything
+    wire_config pushes (minus resolved secret values) so a change to any pushed
+    field re-pushes. Lets the host tell whether the proxy already holds the
+    intended config WITHOUT re-resolving any secret, so it is cheap
+    (injector/script TOML reads only, never a provider call).
 
     It deliberately excludes resolved secret VALUES, so an in-place secret
     rotation (same ref, new value) does NOT change the fingerprint -- refresh
@@ -674,19 +677,30 @@ def config_fingerprint(bindings: list[Binding]) -> str:
     items = []
     for b in sorted(bindings, key=lambda x: x.name or ""):
         injector = find_injector(b.injector)
+        spec = injector.spec
         entry = {
             "name": b.name,
             "hosts": sorted(b.hosts),
             "scheme": injector.scheme,
             "params": injector.params,
             "placeholder": b.placeholder,
-            "env": b.env,
+            # EFFECTIVE env -- the same fallback wire_config pushes, so editing
+            # the injector's suggested env (with no binding override) re-pushes.
+            "env": b.env if b.env is not None else injector.env,
             "provider": b.provider,
             "secret": b.secret,
         }
         if injector.scheme == "script" and injector.script:
             from .scripts import find_script
+            # The proxy compiles the script with this metadata, so all of it is
+            # part of the pushed config (mirrors wire_config) -- include it so an
+            # injector-manifest edit (family/slots/location/api/...) re-pushes.
             entry["script_source"] = find_script(injector.script).source
+            entry["api"] = injector.api
+            entry["family"] = spec.family
+            entry["slots"] = list(spec.slots)
+            entry["location_kind"] = spec.location_kind
+            entry["header_default"] = spec.header_default
         items.append(entry)
     blob = json.dumps(items, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()

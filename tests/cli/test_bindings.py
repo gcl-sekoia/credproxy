@@ -329,6 +329,41 @@ def test_validate_rejects_case_differing_header_collision(xdg, workspaces_dir):
         validate([a, b], "test")
 
 
+def test_fingerprint_includes_effective_injector_env(xdg, workspaces_dir):
+    """The fingerprint must use the EFFECTIVE env (binding override else injector
+    suggestion) -- the same value wire_config pushes -- so editing the injector's
+    env re-pushes instead of silently serving stale config. Two injectors that
+    differ ONLY in env (everything else, incl. the injector NAME, absent from the
+    hash) must yield different fingerprints."""
+    from credproxy_cli.core.bindings import Binding, config_fingerprint
+    _write_injector(xdg, "inj-a", 'scheme = "bearer"\nenv = "A_TOKEN"\n')
+    _write_injector(xdg, "inj-b", 'scheme = "bearer"\nenv = "B_TOKEN"\n')
+    a = Binding(name="b", injector="inj-a", provider="env", secret="X",
+                hosts=("h",), placeholder="PH", env=None)
+    b = Binding(name="b", injector="inj-b", provider="env", secret="X",
+                hosts=("h",), placeholder="PH", env=None)
+    assert config_fingerprint([a]) != config_fingerprint([b])
+
+
+def test_fingerprint_includes_scripted_compile_metadata(xdg, workspaces_dir):
+    """A scripted injector's compile metadata (here location_kind) is pushed and
+    the proxy compiles with it, so it must be in the fingerprint -- editing it
+    must re-push. Same script source, differing only in location_kind."""
+    from credproxy_cli.core.bindings import Binding, config_fingerprint
+    from credproxy_cli.core.paths import scripts_config_dir
+    sd = scripts_config_dir()
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "s.star").write_text("def on_request():\n    return True\n")
+    base = 'scheme = "script"\nscript = "s"\napi = 1\nfamily = "sign"\nslots = ["key"]\n'
+    _write_injector(xdg, "s-hdr", base + 'location_kind = "header"\n')
+    _write_injector(xdg, "s-body", base + 'location_kind = "body"\n')
+    a = Binding(name="b", injector="s-hdr", provider="env", secret={"key": "X"},
+                hosts=("h",), placeholder=None, env=None)
+    b = Binding(name="b", injector="s-body", provider="env", secret={"key": "X"},
+                hosts=("h",), placeholder=None, env=None)
+    assert config_fingerprint([a]) != config_fingerprint([b])
+
+
 # ---- _block_spans (surgical-edit boundary scan) ------------------------------
 #
 # The spans must be 1:1 with the [[binding]] tables tomllib parses, in order --
