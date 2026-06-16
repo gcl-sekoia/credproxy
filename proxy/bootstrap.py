@@ -7,7 +7,7 @@ workspace needs to function (CA cert, env vars, placeholders).
 
 Inward API / least-disclosure: /setup returns the `bindings` list with
 only the fields the workspace needs for self-configuration:
-  name, placeholder, env, header, hosts.
+  name, placeholder, env, scheme, params, hosts.
 It does NOT expose provider, secret-id, or real credential values --
 those never reach the proxy from the push model anyway.
 """

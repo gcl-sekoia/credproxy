@@ -7,9 +7,10 @@ here and reads its SOURCE; the source is pushed to the proxy in the wire config
 user scripts work with no mounts or image rebuilds). The proxy sandboxes
 execution; see `proxy/starlark_runtime.py`.
 
-Discovery (first match wins, user shadows builtin):
-  1. $XDG_CONFIG_HOME/credproxy/scripts/<name>.star
-  2. builtin  cli/credproxy_cli/builtin/scripts/<name>.star
+Discovery (first match wins, user shadows profile shadows builtin):
+  1. user     $XDG_CONFIG_HOME/credproxy/scripts/<name>.star
+  2. profile  <$CREDPROXY_PROFILE_DIR or repo/profile>/scripts/<name>.star
+  3. builtin  cli/credproxy_cli/builtin/scripts/<name>.star
 """
 from __future__ import annotations
 

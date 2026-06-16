@@ -13,9 +13,10 @@ credential resolves in a single exec -- an interactive provider prompts once,
 a vault provider can coalesce same-item refs. A single value is just a list of
 one; there is no single/batch duality on the wire.
 
-Discovery (first match wins, user shadows builtin):
-  1. $XDG_CONFIG_HOME/credproxy/providers/<name>
-  2. builtin  cli/credproxy_cli/builtin/providers/<name>
+Discovery (first match wins, user shadows profile shadows builtin):
+  1. user     $XDG_CONFIG_HOME/credproxy/providers/<name>
+  2. profile  <$CREDPROXY_PROFILE_DIR or repo/profile>/providers/<name>
+  3. builtin  cli/credproxy_cli/builtin/providers/<name>
 Each location is either an executable file, or a directory holding an
 executable `run`.
 """

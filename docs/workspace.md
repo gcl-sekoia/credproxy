@@ -93,8 +93,10 @@ curl -s http://proxy.local/setup | jq .bindings
 ```
 
 Each binding entry exposes: `name`, `placeholder` (the inert sentinel to
-use as the credential value), `env` (suggested env var, may be null),
-`header` (the HTTP header the proxy watches), and `hosts` (the hostnames
+use as the credential value, may be null for sign-family schemes), `env`
+(suggested env var, may be null), `scheme` (how the proxy injects:
+bearer/basic/body/sigv4/oauth2-reseal/script), `params` (scheme-specific
+settings, e.g. `{"header": "Authorization"}`), and `hosts` (the hostnames
 for which injection is active). The real credential is never exposed
 here. Use `http://169.254.1.1` directly if `proxy.local` does not resolve.
 

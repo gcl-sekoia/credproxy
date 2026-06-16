@@ -5,9 +5,10 @@ which typed scheme the proxy runs, the scheme's params, and the shape of the
 inert placeholder the workspace holds. Unlike providers (executables),
 injectors are declarative TOML files -- passive, reusable, drop-in.
 
-Discovery (first match wins, user shadows builtin):
-  1. $XDG_CONFIG_HOME/credproxy/injectors/<name>.toml
-  2. builtin  cli/credproxy_cli/builtin/injectors/<name>.toml
+Discovery (first match wins, user shadows profile shadows builtin):
+  1. user     $XDG_CONFIG_HOME/credproxy/injectors/<name>.toml
+  2. profile  <$CREDPROXY_PROFILE_DIR or repo/profile>/injectors/<name>.toml
+  3. builtin  cli/credproxy_cli/builtin/injectors/<name>.toml
 
 Schema:
     scheme = "bearer"             # required: a scheme in core/schemes.CATALOG
