@@ -20,6 +20,7 @@ class ImageEnv:
     tmpfs: str
     token: str
     source: str
+    mitmproxy_uid: int   # the proxy's reserved uid (loop-exempt in the shared netns)
 
     @classmethod
     def load(cls, image: str | None = None) -> "ImageEnv":
@@ -40,6 +41,7 @@ class ImageEnv:
                 tmpfs=env["CREDPROXY_TMPFS"],
                 token=env["CREDPROXY_TOKEN_PATH"],
                 source=env["CREDPROXY_SOURCE"],
+                mitmproxy_uid=int(env["CREDPROXY_MITMPROXY_UID"]),
             )
         except KeyError as e:
             raise ImageError(

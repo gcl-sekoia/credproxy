@@ -36,7 +36,7 @@ from .config import (
     render_template,
     workspace_spec_hash,
 )
-from .errors import DockerError, ImageError, ProxyError, WorkspaceError
+from .errors import ConfigError, DockerError, ImageError, ProxyError, WorkspaceError
 from .imageenv import ImageEnv
 from .workspace import Workspace, ensure_token
 from .paths import IMAGE_TAG, PROXY_DIR, atomic_write_text
@@ -184,6 +184,30 @@ def _mapped_uid(cfg: dict) -> int:
     `hasattr(os, "getuid")` before relying on the fallback."""
     uid = cfg.get("user_uid")
     return os.getuid() if uid is None else uid
+
+
+def _reserved_uid_check(cfg: dict, meta: ImageEnv) -> None:
+    """Refuse a workspace that would run egress as the proxy's mitmproxy uid.
+
+    The workspace shares the proxy's netns, where the iptables loop-prevention
+    rule RETURNs (un-proxied) every packet from that uid so mitmproxy's own
+    outbound isn't re-captured. A workspace process running as the SAME uid
+    therefore silently bypasses interception entirely. Covers the config-settable
+    vectors -- `user_uid` and a numeric `user` (uid or uid:gid); raw
+    `run_flags --user` is the user's own escape hatch and left to them. The
+    reserved uid comes from the image (CREDPROXY_MITMPROXY_UID), not a CLI
+    constant."""
+    reserved = meta.mitmproxy_uid
+    uid = cfg.get("user_uid")
+    user = cfg.get("user")
+    user_uid_part = user.split(":", 1)[0] if isinstance(user, str) else None
+    if uid == reserved or user_uid_part == str(reserved):
+        raise ConfigError(
+            f"workspace uid collides with the proxy's reserved uid {reserved}: a "
+            f"workspace process running as uid {reserved} bypasses egress "
+            f"interception (the shared-netns loop-prevention rule exempts that "
+            f"uid). Use a different user_uid/user."
+        )
 
 
 def _host_user_run_flags(cfg: dict) -> list[str]:
@@ -482,6 +506,7 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
 
     meta = ImageEnv.load()
     cfg = load_config(ws)
+    _reserved_uid_check(cfg, meta)
 
     ensure_token(ws)
 

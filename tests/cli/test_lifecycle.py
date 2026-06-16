@@ -75,7 +75,8 @@ def test_proxy_relabels_its_own_mounts(xdg, ws_factory, monkeypatch):
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
     meta = ImageEnv(http_port=39998, tmpfs="/run/secrets",
-                    token="/run/secrets-ro/auth.token", source="/opt/proxy")
+                    token="/run/secrets-ro/auth.token", source="/opt/proxy",
+                    mitmproxy_uid=31337)
     lifecycle.create_proxy(ws, meta)
     joined = " ".join(calls[-1])
     assert f"{ws.token_path}:/run/secrets-ro/auth.token:ro,Z" in joined
@@ -273,6 +274,35 @@ def test_owns_user_mapping(xdg):
     assert _credproxy_owns_user_mapping(_nested_cfg(map_host_user=False)) is False
     assert _credproxy_owns_user_mapping(_nested_cfg(user="root")) is False
     assert _credproxy_owns_user_mapping(_nested_cfg(user=None)) is False
+
+
+def _meta_uid(reserved=31337):
+    from types import SimpleNamespace
+    return SimpleNamespace(mitmproxy_uid=reserved)
+
+
+def test_reserved_uid_check_rejects_user_uid(xdg):
+    """user_uid == the proxy's reserved uid would run egress un-proxied (the
+    netns loop-prevention rule exempts that uid) -- reject before start."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.lifecycle import _reserved_uid_check
+    with pytest.raises(ConfigError, match="31337"):
+        _reserved_uid_check({"user_uid": 31337}, _meta_uid())
+
+
+def test_reserved_uid_check_rejects_numeric_user(xdg):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.lifecycle import _reserved_uid_check
+    with pytest.raises(ConfigError, match="31337"):
+        _reserved_uid_check({"user": "31337"}, _meta_uid())
+    with pytest.raises(ConfigError, match="31337"):
+        _reserved_uid_check({"user": "31337:31337"}, _meta_uid())   # uid:gid form
+
+
+def test_reserved_uid_check_allows_normal_user(xdg):
+    from credproxy_cli.core.lifecycle import _reserved_uid_check
+    _reserved_uid_check({"user_uid": 1000, "user": "vscode"}, _meta_uid())  # no raise
+    _reserved_uid_check({}, _meta_uid())                                     # no user set
 
 
 def test_chown_mount_parents_uses_mapped_uid(xdg, ws_factory, monkeypatch):
@@ -602,6 +632,7 @@ def test_apply_container_drift_is_deferred(xdg, workspaces_dir, monkeypatch):
         classmethod(lambda cls: type("FakeEnv", (), {
             "http_port": 39998, "tmpfs": "/run/secrets",
             "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
+            "mitmproxy_uid": 31337,
         })()),
     )
     monkeypatch.setattr(
@@ -647,6 +678,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         classmethod(lambda cls: type("FakeEnv", (), {
             "http_port": 39998, "tmpfs": "/run/secrets",
             "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
+            "mitmproxy_uid": 31337,
         })()),
     )
 
