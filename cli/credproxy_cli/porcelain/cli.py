@@ -115,7 +115,11 @@ def _confirm_destructive(ctx: Ctx, ws: Workspace, implicit: bool, verb: str) -> 
         )
     suffix = ("(current default)" if pointer.read_default() == ws.name
               else "(matched current directory)")
-    reply = input(f'{verb.capitalize()} workspace "{ws.name}" {suffix}? [y/N] ')
+    # Prompt to STDERR (not via input(), which writes it to stdout and would
+    # corrupt a --json stdout stream). EOF (closed stdin) reads "" -> abort.
+    print(f'{verb.capitalize()} workspace "{ws.name}" {suffix}? [y/N] ',
+          end="", file=sys.stderr, flush=True)
+    reply = sys.stdin.readline()
     if reply.strip().lower() not in ("y", "yes"):
         fail("aborted")
 
@@ -389,20 +393,29 @@ def _logs_json(ws: Workspace) -> None:
     import json
     import subprocess
 
+    # Merge stderr into the stream so docker daemon errors (e.g. "No such
+    # container") surface as JSON lines instead of bare text, and so a startup
+    # failure is visible to a --json consumer.
     proc = subprocess.Popen(
         ["docker", "logs", "-f", ws.proxy_container],
         stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
     )
+    interrupted = False
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
             print(json.dumps({"line": line.rstrip("\n")}), flush=True)
     except KeyboardInterrupt:
-        pass
+        interrupted = True
     finally:
         proc.terminate()
-        proc.wait()
+        rc = proc.wait()
+    # A non-zero exit we didn't cause (Ctrl-C) is a real failure -- e.g. the
+    # container doesn't exist; propagate it rather than reporting success.
+    if not interrupted and rc:
+        fail(f"docker logs exited with status {rc}")
 
 
 # ---- binding commands --------------------------------------------------------
@@ -561,19 +574,20 @@ def _do_binding_preset(ctx: Ctx, name: str | None, a: argparse.Namespace) -> Non
                 fail(f"binding name '{b.name}' already exists in workspace '{ws.name}'")
         core_bindings.validate(existing + new, str(ws.config_path))
         core_bindings.append_bindings(ws, new)   # one atomic write
-    # A preset expands to several bindings; say so up front so the multiple
-    # `added binding` lines that follow aren't a surprise.
+    # A preset expands to several bindings; say so up front (stderr) so the
+    # human lines that follow aren't a surprise. Emit the result as ONE value
+    # (render.OUT.bindings_added) so --json yields a single JSON object, not one
+    # per binding (this is a one-shot command, not the JSON-lines `logs` stream).
     say(f"preset '{a.preset}' expands to {len(new)} bindings:")
-    for b in new:
-        render.OUT.binding_added(b.name, ws.name, {
-            "name": b.name,
-            "injector": b.injector,
-            "provider": b.provider,
-            "secret": b.secret,
-            "hosts": list(b.hosts),
-            "placeholder": b.placeholder,
-            "env": b.env,
-        })
+    render.OUT.bindings_added(ws.name, [{
+        "name": b.name,
+        "injector": b.injector,
+        "provider": b.provider,
+        "secret": b.secret,
+        "hosts": list(b.hosts),
+        "placeholder": b.placeholder,
+        "env": b.env,
+    } for b in new])
 
 
 def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
@@ -862,11 +876,23 @@ def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     p.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
 
 
+class _LeafParser(argparse.ArgumentParser):
+    """ArgumentParser whose `error` routes through the porcelain renderer, so a
+    bad/unknown/missing arg serializes as a JSON error object under --json (and a
+    clean `[credproxy] ` line otherwise) and exits non-zero -- instead of
+    argparse's raw usage dump to stderr + SystemExit(2), which bypassed the
+    renderer entirely. Sub-parsers inherit this class (argparse defaults
+    parser_class to type(self)), so the whole verb tree is covered."""
+
+    def error(self, message: str):  # noqa: D401 - argparse hook
+        fail(f"{self.prog}: {message}")
+
+
 def _build_leaf_parser() -> argparse.ArgumentParser:
     """Parser for the verb tail of a workspace-scoped command. The dispatcher
     has already stripped `workspace` and the workspace name; what remains is
     `<verb> [args]`. NAME is threaded separately (resolved by the dispatcher)."""
-    parser = argparse.ArgumentParser(prog="credproxy workspace", add_help=False)
+    parser = _LeafParser(prog="credproxy workspace", add_help=False)
     sub = parser.add_subparsers(dest="verb", required=True)
 
     p_enter = sub.add_parser("enter")
@@ -1274,7 +1300,7 @@ def _run_ws_verb(
 
 
 def _parse_create(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="credproxy workspace create", add_help=False)
+    p = _LeafParser(prog="credproxy workspace create", add_help=False)
     # Optional: on the loose surface, an omitted NAME is derived from the
     # --here/--dir directory basename (strict still requires it). See do_create.
     p.add_argument("name", nargs="?", default=None)

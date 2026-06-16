@@ -222,6 +222,13 @@ class Renderer:
         if b.get("env"):
             print(f"  env         {b['env']}")
 
+    def bindings_added(self, ws: str, rows: list[dict]) -> None:
+        """Several bindings added in one command (a preset expansion). Human mode
+        prints each; the JSON renderer emits a SINGLE object (one command -> one
+        JSON value, not one per binding)."""
+        for b in rows:
+            self.binding_added(b["name"], ws, b)
+
     def binding_removed(self, name: str, ws: str) -> None:
         print(f"removed binding '{name}' from workspace '{ws}'")
 
@@ -394,6 +401,9 @@ class JsonRenderer(Renderer):
 
     def binding_added(self, name: str, ws: str, b: dict) -> None:
         self._emit({"workspace": ws, "binding": b})
+
+    def bindings_added(self, ws: str, rows: list[dict]) -> None:
+        self._emit({"workspace": ws, "bindings": rows})
 
     def binding_removed(self, name: str, ws: str) -> None:
         self._emit({"workspace": ws, "removed": name})
