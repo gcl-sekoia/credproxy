@@ -235,7 +235,11 @@ def location_key(scheme: "Scheme", params: dict) -> tuple:
     name matching): header schemes key on the resolved header name, others on
     their location_kind."""
     if scheme.location_kind == "header":
-        return ("header", params.get("header", scheme.header_default))
+        # Header names are case-insensitive (RFC 9110), so canonicalize for the
+        # collision key -- else two bindings writing `Authorization` vs
+        # `authorization` on one host pass uniqueness yet collide on the wire.
+        h = params.get("header", scheme.header_default)
+        return ("header", h.lower() if isinstance(h, str) else h)
     return (scheme.location_kind,)
 
 

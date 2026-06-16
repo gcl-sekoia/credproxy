@@ -249,7 +249,11 @@ def validate(bindings: list[Binding], source: str) -> None:
 
         loc = location_key(spec, injector.params)
         for host in b.hosts:
-            group = seen_loc.setdefault((host, loc), {"unconditional": None, "by_ph": {}})
+            # Lower-case the host: DNS is case-insensitive, and the proxy
+            # lower-cases at match time, so two bindings on `API.x`/`api.x` must
+            # be caught here too (mirrors proxy/config.load_resolved).
+            group = seen_loc.setdefault((host.lower(), loc),
+                                        {"unconditional": None, "by_ph": {}})
             if not spec.uses_placeholder:
                 other = group["unconditional"] or next(iter(group["by_ph"].values()), None)
                 if other is not None:

@@ -130,6 +130,7 @@ class BindingCredentials:
         on `intercept_hosts()`."""
         if not sni:
             return False
+        sni = sni.lower()                 # DNS/SNI names are case-insensitive
         if sni in self._hosts:
             return True
         if any(rx.fullmatch(sni) for (_, rx, _) in self._patterns):
@@ -141,6 +142,7 @@ class BindingCredentials:
         return set(self._hosts) | {p for (p, _, _) in self._patterns} | live
 
     def transforms_for(self, host: str) -> list[Transform]:
+        host = host.lower()               # DNS hostnames are case-insensitive
         out = list(self._hosts.get(host, []))
         if self._patterns:
             out += [t for (_, rx, t) in self._patterns if rx.fullmatch(host)]
@@ -151,7 +153,7 @@ class BindingCredentials:
         """Add a runtime transform for `host` (the re-seal mint seam), optionally
         expiring `ttl` seconds from now. ttl=None means it never expires."""
         expires_at = (self._clock() + ttl) if ttl is not None else None
-        self._runtime.setdefault(host, []).append((transform, expires_at))
+        self._runtime.setdefault(host.lower(), []).append((transform, expires_at))
 
     def _live(self, host: str) -> list[Transform]:
         """Non-expired runtime transforms for `host`, pruning expired ones in
@@ -402,9 +404,14 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
             _fail(f"{source}: {where}.env must be a non-empty string or absent/null")
 
         # --- (host, location) uniqueness, disambiguated by placeholder ---
+        # Key the collision check on the lower-cased host (DNS is
+        # case-insensitive), so two bindings on `API.example.com` and
+        # `api.example.com` writing one location are caught here, not silently
+        # merged after `transforms_for` lower-cases at match time.
         loc = schemes.location_key(scheme, params)
         for host in binding_hosts:
-            group = loc_seen.setdefault((host, loc), {"unconditional": None, "by_ph": {}})
+            group = loc_seen.setdefault((host.lower(), loc),
+                                        {"unconditional": None, "by_ph": {}})
             if placeholder is None:
                 # Writes the location unconditionally -> can't coexist there.
                 other = group["unconditional"] or next(iter(group["by_ph"].values()), None)
@@ -438,11 +445,15 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
             placeholder=placeholder,
             secrets=dict(secret),
         )
+        # Store match keys lower-cased (DNS is case-insensitive) so they agree
+        # with the lower-cased lookup in intercepts/transforms_for. inward (below)
+        # keeps the original casing for /setup display.
         for host in binding_hosts:
-            if hostmatch.is_pattern(host):
-                patterns.append((host, hostmatch.compile_pattern(host), transform))
+            h = host.lower()
+            if hostmatch.is_pattern(h):
+                patterns.append((h, hostmatch.compile_pattern(h), transform))
             else:
-                hosts.setdefault(host, []).append(transform)
+                hosts.setdefault(h, []).append(transform)
 
         # Re-seal: a scheme may need extra hosts TLS-terminated (the API hosts
         # where a minted token is later used) even though no static transform
@@ -453,7 +464,7 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
                 if not isinstance(h, str) or not h:
                     _fail(f"{source}: {where} scheme '{scheme_name}' returned an "
                           f"invalid extra-intercept host {h!r}")
-                hosts.setdefault(h, [])
+                hosts.setdefault(h.lower(), [])
 
         inward.append(InwardBinding(
             name=name,

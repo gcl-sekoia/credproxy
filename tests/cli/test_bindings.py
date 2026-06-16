@@ -301,6 +301,34 @@ def test_validate_accepts_oauth2_reseal_with_api_hosts(xdg, workspaces_dir):
     validate([b], "test")        # no raise
 
 
+def test_validate_rejects_case_differing_host_collision(xdg, workspaces_dir):
+    """DNS is case-insensitive: `API.x` and `api.x` writing one header with the
+    same placeholder collide -- caught at validate (parity with the proxy)."""
+    from credproxy_cli.core.bindings import Binding, validate
+    from credproxy_cli.core.errors import ConfigError
+    a = Binding(name="a", injector="bearer", provider="env", secret="X",
+                hosts=("API.example.com",), placeholder="PH", env=None)
+    b = Binding(name="b", injector="bearer", provider="env", secret="X",
+                hosts=("api.example.com",), placeholder="PH", env=None)
+    with pytest.raises(ConfigError, match="both write"):
+        validate([a, b], "test")
+
+
+def test_validate_rejects_case_differing_header_collision(xdg, workspaces_dir):
+    """Header names are case-insensitive: `Authorization` vs `authorization` on
+    one host with the same placeholder collide."""
+    from credproxy_cli.core.bindings import Binding, validate
+    from credproxy_cli.core.errors import ConfigError
+    _write_injector(xdg, "auth-up", 'scheme = "bearer"\n[params]\nheader = "Authorization"\n')
+    _write_injector(xdg, "auth-lo", 'scheme = "bearer"\n[params]\nheader = "authorization"\n')
+    a = Binding(name="a", injector="auth-up", provider="env", secret="X",
+                hosts=("x.com",), placeholder="PH", env=None)
+    b = Binding(name="b", injector="auth-lo", provider="env", secret="X",
+                hosts=("x.com",), placeholder="PH", env=None)
+    with pytest.raises(ConfigError, match="both write"):
+        validate([a, b], "test")
+
+
 # ---- _block_spans (surgical-edit boundary scan) ------------------------------
 #
 # The spans must be 1:1 with the [[binding]] tables tomllib parses, in order --

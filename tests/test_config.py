@@ -179,6 +179,39 @@ def test_host_location_same_placeholder_collides():
         ]})
 
 
+def test_header_collision_is_case_insensitive():
+    """Header names are case-insensitive: `Authorization` and `authorization`
+    must collide (same placeholder, same host) -- they used to get distinct
+    location keys and silently both inject."""
+    with pytest.raises(config.ConfigError, match="both write header on host"):
+        config.load_resolved({"bindings": [
+            _entry(name="b1", params={"header": "Authorization"}, placeholder="ph"),
+            _entry(name="b2", params={"header": "authorization"}, placeholder="ph"),
+        ]})
+
+
+def test_host_collision_is_case_insensitive():
+    """DNS hostnames are case-insensitive: a collision on `API.github.com` vs
+    `api.github.com` must be caught at load, not silently merged at match time."""
+    with pytest.raises(config.ConfigError, match="both write header on host"):
+        config.load_resolved({"bindings": [
+            _entry(name="b1", hosts=["API.github.com"], placeholder="ph"),
+            _entry(name="b2", hosts=["api.github.com"], placeholder="ph"),
+        ]})
+
+
+def test_host_match_is_case_insensitive():
+    """A mixed-case configured host matches mixed-case SNI/Host lookups (literal
+    matching used to be case-sensitive while glob matching was not)."""
+    creds = config.load_resolved({"bindings": [
+        _entry(hosts=["Api.GitHub.COM"], placeholder="ph"),
+    ]})
+    assert creds.intercepts("api.github.com")
+    assert creds.intercepts("API.GITHUB.COM")
+    assert len(creds.transforms_for("api.github.com")) == 1
+    assert len(creds.transforms_for("API.GITHUB.COM")) == 1
+
+
 def test_host_location_distinct_placeholders_allowed():
     """Distinct placeholders disambiguate, so two bindings may share a header on
     one host (each swaps only its own placeholder) -- what lets several re-seal

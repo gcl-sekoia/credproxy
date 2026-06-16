@@ -137,5 +137,8 @@ def location_key(spec: SchemeSpec, params: dict) -> tuple:
     name matching): header schemes key on the resolved header name, others on
     their location_kind. Mirrors proxy/schemes.location_key."""
     if spec.location_kind == "header":
-        return ("header", params.get("header", spec.header_default))
+        # Header names are case-insensitive (RFC 9110): canonicalize so
+        # `Authorization` and `authorization` collide. Mirrors proxy.
+        h = params.get("header", spec.header_default)
+        return ("header", h.lower() if isinstance(h, str) else h)
     return (spec.location_kind,)
