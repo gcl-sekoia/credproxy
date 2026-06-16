@@ -314,6 +314,19 @@ def test_validate_rejects_case_differing_host_collision(xdg, workspaces_dir):
         validate([a, b], "test")
 
 
+def test_validate_rejects_overlapping_placeholders(xdg, workspaces_dir):
+    """Overlapping placeholders (`ph` substring of `ph2`) on a shared location are
+    rejected (mirrors the proxy): sequential substitution would corrupt one."""
+    from credproxy_cli.core.bindings import Binding, validate
+    from credproxy_cli.core.errors import ConfigError
+    a = Binding(name="a", injector="bearer", provider="env", secret="X",
+                hosts=("h.io",), placeholder="ph", env=None)
+    b = Binding(name="b", injector="bearer", provider="env", secret="X",
+                hosts=("h.io",), placeholder="ph2", env=None)
+    with pytest.raises(ConfigError, match="overlap"):
+        validate([a, b], "test")
+
+
 def test_validate_rejects_case_differing_header_collision(xdg, workspaces_dir):
     """Header names are case-insensitive: `Authorization` vs `authorization` on
     one host with the same placeholder collide."""

@@ -271,12 +271,30 @@ def validate(bindings: list[Binding], source: str) -> None:
                         f"with no placeholder writes unconditionally and can't share "
                         f"a wire location)"
                     )
-                if b.placeholder is not None and b.placeholder in group["by_ph"]:
-                    raise ConfigError(
-                        f"{source}: bindings '{group['by_ph'][b.placeholder]}' and "
-                        f"'{b.name}' both write {loc[0]} on host '{host}' with the "
-                        f"same placeholder '{b.placeholder}'"
-                    )
+                # Placeholders sharing a wire location must be DISJOINT, not just
+                # distinct: substitution is sequential str.replace, so `ph` vs
+                # `ph2` (one a substring of the other) would corrupt the longer.
+                # Mirrors proxy/config.load_resolved. (Skip the `\x00name`
+                # sentinels used for not-yet-materialized placeholders.)
+                if b.placeholder is not None:
+                    for existing_ph, existing_name in group["by_ph"].items():
+                        if existing_ph.startswith("\x00"):
+                            continue
+                        if existing_ph == b.placeholder:
+                            raise ConfigError(
+                                f"{source}: bindings '{existing_name}' and "
+                                f"'{b.name}' both write {loc[0]} on host '{host}' "
+                                f"with the same placeholder '{b.placeholder}'"
+                            )
+                        if existing_ph in b.placeholder or b.placeholder in existing_ph:
+                            raise ConfigError(
+                                f"{source}: bindings '{existing_name}' and "
+                                f"'{b.name}' share {loc[0]} on host '{host}' but "
+                                f"their placeholders '{existing_ph}' and "
+                                f"'{b.placeholder}' overlap (one is a substring of "
+                                f"the other); sequential substitution would corrupt "
+                                f"the other"
+                            )
                 # An unmaterialized placeholder (None) will become a distinct
                 # random value, so key it by name to keep it from colliding.
                 group["by_ph"][b.placeholder or f"\x00{b.name}"] = b.name

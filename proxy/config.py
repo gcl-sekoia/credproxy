@@ -459,12 +459,25 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
                         f"placeholder writes unconditionally and can't share a "
                         f"wire location)"
                     )
-                if placeholder in group["by_ph"]:
-                    _fail(
-                        f"{source}: bindings '{group['by_ph'][placeholder]}' and "
-                        f"'{name}' both write {loc[0]} on host '{host}' with the "
-                        f"same placeholder '{placeholder}'"
-                    )
+                # Placeholders sharing a wire location must be DISJOINT, not just
+                # distinct: substitution is sequential str.replace, so if one
+                # placeholder is a substring of another (`ph` vs `ph2`), replacing
+                # the shorter first corrupts the longer -> the wrong binding fires.
+                for existing_ph, existing_name in group["by_ph"].items():
+                    if existing_ph == placeholder:
+                        _fail(
+                            f"{source}: bindings '{existing_name}' and '{name}' "
+                            f"both write {loc[0]} on host '{host}' with the same "
+                            f"placeholder '{placeholder}'"
+                        )
+                    if existing_ph in placeholder or placeholder in existing_ph:
+                        _fail(
+                            f"{source}: bindings '{existing_name}' and '{name}' "
+                            f"share {loc[0]} on host '{host}' but their placeholders "
+                            f"'{existing_ph}' and '{placeholder}' overlap (one is a "
+                            f"substring of the other); sequential substitution would "
+                            f"corrupt the other"
+                        )
                 group["by_ph"][placeholder] = name
 
         transform = Transform(

@@ -219,6 +219,17 @@ def test_host_match_is_case_insensitive():
     assert len(creds.transforms_for("API.GITHUB.COM")) == 1
 
 
+def test_overlapping_placeholders_rejected():
+    """Distinct-but-overlapping placeholders (`ph` is a substring of `ph2`) on a
+    shared wire location are rejected: sequential str.replace would corrupt the
+    longer one."""
+    with pytest.raises(config.ConfigError, match="overlap"):
+        config.load_resolved({"bindings": [
+            _entry(name="a", placeholder="ph"),
+            _entry(name="b", placeholder="ph2"),
+        ]})
+
+
 def test_host_location_distinct_placeholders_allowed():
     """Distinct placeholders disambiguate, so two bindings may share a header on
     one host (each swaps only its own placeholder) -- what lets several re-seal
