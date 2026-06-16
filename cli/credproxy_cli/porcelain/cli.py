@@ -128,8 +128,19 @@ def _require_exists(ws: Workspace) -> None:
 # ---- workspace commands ------------------------------------------------------
 
 
-def do_create(ctx: Ctx, name: str, directory: str | None = None) -> None:
-    ws = for_name(name)  # always explicit; reserved-name check happens here
+def do_create(ctx: Ctx, name: str | None, directory: str | None = None) -> None:
+    # Loose-surface convenience: an omitted NAME is derived from the --here/--dir
+    # directory basename. Strict always names explicitly; with no directory there
+    # is nothing to derive from.
+    if name is None:
+        if not ctx.loose:
+            fail("workspace name required (strict surface names every workspace); "
+                 "`credp create --here` derives one from the directory")
+        if directory is None:
+            fail("nothing to derive a name from: pass NAME, or --here/--dir")
+        name = core_workspace.derive_workspace_name(directory)
+        say(f"derived workspace name '{name}' from {directory}")
+    ws = for_name(name)  # reserved-name / charset check happens here
     lifecycle.create_workspace_files(ws)
     render.OUT.created(ws.name, str(ws.config_path))
     # Optional cwd-association (`--here`/`--dir`): record the directory this
@@ -941,7 +952,7 @@ _LOOSE_HELP = (
     "Workspaces (omit NAME to resolve by current directory, then the default):\n"
     "  credp use NAME                  set the default workspace\n"
     "  credp current                   print the default workspace\n"
-    "  credp create NAME [--here]      (--here associates the current directory)\n"
+    "  credp create [NAME] [--here]    (NAME derived from the dir if omitted)\n"
     "  credp bind-dir [NAME] [--dir PATH]  associate a workspace with a directory\n"
     "  credp list [FILTER]\n"
     "  credp enter|edit|start|stop|recreate|delete|apply|inspect|logs [NAME]\n"
@@ -1009,6 +1020,10 @@ _CREATE_HELP = (
     "  --here        associate the workspace with the current directory, so a\n"
     "                loose `credp <verb>` run from at/under it resolves here.\n"
     "  --dir PATH    associate with PATH instead of the current directory.\n"
+    "\n"
+    "On the loose surface (`credp`), NAME may be omitted with --here/--dir: it is\n"
+    "derived from the directory's basename (sanitized to the name charset, and\n"
+    "deduped with a numeric suffix). Strict `credproxy` always requires NAME.\n"
 )
 
 
@@ -1254,7 +1269,9 @@ def _run_ws_verb(
 
 def _parse_create(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="credproxy workspace create", add_help=False)
-    p.add_argument("name")
+    # Optional: on the loose surface, an omitted NAME is derived from the
+    # --here/--dir directory basename (strict still requires it). See do_create.
+    p.add_argument("name", nargs="?", default=None)
     # Associate the new workspace with a host directory, so `credp <verb>` run
     # from at/under it resolves here. --here uses the current directory.
     p.add_argument("--here", action="store_true")

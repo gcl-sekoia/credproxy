@@ -138,3 +138,42 @@ def test_list_names_ignores_non_toml(xdg, workspaces_dir):
     (workspaces_dir / "readme.txt").write_text("not a workspace")
     names = list_names()
     assert names == ["ws"]
+
+
+# ---- derive_workspace_name ---------------------------------------------------
+
+
+def test_derive_basename(xdg, workspaces_dir):
+    from credproxy_cli.core.workspace import derive_workspace_name
+    assert derive_workspace_name("/home/me/src/myproj") == "myproj"
+
+
+def test_derive_trailing_slash(xdg, workspaces_dir):
+    from credproxy_cli.core.workspace import derive_workspace_name
+    assert derive_workspace_name("/home/me/src/myproj/") == "myproj"
+
+
+def test_derive_sanitizes(xdg, workspaces_dir):
+    from credproxy_cli.core.workspace import derive_workspace_name
+    assert derive_workspace_name("/tmp/My Proj!") == "My-Proj"  # case preserved
+    assert derive_workspace_name("/tmp/.hidden") == "hidden"    # leading dot stripped
+
+
+def test_derive_dedups_existing(xdg, workspaces_dir):
+    from credproxy_cli.core.workspace import derive_workspace_name
+    (workspaces_dir / "foo.toml").write_text('image = "x"\n')
+    assert derive_workspace_name("/a/foo") == "foo-2"
+
+
+def test_derive_dedups_reserved(xdg, workspaces_dir):
+    """A directory named like a command verb derives a suffixed name rather
+    than a reserved (rejected) one."""
+    from credproxy_cli.core.workspace import derive_workspace_name
+    assert derive_workspace_name("/a/config") == "config-2"
+
+
+def test_derive_empty_raises(xdg, workspaces_dir):
+    from credproxy_cli.core.errors import WorkspaceError
+    from credproxy_cli.core.workspace import derive_workspace_name
+    with pytest.raises(WorkspaceError, match="could not derive"):
+        derive_workspace_name("/a/@@@")

@@ -233,6 +233,54 @@ def test_create_here_then_resolves(xdg, workspaces_dir, tmp_path, monkeypatch):
     assert "matched current directory" in err
 
 
+# ---- nameless create (name derived from the directory) -----------------------
+
+
+def test_create_here_nameless_derives(xdg, workspaces_dir, tmp_path, monkeypatch):
+    proj = tmp_path / "coolproj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    ec, out, err = _run_loose(["create", "--here"])
+    assert ec == 0, f"stderr: {err}"
+    assert (workspaces_dir / "coolproj.toml").exists()
+    assert "derived" in err and "coolproj" in err
+
+
+def test_create_dir_nameless_derives(xdg, workspaces_dir, tmp_path):
+    target = tmp_path / "widget"
+    target.mkdir()
+    ec, out, err = _run_loose(["create", "--dir", str(target)])
+    assert ec == 0, f"stderr: {err}"
+    assert (workspaces_dir / "widget.toml").exists()
+
+
+def test_create_nameless_dedups(xdg, workspaces_dir, tmp_path, monkeypatch):
+    (workspaces_dir / "dup.toml").write_text('image = "x"\n')
+    proj = tmp_path / "dup"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    ec, out, err = _run_loose(["create", "--here"])
+    assert ec == 0, f"stderr: {err}"
+    assert (workspaces_dir / "dup-2.toml").exists()
+
+
+def test_create_strict_nameless_errors(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """Strict surface never derives -- a name is required even with --here."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    ec, out, err = _run(["workspace", "create", "--here"])
+    assert ec != 0
+    assert "required" in err
+
+
+def test_create_loose_nameless_no_dir_errors(xdg, workspaces_dir):
+    """Loose, no NAME and no --here/--dir: nothing to derive from."""
+    ec, out, err = _run_loose(["create"])
+    assert ec != 0
+    assert "derive" in err
+
+
 # ---- bind-dir ----------------------------------------------------------------
 
 

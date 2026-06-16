@@ -136,6 +136,40 @@ def for_name(name: str) -> Workspace:
     return Workspace(name)
 
 
+def _sanitize_name(s: str) -> str:
+    """Coerce an arbitrary string into the workspace-name charset: disallowed
+    runs collapse to '-', the result must start with an alnum (per _NAME_RE),
+    and trailing separators are trimmed. May return '' (caller handles)."""
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", s)
+    s = re.sub(r"^[^A-Za-z0-9]+", "", s)
+    s = re.sub(r"[-._]+$", "", s)
+    return s
+
+
+def derive_workspace_name(directory: str) -> str:
+    """Derive a valid, unused workspace name from a directory's basename, for
+    the loose-surface `create --here`/`--dir` with no NAME. Sanitized to the
+    name charset, then deduped against existing workspaces AND reserved verbs
+    with a numeric suffix (base, then base-2, base-3, ... -- matching the
+    binding auto-name convention). Raises if nothing usable remains."""
+    base = _sanitize_name(Path(directory).name)
+    if not base:
+        raise WorkspaceError(
+            f"could not derive a workspace name from {directory!r}; "
+            f"pass a name explicitly"
+        )
+
+    def taken(n: str) -> bool:
+        return n in RESERVED_NAMES or Workspace(n).exists()
+
+    if not taken(base):
+        return base
+    i = 2
+    while taken(f"{base}-{i}"):
+        i += 1
+    return f"{base}-{i}"
+
+
 def list_names() -> list[str]:
     """All workspace names that have a config file, sorted."""
     d = workspaces_config_dir()
