@@ -308,26 +308,73 @@ def _with_auto_names(bindings: list[Binding]) -> list[Binding]:
 
 # ---- materialization (surgical text edits) ----------------------------------
 
-# A `[[binding]]` table header line.
-_BLOCK_HEADER_RE = re.compile(r"^\s*\[\[\s*binding\s*\]\]\s*$")
-# Start of any other top-level table/array-of-tables (ends the current block).
-_TABLE_START_RE = re.compile(r"^\s*\[")
+# A `[[binding]]` table header line (a trailing comment is allowed).
+_BLOCK_HEADER_RE = re.compile(r"^\s*\[\[\s*binding\s*\]\]\s*(#.*)?$")
+# Any genuine top-level table / array-of-tables header (ends the current block).
+# Matches a fully-bracketed header line (+ optional comment) -- NOT a line that
+# merely starts with '[', such as a multi-line array value's continuation
+# (`[1, 2],`), which `^\s*\[` used to mistake for a table and split a block on.
+_TABLE_HEADER_RE = re.compile(r"^\s*\[\[?[^\[\]\n]+\]\]?\s*(#.*)?$")
+
+
+def _array_depth_delta(line: str) -> int:
+    """Net unclosed '[' contributed by `line`, ignoring brackets inside comments
+    and single-line string literals. Lets `_block_spans` track when it is INSIDE
+    a multi-line array value, so the value's continuation lines aren't mistaken
+    for a table header (which would split a `[[binding]]` block in the wrong
+    place) and a multi-line array isn't cut mid-value.
+
+    Known limitation: multi-line strings (\"\"\"/''') are not tracked -- credproxy
+    only ever writes single-line, newline-escaped values (see `_toml_str`), so
+    its own files never contain them."""
+    depth = 0
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if ch == "#":
+            break  # comment runs to end of line
+        if ch in ('"', "'"):
+            quote = ch
+            i += 1
+            while i < n and line[i] != quote:
+                if quote == '"' and line[i] == "\\":
+                    i += 1  # skip an escaped char in a basic string
+                i += 1
+            i += 1  # past the closing quote (or EOL on an unterminated string)
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        i += 1
+    return depth
 
 
 def _block_spans(text: str) -> list[tuple[int, int]]:
     """Index the `[[binding]]` blocks in `text` by line range [start, end)
     (end exclusive), where `start` is the header line and the block runs to
     the next table header or EOF. Trailing blank lines stay OUTSIDE the block
-    so inserts land tightly."""
+    so inserts land tightly.
+
+    Array-bracket depth is tracked so a multi-line array value (e.g. a multi-line
+    `hosts = [ ... ]`) is never split mid-value and a `[`-led array line is never
+    mistaken for a table header. The returned spans are 1:1 with the `[[binding]]`
+    tables tomllib parses, in file order -- materialize/remove index into them by
+    binding position, so a miscount would edit the wrong block."""
     lines = text.splitlines(keepends=True)
     spans: list[tuple[int, int]] = []
     i = 0
     n = len(lines)
+    depth = 0  # unclosed array brackets carried across lines (multi-line arrays)
     while i < n:
-        if _BLOCK_HEADER_RE.match(lines[i]):
+        if depth == 0 and _BLOCK_HEADER_RE.match(lines[i]):
             start = i
+            depth = max(0, depth + _array_depth_delta(lines[i]))
             j = i + 1
-            while j < n and not _TABLE_START_RE.match(lines[j]):
+            while j < n:
+                if depth == 0 and _TABLE_HEADER_RE.match(lines[j]):
+                    break
+                depth = max(0, depth + _array_depth_delta(lines[j]))
                 j += 1
             # Trim trailing blank lines from the block end.
             end = j
@@ -336,6 +383,7 @@ def _block_spans(text: str) -> list[tuple[int, int]]:
             spans.append((start, end))
             i = j
         else:
+            depth = max(0, depth + _array_depth_delta(lines[i]))
             i += 1
     return spans
 

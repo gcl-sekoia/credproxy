@@ -272,7 +272,72 @@ def test_validate_unknown_provider(xdg, workspaces_dir):
         validate([b], "test")
 
 
+# ---- _block_spans (surgical-edit boundary scan) ------------------------------
+#
+# The spans must be 1:1 with the [[binding]] tables tomllib parses, in order --
+# materialize/remove index into them by binding position, so a miscount or a
+# wrong boundary edits/deletes the wrong block and corrupts the source-of-truth
+# file. These pin the two regressions C4 plus the everyday multi-line array.
+
+
+def _spans(text):
+    from credproxy_cli.core.bindings import _block_spans
+    return _block_spans(text)
+
+
+def test_block_spans_tolerates_header_comment():
+    """`[[binding]]  # note` is a valid header; it used to yield zero spans, so
+    materialize did spans[0] -> IndexError."""
+    import tomllib
+    t = '[[binding]]  # note\nname = "a"\nhosts = ["x.com"]\n'
+    assert len(_spans(t)) == len(tomllib.loads(t)["binding"]) == 1
+    assert _spans(t) == [(0, 3)]
+
+
+def test_block_spans_not_split_by_bracket_led_array_line():
+    """A '['-led line inside a multi-line array value must not be read as a table
+    header (which used to split the block and misplace edits)."""
+    import tomllib
+    t = ('[[binding]]\nname = "a"\nmatrix = [\n  [1, 2],\n  [3, 4],\n]\n'
+         'hosts = ["x"]\n\n[[binding]]\nname = "b"\nhosts = ["y"]\n')
+    spans = _spans(t)
+    assert len(spans) == len(tomllib.loads(t)["binding"]) == 2
+    lines = t.splitlines(keepends=True)
+    # block 0 must reach its own hosts line, not stop at `matrix = [`.
+    assert "hosts" in "".join(lines[spans[0][0]:spans[0][1]])
+
+
+def test_block_spans_ignores_brackets_and_hashes_in_strings():
+    """Brackets/`#` inside string values aren't array depth or comments."""
+    import tomllib
+    t = ('[[binding]]\nname = "a"\nhosts = ["api].com"]\nenv = "A#B"\n'
+         '\n[[binding]]\nname = "b"\nhosts = ["y"]\n')
+    assert len(_spans(t)) == len(tomllib.loads(t)["binding"]) == 2
+
+
 # ---- materialization ---------------------------------------------------------
+
+
+def test_materialize_with_commented_block_header(xdg, workspaces_dir):
+    """A `[[binding]]` header with a trailing comment still materializes (used to
+    crash with IndexError because the header matched no span)."""
+    ws = _write_ws(workspaces_dir, "cmthdr", """\
+        image = "x"
+
+        [[binding]]  # github
+        injector = "bearer"
+        provider = "env"
+        secret   = "GITHUB_TOKEN"
+        hosts    = ["api.github.com"]
+    """)
+    from credproxy_cli.core.bindings import materialize_bindings
+    import tomllib
+
+    bindings = materialize_bindings(ws)
+    assert bindings[0].name == "bearer-env"
+    raw = tomllib.loads(ws.config_path.read_text())
+    assert raw["binding"][0]["name"] == "bearer-env"
+    assert "# github" in ws.config_path.read_text()      # header comment preserved
 
 
 def test_materialize_writes_name_and_placeholder(xdg, workspaces_dir):
@@ -424,6 +489,41 @@ def test_append_binding_round_trip(xdg, workspaces_dir):
     remove_binding(ws, "mygh")
     raw2 = tomllib.loads(ws.config_path.read_text())
     assert len(raw2.get("binding", [])) == 0
+
+
+def test_remove_binding_with_multiline_hosts_neighbor(xdg, workspaces_dir):
+    """remove_binding deletes exactly the target block even when a sibling has a
+    multi-line `hosts` array -- the depth-aware span scan must not cut that array
+    short or delete the wrong lines."""
+    ws = _write_ws(workspaces_dir, "rmmulti", """\
+        image = "x"
+
+        [[binding]]
+        name     = "keep"
+        injector = "bearer"
+        provider = "env"
+        secret   = "A"
+        hosts    = [
+          "a.example.com",
+          "b.example.com",
+        ]
+        placeholder = "ph_keep"
+
+        [[binding]]
+        name     = "drop"
+        injector = "bearer"
+        provider = "env"
+        secret   = "B"
+        hosts    = ["c.example.com"]
+        placeholder = "ph_drop"
+    """)
+    from credproxy_cli.core.bindings import remove_binding
+    import tomllib
+
+    remove_binding(ws, "drop")
+    raw = tomllib.loads(ws.config_path.read_text())
+    assert [b["name"] for b in raw["binding"]] == ["keep"]
+    assert raw["binding"][0]["hosts"] == ["a.example.com", "b.example.com"]
 
 
 def test_append_binding_multi_slot_inline_table(xdg, workspaces_dir):
