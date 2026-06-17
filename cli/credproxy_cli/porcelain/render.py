@@ -64,6 +64,10 @@ class Renderer:
         # Show the DIRECTORY column only when some workspace has an association,
         # so the common (unused) case renders exactly as before.
         show_dir = any(r.get("directory") for r in rows)
+        # The `here` marker (and its second marker slot + legend) appear only
+        # when cwd actually matches a workspace -- so a no-cwd survey renders
+        # exactly as before, single-char `*`-only markers.
+        show_here = any(r.get("here") for r in rows)
         home = os.path.expanduser("~")
 
         def short(d: str | None) -> str:
@@ -73,25 +77,77 @@ class Renderer:
                 return "~" + d[len(home):]
             return d
 
+        def marker(r: dict) -> str:
+            # Two distinct, legended signals: `*` default, `→` current dir.
+            # Both can land on one row (`*→`); the second slot exists only when
+            # some row matches cwd, keeping the common case single-char.
+            m = "*" if r["default"] else " "
+            if show_here:
+                m += "→" if r.get("here") else " "
+            return m
+
         table = [["", "NAME", "STATUS", "IMAGE"] + (["DIRECTORY"] if show_dir else [])]
         for r in rows:
             row = [
-                "*" if r["default"] else " ",
+                marker(r),
                 r["name"],
                 "running" if r["running"] else "stopped",
                 r["image"],
             ]
             if show_dir:
-                d = short(r.get("directory"))
-                if d and r.get("here"):
-                    d += "  <- cwd"
-                row.append(d)
+                row.append(short(r.get("directory")))
             table.append(row)
         last = len(table[0]) - 1
         widths = [max(len(row[i]) for row in table) for i in range(last)]
         for row in table:
             cols = [f"{row[i]:<{widths[i]}}" for i in range(last)] + [row[last]]
             print("  ".join(cols))
+        if show_here:
+            say("markers: * default   → current directory")
+
+    # -- info (centralized config & state) --
+    def info(self, d: dict) -> None:
+        import os
+
+        home = os.path.expanduser("~")
+
+        def short(p: str) -> str:
+            if isinstance(p, str) and (p == home or p.startswith(home + os.sep)):
+                return "~" + p[len(home):]
+            return p
+
+        print("credproxy — global configuration & state")
+        print()
+        if "default_workspace" in d:  # loose surface only
+            print(f"  default workspace   {d['default_workspace'] or '(none)'}")
+        print(f"  workspaces          {d['workspaces']}  (see `credproxy list`)")
+        print()
+
+        p = d["paths"]
+        print("paths")
+        print(f"  config              {short(p['config'])}")
+        print(f"  state               {short(p['state'])}")
+        if not p["profile_present"]:
+            prof = f"{short(p['profile'])}  (absent)"
+        elif d["profile_overrides"]:
+            n = d["profile_overrides"]
+            prof = f"{short(p['profile'])}  active · {n} override{'s' if n != 1 else ''}"
+        else:
+            prof = f"{short(p['profile'])}  (no overrides)"
+        print(f"  profile             {prof}")
+        print(f"  builtin             {short(p['builtin'])}")
+        print(f"  proxy image         {d['proxy_image']}")
+        print()
+
+        print("registries            user · profile · builtin")
+        for kind in ("injectors", "providers", "scripts", "presets"):
+            t = d["registries"][kind]
+            print(f"  {kind:<18}{t['user']}  ·  {t['profile']}  ·  {t['builtin']}")
+        print()
+
+        print("environment")
+        for k, v in d["env"].items():
+            print(f"  {k:<22}{short(v) if v else '(default)'}")
 
     # -- create / use / generic name ack --
     def created(self, name: str, path: str) -> None:
@@ -104,8 +160,12 @@ class Renderer:
     def bound_dir(self, name: str, directory: str) -> None:
         print(f"workspace '{name}' associated with {directory}")
 
-    def current(self, name: str | None) -> None:
-        print(name if name else "(no default workspace; run `credp use NAME`)")
+    def current(self, workspace: str | None, source: str | None,
+                default: str | None) -> None:
+        # stdout stays just the name (clean for `$(credp current)`); the source
+        # and any shadowed default are announced on stderr by the handler.
+        print(workspace if workspace
+              else "(no default workspace; run `credp use NAME`)")
 
     def deleted(self, name: str) -> None:
         print(f"deleted workspace '{name}'")
@@ -361,6 +421,9 @@ class JsonRenderer(Renderer):
     def workspace_list(self, rows: list[dict]) -> None:
         self._emit(rows)
 
+    def info(self, d: dict) -> None:
+        self._emit(d)
+
     def created(self, name: str, path: str) -> None:
         self._emit({"name": name, "config_path": path})
 
@@ -370,8 +433,11 @@ class JsonRenderer(Renderer):
     def bound_dir(self, name: str, directory: str) -> None:
         self._emit({"name": name, "directory": directory})
 
-    def current(self, name: str | None) -> None:
-        self._emit({"default": name})
+    def current(self, workspace: str | None, source: str | None,
+                default: str | None) -> None:
+        # `workspace`/`source` = the effective target a bare loose verb hits
+        # (cwd-or-default); `default` = the `use` pointer. Both, unconflated.
+        self._emit({"workspace": workspace, "source": source, "default": default})
 
     def deleted(self, name: str) -> None:
         self._emit({"deleted": name})

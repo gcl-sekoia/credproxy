@@ -394,7 +394,7 @@ def test_config_reserved_name(xdg):
 
 
 def test_list_marks_default(xdg, workspaces_dir, monkeypatch):
-    """list output marks the default workspace with *."""
+    """Loose list marks the default workspace with *."""
     for name in ("alpha", "bravo"):
         (workspaces_dir / f"{name}.toml").write_text('image = "x"\n')
 
@@ -406,7 +406,7 @@ def test_list_marks_default(xdg, workspaces_dir, monkeypatch):
     import credproxy_cli.core.docker as _docker_mod
     monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
 
-    ec, out, _ = _run(["list"])
+    ec, out, _ = _run_loose(["list"])
     assert ec == 0
     lines = out.splitlines()
     alpha_line = next((l for l in lines if "alpha" in l), None)
@@ -420,6 +420,28 @@ def test_list_marks_default(xdg, workspaces_dir, monkeypatch):
     assert "DIRECTORY" not in out
 
 
+def test_list_strict_is_plain_inventory(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """Strict list consults neither the default pointer nor cwd: no `*`/`→`
+    markers and no legend (the DIRECTORY column is factual config and stays)."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
+    (workspaces_dir / "bravo.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("proj"))
+    import credproxy_cli.core.docker as _docker_mod
+    monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
+    monkeypatch.chdir(proj)
+
+    ec, out, err = _run(["list"])  # strict
+    assert ec == 0, f"stderr: {err}"
+    assert "*" not in out          # no default marker on strict
+    assert "→" not in out and "→" not in err  # no cwd marker/legend on strict
+    assert "markers:" not in err
+    assert "DIRECTORY" in out      # factual config column still shows
+
+
 def test_list_shows_directory_and_cwd_marker(xdg, workspaces_dir, tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -429,11 +451,14 @@ def test_list_shows_directory_and_cwd_marker(xdg, workspaces_dir, tmp_path, monk
     monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
     monkeypatch.chdir(proj)
 
-    ec, out, err = _run(["list"])
+    ec, out, err = _run_loose(["list"])
     assert ec == 0, f"stderr: {err}"
     assert "DIRECTORY" in out
-    cwd_line = next(l for l in out.splitlines() if "<- cwd" in l)
-    assert "proj" in cwd_line
+    # The cwd match is flagged by a `→` marker on its row, and the new marker is
+    # explained by a stderr legend.
+    cwd_line = next(l for l in out.splitlines() if "proj" in l and "→" in l)
+    assert "→" in cwd_line
+    assert "markers:" in err and "current directory" in err
 
 
 def test_list_json_includes_directory_and_here(xdg, workspaces_dir, tmp_path, monkeypatch):
@@ -444,11 +469,144 @@ def test_list_json_includes_directory_and_here(xdg, workspaces_dir, tmp_path, mo
     monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
     monkeypatch.chdir(proj)
 
-    ec, out, err = _run(["--json", "list"])
+    ec, out, err = _run_loose(["--json", "list"])
     assert ec == 0, f"stderr: {err}"
     row = next(r for r in json.loads(out) if r["name"] == "proj")
     assert row["here"] is True
     assert row["directory"]
+
+
+def test_current_is_loose_only(xdg, workspaces_dir):
+    """`current` reports the loose default/cwd resolution -- the strict surface
+    disclaims implicit targeting (like the loose-only writer, `use`)."""
+    (workspaces_dir / "alpha.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("alpha"))
+
+    ec, _, err = _run(["current"])  # strict
+    assert ec != 0
+    assert "loose-only" in err
+
+
+def test_current_loose_cwd_shadows_default(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """In a cwd-matched directory, loose `current` reports the cwd workspace as
+    the effective target on stdout and names the shadowed default on stderr."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
+    (workspaces_dir / "backend.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("backend"))
+    monkeypatch.chdir(proj)
+
+    ec, out, err = _run_loose(["current"])
+    assert ec == 0, f"stderr: {err}"
+    assert out.strip() == "proj"
+    assert "current directory" in err
+    assert "backend" in err  # the shadowed default is surfaced
+
+
+def test_current_loose_no_cwd_is_default(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """With no cwd match, loose `current` falls to the default pointer and says
+    so on stderr."""
+    (workspaces_dir / "backend.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("backend"))
+    monkeypatch.chdir(tmp_path)
+
+    ec, out, err = _run_loose(["current"])
+    assert ec == 0, f"stderr: {err}"
+    assert out.strip() == "backend"
+    assert "default" in err
+
+
+def test_current_json_carries_workspace_source_default(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """`--json current` reports the effective target, its source, and the
+    default pointer, unconflated."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
+    (workspaces_dir / "backend.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("backend"))
+    monkeypatch.chdir(proj)
+
+    ec, out, _ = _run_loose(["--json", "current"])
+    assert ec == 0
+    data = json.loads(out)
+    assert data == {"workspace": "proj", "source": "directory", "default": "backend"}
+
+
+# ---- info (centralized config & state) ---------------------------------------
+
+
+def test_info_shows_paths_and_registries(xdg, workspaces_dir):
+    """`info` dumps the global config/state: resolved roots, proxy image, and a
+    three-tier registry breakdown (builtins always present)."""
+    ec, out, err = _run(["info"])
+    assert ec == 0, f"stderr: {err}"
+    assert "paths" in out and "registries" in out
+    assert "config" in out and "state" in out and "builtin" in out
+    assert "credproxy:dev" in out  # IMAGE_TAG
+    assert "injectors" in out and "providers" in out
+
+
+def test_info_default_workspace_is_loose_only(xdg, workspaces_dir):
+    """The default pointer is a loose concept: strict `info` omits it, loose
+    `info` shows it (consistent with `list`/`current`)."""
+    (workspaces_dir / "backend.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("backend"))
+
+    _, strict_out, _ = _run(["info"])
+    assert "default workspace" not in strict_out
+
+    _, loose_out, _ = _run_loose(["info"])
+    assert "default workspace" in loose_out and "backend" in loose_out
+
+
+def test_info_json_shape(xdg, workspaces_dir):
+    """`--json info` carries the full centralized state; loose adds the default
+    pointer, strict omits it."""
+    ec, out, _ = _run_loose(["--json", "info"])
+    assert ec == 0
+    d = json.loads(out)
+    assert d["proxy_image"] == "credproxy:dev"
+    assert set(d["paths"]) >= {"config", "state", "profile", "builtin", "profile_present"}
+    for kind in ("injectors", "providers", "scripts", "presets"):
+        assert set(d["registries"][kind]) == {"user", "profile", "builtin"}
+    assert "default_workspace" in d           # loose
+    assert "XDG_CONFIG_HOME" in d["env"]
+
+    _, strict_out, _ = _run(["--json", "info"])
+    assert "default_workspace" not in json.loads(strict_out)  # strict omits it
+
+
+def test_info_counts_profile_overrides(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """A profile-overlay injector is counted in the `profile` tier and bumps the
+    profile override count -- the 'is my overlay active?' signal."""
+    profile = tmp_path / "prof"
+    (profile / "injectors").mkdir(parents=True)
+    (profile / "injectors" / "orgtok.toml").write_text(
+        'scheme = "bearer"\nlocation = "header"\n')
+    monkeypatch.setenv("CREDPROXY_PROFILE_DIR", str(profile))
+
+    ec, out, _ = _run_loose(["--json", "info"])
+    assert ec == 0
+    d = json.loads(out)
+    assert d["registries"]["injectors"]["profile"] >= 1
+    assert d["profile_overrides"] >= 1
+    assert d["paths"]["profile_present"] is True
+
+
+def test_info_rejects_extra_args(xdg, workspaces_dir):
+    ec, out, err = _run(["info", "extra"])
+    assert ec != 0 and "no arguments" in (out + err)
 
 
 # ---- --json output shapes ----------------------------------------------------

@@ -60,7 +60,7 @@ _WS_NOUN_VERBS = {"create", "use", "list"}
 # Top-level meta commands: no workspace argument. Every token in the three
 # command sets above and here must be in core's RESERVED_NAMES (a workspace
 # can't take a colliding name) -- guarded by test_reserved_names_cover_all_cli_verbs.
-_META_COMMANDS = {"list", "current"}
+_META_COMMANDS = {"list", "current", "info"}
 
 
 # ---- a parsed invocation ----------------------------------------------------
@@ -219,20 +219,52 @@ def do_use(ctx: Ctx, name: str) -> None:
 
 
 def do_current(ctx: Ctx) -> None:
-    render.OUT.current(pointer.read_default())
+    """Report the workspace a bare verb targets, distinct from the default
+    pointer. Loose-only (the strict surface has no implicit target). Mirrors
+    `_resolve_ws`: cwd match first, then the default -- the source (and any
+    shadowed default) are announced on stderr, so stdout stays just the name
+    for `$(credp current)`."""
+    default = pointer.read_default()
+    try:
+        here = dirmatch.resolve_cwd()
+    except CredproxyError as e:
+        # cwd is contested -> a bare verb errors here; say so, then fall back to
+        # the default pointer for reference.
+        say(str(e))
+        render.OUT.current(default, "default" if default else None, default)
+        return
+    if here is not None:
+        if default == here.name:
+            say("current directory; also default")
+        elif default:
+            say(f"current directory; default is '{default}'")
+        else:
+            say("current directory (no default set)")
+        render.OUT.current(here.name, "directory", default)
+    elif default:
+        say("default")
+        render.OUT.current(default, "default", default)
+    else:
+        render.OUT.current(None, None, default)
 
 
 def do_list(ctx: Ctx, filter_: str | None) -> None:
     from ..core import config as core_config
 
-    default = pointer.read_default()
-    # Which workspace (if any) the current directory resolves to -- informational
-    # marker only. Tolerate ambiguity (don't crash `list` over it).
-    try:
-        here_ws = dirmatch.resolve_cwd()
-        here_name = here_ws.name if here_ws else None
-    except CredproxyError:
-        here_name = None
+    # The default pointer and cwd matching are loose-only implicit-targeting
+    # concepts; the strict surface is a plain inventory that consults neither
+    # (so the `*`/`→` markers never appear there). The DIRECTORY column is
+    # factual config and shows on both.
+    default = pointer.read_default() if ctx.loose else None
+    here_name = None
+    if ctx.loose:
+        # Which workspace (if any) cwd resolves to -- informational marker only.
+        # Tolerate ambiguity (don't crash `list` over it).
+        try:
+            here_ws = dirmatch.resolve_cwd()
+            here_name = here_ws.name if here_ws else None
+        except CredproxyError:
+            here_name = None
     rows = []
     for s in core_workspace.list_workspaces():
         if filter_ and filter_ not in s.name:
@@ -246,6 +278,57 @@ def do_list(ctx: Ctx, filter_: str | None) -> None:
             "here": s.name == here_name,
         })
     render.OUT.workspace_list(rows)
+
+
+def do_info(ctx: Ctx) -> None:
+    """Inspect the *centralized* (non-workspace) config and state: the default
+    pointer, resolved roots (config/state/profile/builtin), the proxy image, the
+    three-tier registry breakdown, and the env overrides in effect. The default
+    workspace is a loose-only concept, so it appears only on the loose surface
+    (consistent with `list`/`current`); everything else is surface-agnostic."""
+    from collections import Counter
+    from ..core import paths, presets as core_presets
+    from ..core.injectors import list_injectors
+    from ..core.providers import list_providers
+    from ..core.scripts import list_scripts
+
+    def tiers(counter: Counter) -> dict:
+        return {t: counter.get(t, 0) for t in ("user", "profile", "builtin")}
+
+    registries = {
+        "injectors": tiers(Counter(i.source for i in list_injectors())),
+        "providers": tiers(Counter(p.source for p in list_providers())),
+        "scripts": tiers(Counter(s.source_origin for s in list_scripts())),
+        "presets": tiers(Counter(core_presets.load_preset_sources().values())),
+    }
+    profile = paths.profile_dir()
+    profile_present = profile.is_dir()
+    # "overrides" = registry definitions resolving from the profile tier, plus a
+    # profile-supplied workspace.template.toml -- what the overlay actually adds.
+    profile_overrides = sum(r["profile"] for r in registries.values()) + (
+        1 if (profile / "workspace.template.toml").is_file() else 0)
+
+    data: dict = {}
+    if ctx.loose:  # the default pointer is a loose-only concept
+        data["default_workspace"] = pointer.read_default()
+    data["workspaces"] = len(core_workspace.list_names())
+    data["paths"] = {
+        "config": str(paths.config_dir()),
+        "state": str(paths.state_dir()),
+        "profile": str(profile),
+        "profile_present": profile_present,
+        "builtin": str(paths.BUILTIN_DIR),
+    }
+    data["proxy_image"] = paths.IMAGE_TAG
+    data["profile_overrides"] = profile_overrides
+    data["registries"] = registries
+    data["env"] = {
+        "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME"),
+        "XDG_STATE_HOME": os.environ.get("XDG_STATE_HOME"),
+        "CREDPROXY_PROFILE_DIR": os.environ.get("CREDPROXY_PROFILE_DIR"),
+        "EDITOR": os.environ.get("VISUAL") or os.environ.get("EDITOR"),
+    }
+    render.OUT.info(data)
 
 
 def do_enter(ctx: Ctx, name: str | None, trailing: list[str],
@@ -1029,7 +1112,7 @@ _STRICT_HELP = (
     "Workspaces:\n"
     "  credproxy workspace create NAME\n"
     "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
-    "  credproxy current                   (print the default workspace)\n"
+    "  credproxy info                      (global config & state: paths, profile, registries)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
     "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve]\n"
@@ -1056,10 +1139,11 @@ _LOOSE_HELP = (
     "\n"
     "Workspaces (omit NAME to resolve by current directory, then the default):\n"
     "  credp use NAME                  set the default workspace\n"
-    "  credp current                   print the default workspace\n"
+    "  credp current                   show the workspace a bare command targets\n"
     "  credp create [NAME] [--here]    (NAME derived from the dir if omitted)\n"
     "  credp bind-dir [NAME] [--dir PATH]  associate a workspace with a directory\n"
     "  credp list [FILTER]\n"
+    "  credp info                      global config & state (paths, profile, registries)\n"
     "  credp enter|edit|start|stop|recreate|delete|apply|inspect|logs [NAME]\n"
     "  credp mount add --volume NAME --target PATH [--ro] [--preserve]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
@@ -1333,8 +1417,8 @@ def _dispatch_workspace(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
         return
     if head == "use":
         # `use` mutates the loose default-workspace pointer, so it's loose-only
-        # (strict names every workspace explicitly). `current` (read-only) stays
-        # on both surfaces.
+        # (strict names every workspace explicitly). Its reader, `current`, is
+        # loose-only too -- both sides of the default concept live on loose.
         if not ctx.loose:
             fail("`workspace use` sets the loose default-workspace pointer; it is "
                  "loose-only -- use the `credp` alias (or `credproxy --loose`). "
@@ -1546,9 +1630,19 @@ def _dispatch_meta(ctx: Ctx, head: str, rest: list[str]) -> None:
             fail("usage: credproxy list [FILTER]")
         do_list(ctx, rest[0] if rest else None)
     elif head == "current":
+        # `current` reports the loose default/cwd-resolved target -- an implicit-
+        # targeting concept the strict surface disclaims (like its writer, `use`).
+        if not ctx.loose:
+            fail("`current` reports the loose default/cwd-resolved workspace; it "
+                 "is loose-only -- use the `credp` alias (or `credproxy --loose`). "
+                 "The strict surface names every workspace explicitly.")
         if rest:
-            fail("usage: credproxy current (takes no arguments)")
+            fail("usage: credp current (takes no arguments)")
         do_current(ctx)
+    elif head == "info":
+        if rest:
+            fail("usage: credproxy info (takes no arguments)")
+        do_info(ctx)
 
 
 def _dispatch_def(ctx: Ctx, kind: str, rest: list[str]) -> None:

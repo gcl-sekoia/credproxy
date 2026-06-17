@@ -91,30 +91,33 @@ def test_parse_secret_single_value_slot_explicit():
 # ---- current -----------------------------------------------------------------
 
 
-def test_current_no_default(xdg, workspaces_dir):
-    ec, out, err = _run(["current"])
+def test_current_no_default(xdg, workspaces_dir, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ec, out, err = _run_loose(["current"])
     assert ec == 0
     assert "no default" in out.lower()
 
 
-def test_current_no_default_json(xdg, workspaces_dir):
-    ec, out, err = _run(["--json", "current"])
+def test_current_no_default_json(xdg, workspaces_dir, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ec, out, err = _run_loose(["--json", "current"])
     assert ec == 0
-    assert json.loads(out) == {"default": None}
+    assert json.loads(out) == {"workspace": None, "source": None, "default": None}
 
 
-def test_current_reports_pointer(xdg, workspaces_dir):
+def test_current_reports_pointer(xdg, workspaces_dir, tmp_path, monkeypatch):
     (workspaces_dir / "proj.toml").write_text('image = "x"\n')
     from credproxy_cli.core.pointer import set_default
     from credproxy_cli.core.workspace import Workspace
     set_default(Workspace("proj"))
+    monkeypatch.chdir(tmp_path)  # no cwd association -> resolves to the default
 
-    ec, out, err = _run(["current"])
+    ec, out, err = _run_loose(["current"])
     assert ec == 0
     assert out.strip() == "proj"
 
-    ec, out, err = _run(["--json", "current"])
-    assert json.loads(out) == {"default": "proj"}
+    ec, out, err = _run_loose(["--json", "current"])
+    assert json.loads(out) == {"workspace": "proj", "source": "default", "default": "proj"}
 
 
 # ---- surface gating + arity --------------------------------------------------
@@ -136,7 +139,7 @@ def test_workspace_use_is_loose_only(xdg, workspaces_dir):
 
 
 def test_current_rejects_extra_args(xdg, workspaces_dir):
-    ec, out, err = _run(["current", "extra"])
+    ec, out, err = _run_loose(["current", "extra"])  # current is loose-only
     assert ec != 0 and "no arguments" in (out + err)
 
 

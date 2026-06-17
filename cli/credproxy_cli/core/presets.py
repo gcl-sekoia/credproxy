@@ -110,6 +110,21 @@ def load_presets() -> dict[str, PresetSpec]:
     return seen
 
 
+def load_preset_sources() -> dict[str, str]:
+    """Map each resolvable preset name to the tier it resolves from
+    ("user"/"profile"/"builtin"), mirroring load_presets' shadowing. Presets
+    don't carry source on the spec (unlike the other registries), so this is the
+    diagnostics seam (e.g. `info`'s per-tier counts)."""
+    src: dict[str, str] = {}
+    for source, base in reversed(layered_dirs("presets")):
+        if not base.is_dir():
+            continue
+        for path in sorted(base.iterdir()):
+            if path.suffix == ".toml" and path.is_file():
+                src[path.stem] = source
+    return src
+
+
 def get_preset(name: str) -> PresetSpec:
     presets = load_presets()
     spec = presets.get(name)
