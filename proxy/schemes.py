@@ -36,7 +36,7 @@ import hmac
 import json
 import math
 from typing import Protocol
-from urllib.parse import unquote
+from urllib.parse import unquote_to_bytes
 
 
 class _Ctx:
@@ -347,18 +347,29 @@ _UNRESERVED = frozenset(
 )
 
 
-def _uri_encode(s: str, *, encode_slash: bool = True) -> str:
-    """AWS URI-encode: unreserved chars verbatim, everything else %XX (upper
-    hex) over the UTF-8 bytes. `/` is preserved when encode_slash is False."""
+def _uri_encode_bytes(data: bytes, *, encode_slash: bool = True) -> str:
+    """AWS URI-encode raw BYTES: unreserved ASCII bytes verbatim, every other
+    byte as %XX (upper hex). `/` is preserved when encode_slash is False.
+
+    Byte-oriented (not str) so percent-encoded query bytes round-trip EXACTLY --
+    AWS canonicalization is over bytes, and decoding `%FF` through a str (UTF-8)
+    would mangle non-UTF-8 octets into U+FFFD and produce a different canonical
+    request -> SignatureDoesNotMatch."""
     out: list[str] = []
-    for ch in s:
+    for b in data:
+        ch = chr(b)
         if ch in _UNRESERVED:
             out.append(ch)
         elif ch == "/" and not encode_slash:
             out.append("/")
         else:
-            out.extend(f"%{b:02X}" for b in ch.encode("utf-8"))
+            out.append(f"%{b:02X}")
     return "".join(out)
+
+
+def _uri_encode(s: str, *, encode_slash: bool = True) -> str:
+    """AWS URI-encode a str (over its UTF-8 bytes). See _uri_encode_bytes."""
+    return _uri_encode_bytes(s.encode("utf-8"), encode_slash=encode_slash)
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -429,15 +440,17 @@ def sigv4_resign(
     canonical_uri = raw_path if service == "s3" \
         else _uri_encode(raw_path, encode_slash=False)
 
-    # Canonical query string: decode then canonically re-encode each pair,
-    # sort by encoded key (then value).
+    # Canonical query string: percent-DECODE to raw bytes, then canonically
+    # re-encode each pair (byte-oriented, so non-UTF-8 octets and `+` vs `%20`
+    # round-trip exactly), sort by encoded key (then value).
     query = path.split("?", 1)[1] if "?" in path else ""
     pairs = []
     for part in query.split("&"):
         if not part:
             continue
         k, _, v = part.partition("=")
-        pairs.append((_uri_encode(unquote(k)), _uri_encode(unquote(v))))
+        pairs.append((_uri_encode_bytes(unquote_to_bytes(k)),
+                      _uri_encode_bytes(unquote_to_bytes(v))))
     pairs.sort()
     canonical_query = "&".join(f"{k}={v}" for k, v in pairs)
 

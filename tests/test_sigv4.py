@@ -67,6 +67,32 @@ def test_uri_encode_double_encodes_for_non_s3():
     assert schemes._uri_encode("/a%20b", encode_slash=False) == "/a%2520b"
 
 
+def test_uri_encode_bytes_roundtrips_raw_octets():
+    """Byte-oriented encoding round-trips a non-UTF-8 octet exactly, instead of
+    mangling it through a lossy UTF-8 decode (the V2#6 bug)."""
+    from urllib.parse import unquote_to_bytes
+    assert schemes._uri_encode_bytes(unquote_to_bytes("a%FFb")) == "a%FFb"
+    # `+` is a literal plus (-> %2B); a space is %20 -- never confused.
+    assert schemes._uri_encode_bytes(unquote_to_bytes("a+b")) == "a%2Bb"
+    assert schemes._uri_encode_bytes(unquote_to_bytes("a%20b")) == "a%20b"
+
+
+def test_query_canonicalization_distinguishes_raw_bytes():
+    """A `%FF` query byte and the UTF-8 of U+FFFD (`%EF%BF%BD`) must canonicalize
+    DIFFERENTLY -> different signatures. The old str-based unquote collapsed both
+    to U+FFFD, so the two queries signed identically."""
+    def _sign(qval):
+        return schemes.sigv4_resign(
+            method="GET", path=f"/?x={qval}", host="h.example.com",
+            header_get=lambda n: {"host": "h.example.com",
+                                  "x-amz-date": AMZ_DATE}.get(n.lower()),
+            body=b"",
+            scope={"date": "20150830", "region": "us-east-1", "service": "s3",
+                   "signed_headers": ["host", "x-amz-date"]},
+            amz_date=AMZ_DATE, access_key_id=AKID, secret_access_key=SECRET)
+    assert _sign("%FF") != _sign("%EF%BF%BD")
+
+
 # ---- the scheme via the addon (re-sign in place) ----
 
 def _state(hosts):
