@@ -94,7 +94,13 @@ def _parse_mount(m, where: str) -> dict:
     if len(kinds) != 1:
         raise ConfigError(f"{where} must have exactly one of bind/volume/profile")
     kind = kinds[0]
-    extra = set(m) - {kind, "target", "readonly"}
+    # `user_owned` is a managed-volume-only flag (chown the volume to the
+    # workspace user); it is meaningless on a host bind (the user's own dir,
+    # never chowned) or a read-only profile mount, so it isn't accepted there.
+    allowed = {kind, "target", "readonly"}
+    if kind == "volume":
+        allowed.add("user_owned")
+    extra = set(m) - allowed
     if extra:
         raise ConfigError(f"{where} unknown key(s): {', '.join(sorted(extra))}")
     target = m.get("target")
@@ -114,8 +120,16 @@ def _parse_mount(m, where: str) -> dict:
         if not _VOLUME_NAME_RE.match(val):
             raise ConfigError(f"{where} volume name {val!r} is invalid "
                               f"(letters/digits/_.-, starting alnum)")
-        return {"kind": "volume", "name": val, "target": target,
-                "readonly": bool(ro)}
+        uo = m.get("user_owned")
+        if uo is not None and not isinstance(uo, bool):
+            raise ConfigError(f"{where} user_owned must be a boolean")
+        out = {"kind": "volume", "name": val, "target": target,
+               "readonly": bool(ro)}
+        # Omit when false so the common (unset) case leaves the normalized mount
+        # dict -- and thus the spec hash -- byte-identical to before the flag.
+        if uo:
+            out["user_owned"] = True
+        return out
     return {"kind": "profile", "source": _profile_source(val, where),
             "target": target, "readonly": True if ro is None else bool(ro)}
 
@@ -222,6 +236,15 @@ def load_config(ws: Workspace) -> dict:
     user = raw.get("user")
     if user is not None and (not isinstance(user, str) or not user):
         raise ConfigError(f"{ws.config_path}: `user` must be a non-empty string")
+
+    # `user_owned` volumes are chowned to `user`, so they need a non-root one --
+    # otherwise the flag is a silent no-op (root already owns everything).
+    if any(m["kind"] == "volume" and m.get("user_owned") for m in mounts) and (
+            not user or user.split(":", 1)[0] in ("root", "0")):
+        raise ConfigError(
+            f"{ws.config_path}: a `user_owned` volume requires a non-root `user` "
+            f"(the volume is chowned to it)"
+        )
 
     # exec_flags: escape hatch -- extra flags spliced into `docker exec` for
     # `enter` (e.g. ["--workdir", "/srv"], ["--env", "FOO=bar"]). credproxy keeps
@@ -403,22 +426,28 @@ def _toml_basic_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _render_volume_mount_inline(name: str, target: str, readonly: bool) -> str:
+def _render_volume_mount_inline(name: str, target: str, readonly: bool,
+                                user_owned: bool = False) -> str:
     """An inline-table mount entry, e.g. `{ volume = "cache", target = "/c" }`."""
     parts = [f"volume = {_toml_basic_str(name)}",
              f"target = {_toml_basic_str(target)}"]
     if readonly:
         parts.append("readonly = true")
+    if user_owned:
+        parts.append("user_owned = true")
     return "{ " + ", ".join(parts) + " }"
 
 
-def _render_volume_mount_block(name: str, target: str, readonly: bool) -> str:
+def _render_volume_mount_block(name: str, target: str, readonly: bool,
+                               user_owned: bool = False) -> str:
     """A `[[mounts]]` array-of-tables block for a managed volume."""
     lines = ["[[mounts]]",
              f"volume = {_toml_basic_str(name)}",
              f"target = {_toml_basic_str(target)}"]
     if readonly:
         lines.append("readonly = true")
+    if user_owned:
+        lines.append("user_owned = true")
     return "\n".join(lines) + "\n"
 
 
@@ -469,7 +498,7 @@ def _inline_mounts_array_span(text: str) -> tuple[int, int] | None:
 
 
 def add_volume_mount(text: str, name: str, target: str,
-                     readonly: bool = False) -> str:
+                     readonly: bool = False, user_owned: bool = False) -> str:
     """Add a managed-volume mount to a workspace TOML, preserving comments.
 
     If an uncommented inline `mounts = [ ... ]` array exists, the entry is
@@ -479,13 +508,13 @@ def add_volume_mount(text: str, name: str, target: str,
     inline array (TOML forbids a key and a table-array of the same name)."""
     span = _inline_mounts_array_span(text)
     if span is None:
-        block = _render_volume_mount_block(name, target, readonly)
+        block = _render_volume_mount_block(name, target, readonly, user_owned)
         if text and not text.endswith("\n"):
             text += "\n"
         sep = "\n" if text and not text.endswith("\n\n") else ""
         return text + sep + block
     open_idx, close_idx = span
-    entry = _render_volume_mount_inline(name, target, readonly)
+    entry = _render_volume_mount_inline(name, target, readonly, user_owned)
     inner = text[open_idx + 1:close_idx]
     # Strip comments to decide whether the array already has entries (a trailing
     # comma is then needed before the existing content).
@@ -501,17 +530,24 @@ def add_volume_mount(text: str, name: str, target: str,
 
 
 def write_added_mount(ws: Workspace, name: str, target: str,
-                      readonly: bool) -> None:
+                      readonly: bool, user_owned: bool = False) -> None:
     """Persist a new managed-volume mount into <name>.toml (atomic, surgical).
 
     A volume named `home` is the `home = "..."` sugar (a top-level key), not a
     `mounts` entry -- writing it as a mount would collide with the sugar's
-    duplicate-volume check at load time."""
+    duplicate-volume check at load time. The sugar carries no flags, so a
+    `home` volume can't be `user_owned` via this path -- use an explicit
+    `[[mounts]]` table with `volume = "home"` for that."""
     text = ws.config_path.read_text()
     if name == "home":
+        if user_owned:
+            raise ConfigError(
+                "the `home = \"...\"` sugar can't carry user_owned; declare home "
+                "as a `[[mounts]]` table (volume = \"home\") to make it user-owned"
+            )
         new = set_top_level_key(text, "home", target)
     else:
-        new = add_volume_mount(text, name, target, readonly)
+        new = add_volume_mount(text, name, target, readonly, user_owned)
     atomic_write_text(ws.config_path, new)
 
 

@@ -836,7 +836,8 @@ def do_mount_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     lifecycle.add_managed_volume(
         ws, name=a.mount_volume, target=a.mount_target,
-        readonly=a.mount_ro, preserve=a.mount_preserve, notify=say,
+        readonly=a.mount_ro, preserve=a.mount_preserve,
+        user_owned=a.mount_user_owned, notify=say,
     )
     render.OUT.mount_added(ws.name, a.mount_volume, a.mount_target,
                            a.mount_ro, applied=a.mount_preserve)
@@ -1026,6 +1027,9 @@ def _mount_subparsers(parent: argparse._SubParsersAction) -> None:
     # the recreate that applies the mount (otherwise the volume starts empty /
     # image-seeded). Requires an existing container to copy from.
     p.add_argument("--preserve", dest="mount_preserve", action="store_true")
+    # Chown the volume to the workspace `user` after setup, so a non-root user
+    # can write a volume mounted at an image-absent path (otherwise root-owned).
+    p.add_argument("--user-owned", dest="mount_user_owned", action="store_true")
 
 
 class _LeafParser(argparse.ArgumentParser):
@@ -1115,7 +1119,7 @@ _STRICT_HELP = (
     "  credproxy info                      (global config & state: paths, profile, registries)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
-    "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve]\n"
+    "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credproxy workspace NAME binding add|remove|list|test ...\n"
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
@@ -1145,7 +1149,7 @@ _LOOSE_HELP = (
     "  credp list [FILTER]\n"
     "  credp info                      global config & state (paths, profile, registries)\n"
     "  credp enter|edit|start|stop|recreate|delete|apply|inspect|logs [NAME]\n"
-    "  credp mount add --volume NAME --target PATH [--ro] [--preserve]\n"
+    "  credp mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
     "  credp binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
@@ -1216,6 +1220,10 @@ _MOUNT_ADD_HELP = (
     "                  empty/image-seeded and the change is deferred to `start`.\n"
     "                  On a running workspace with live `enter` sessions it asks\n"
     "                  first (loose) / needs --yes (strict), since they're killed.\n"
+    "  --user-owned    chown the volume to the workspace `user` (after setup) so a\n"
+    "                  non-root user can write it -- needed when it mounts at a path\n"
+    "                  the image doesn't populate (else root-owned). Requires a\n"
+    "                  non-root `user`; not valid for the `home` sugar.\n"
 )
 
 _CREATE_HELP = (

@@ -293,6 +293,32 @@ def chown_mount_parents(ws: Workspace, cfg: dict, notify: Notify) -> None:
                    "chown", f"{_mapped_uid(cfg)}:{os.getgid()}", *parents])
 
 
+def chown_user_owned_volumes(ws: Workspace, cfg: dict, notify: Notify) -> None:
+    """Chown each `user_owned` managed volume to the workspace `user`, so a
+    non-root user can write a volume mounted at a path the image doesn't
+    populate (Docker creates such a volume root-owned -- there is no image
+    content to seed ownership from).
+
+    Opt-in per volume, never blanket: a `chown -R` would clobber a volume that
+    WAS image-seeded with intentional ownership, so only volumes that declared
+    `user_owned = true` are touched. Runs AFTER `run_setup`, unlike
+    chown_mount_parents -- the `user` may be provisioned by setup, so it must
+    exist before we chown to it BY NAME (chown resolves the name in the
+    container's /etc/passwd, sidestepping host/userns uid arithmetic). Owner
+    only (group left as-is) so it works under coreutils and busybox alike, and
+    independent of `map_host_user` -- the gap exists on plain Docker too."""
+    user = cfg.get("user")
+    if not user or user.split(":", 1)[0] in ("root", "0"):
+        return
+    targets = [m["target"] for m in cfg["mounts"]
+               if m["kind"] == "volume" and m.get("user_owned")]
+    if not targets:
+        return
+    notify(f"making '{user}' own {len(targets)} user-owned volume(s)...")
+    docker.docker(["exec", "-u", "0", ws.ws_container,
+                   "chown", "-R", user, *targets])
+
+
 def create_ws_container(
     ws: Workspace, cfg: dict, spec_hash: str, proxy_id: str | None = None
 ) -> None:
@@ -600,6 +626,9 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
         # fabricated parents live in the home volume, so idempotent thereafter).
         chown_mount_parents(ws, cfg, notify)
         run_setup(ws, cfg, notify)
+        # After setup: the `user` may have been provisioned by it, and must
+        # exist before we chown user-owned volumes to it by name.
+        chown_user_owned_volumes(ws, cfg, notify)
         _write_setup_marker(ws, container_id)
 
 
@@ -701,6 +730,7 @@ def recreate_workspace(ws: Workspace, notify: Notify = _noop,
 
 def add_managed_volume(ws: Workspace, *, name: str, target: str,
                        readonly: bool, preserve: bool,
+                       user_owned: bool = False,
                        notify: Notify = _noop) -> None:
     """Add a managed-volume mount to the workspace config, optionally seeding it
     with the live container's data at `target` before the recreate that applies
@@ -739,6 +769,13 @@ def add_managed_volume(ws: Workspace, *, name: str, target: str,
         raise ConfigError(
             f"volume name {name!r} is invalid (letters/digits/_.-, starting alnum)"
         )
+    if user_owned:
+        u = cfg.get("user")
+        if not u or u.split(":", 1)[0] in ("root", "0"):
+            raise ConfigError(
+                f"workspace '{ws.name}' has no non-root `user`; --user-owned "
+                f"would chown the volume to nobody (set a `user` first)"
+            )
     for m in cfg["mounts"]:
         if (m["target"].rstrip("/") or "/") == norm:
             raise ConfigError(
@@ -786,7 +823,7 @@ def add_managed_volume(ws: Workspace, *, name: str, target: str,
                 raise
 
         # Apply the config edit (surgical, comment-preserving).
-        core_config.write_added_mount(ws, name, target, readonly)
+        core_config.write_added_mount(ws, name, target, readonly, user_owned)
 
         if preserve:
             # Recreate so the populated volume is mounted. start_workspace skips

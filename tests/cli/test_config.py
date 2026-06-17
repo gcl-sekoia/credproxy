@@ -93,7 +93,117 @@ def test_load_config_mount_readonly(xdg, tmp_path, workspaces_dir):
     assert cfg["mounts"][0]["readonly"] is True
 
 
+def test_volume_user_owned_parses(xdg, workspaces_dir):
+    """`user_owned = true` on a managed volume parses into the mount dict."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "uo", textwrap.dedent('''
+        image = "x"
+        user = "dev"
+        [[mounts]]
+        volume = "cache"
+        target = "/home/dev/.cache"
+        user_owned = true
+    '''))
+    cfg = load_config(Workspace("uo"))
+    vol = next(m for m in cfg["mounts"] if m.get("name") == "cache")
+    assert vol["user_owned"] is True
+
+
+def test_volume_without_user_owned_omits_key(xdg, workspaces_dir):
+    """A plain volume carries no `user_owned` key, so the normalized mount dict
+    (and thus the spec hash) is byte-identical to before the flag existed."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "plain", 'image = "x"\nhome = "/home/dev"\n')
+    vol = load_config(Workspace("plain"))["mounts"][0]
+    assert "user_owned" not in vol
+
+
+def test_user_owned_changes_spec_hash(xdg, workspaces_dir):
+    """Toggling user_owned alters the spec hash -> the change forces a recreate
+    (which re-runs the chown step)."""
+    from credproxy_cli.core.config import load_config, workspace_spec_hash
+    from credproxy_cli.core.workspace import Workspace
+
+    base_toml = ('image = "x"\nuser = "dev"\n'
+                 '[[mounts]]\nvolume = "c"\ntarget = "/home/dev/c"\n')
+    _write(workspaces_dir, "w", base_toml)
+    before = workspace_spec_hash(load_config(Workspace("w")), None)
+    _write(workspaces_dir, "w", base_toml + "user_owned = true\n")
+    after = workspace_spec_hash(load_config(Workspace("w")), None)
+    assert before != after
+
+
+def test_add_volume_mount_renders_user_owned(xdg):
+    """The surgical writer emits `user_owned = true` in both block and inline forms."""
+    from credproxy_cli.core.config import add_volume_mount
+
+    block = add_volume_mount('image = "x"\n', "cache", "/c", user_owned=True)
+    assert "user_owned = true" in block
+    inline = add_volume_mount('mounts = []\n', "cache", "/c", user_owned=True)
+    assert "user_owned = true" in inline
+
+
 # ---- validation errors -------------------------------------------------------
+
+
+def test_user_owned_rejected_on_bind(xdg, workspaces_dir):
+    """`user_owned` is volume-only; on a bind it's an unknown key."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "bad", textwrap.dedent('''
+        image = "x"
+        user = "dev"
+        [[mounts]]
+        bind = "/h"
+        target = "/c"
+        user_owned = true
+    '''))
+    with pytest.raises(ConfigError, match="unknown key"):
+        load_config(Workspace("bad"))
+
+
+def test_user_owned_requires_non_root_user(xdg, workspaces_dir):
+    """A user_owned volume with no (or root) `user` is rejected -- the flag would
+    chown to nobody."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "noU", textwrap.dedent('''
+        image = "x"
+        [[mounts]]
+        volume = "c"
+        target = "/c"
+        user_owned = true
+    '''))
+    with pytest.raises(ConfigError, match="non-root `user`"):
+        load_config(Workspace("noU"))
+
+
+def test_user_owned_must_be_boolean(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "t", textwrap.dedent('''
+        image = "x"
+        user = "dev"
+        [[mounts]]
+        volume = "c"
+        target = "/c"
+        user_owned = "yes"
+    '''))
+    with pytest.raises(ConfigError, match="user_owned must be a boolean"):
+        load_config(Workspace("t"))
+
+
+# ---- (more) validation errors ------------------------------------------------
 
 
 def test_load_config_missing_file(xdg, workspaces_dir):

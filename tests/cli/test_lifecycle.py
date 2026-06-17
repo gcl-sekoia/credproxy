@@ -334,6 +334,59 @@ def test_chown_mount_parents_falls_back_to_host_uid(xdg, ws_factory, monkeypatch
     assert calls[-1][4:6] == ["chown", f"{os.getuid()}:{os.getgid()}"]
 
 
+def _uo_cfg(user="vscode", map_host_user=True, user_owned=True):
+    """A cfg with one managed volume that opts into user_owned (or not)."""
+    vol = {"kind": "volume", "name": "cache",
+           "target": "/home/vscode/.cache", "readonly": False}
+    if user_owned:
+        vol["user_owned"] = True
+    cfg = {"image": "x", "mounts": [vol], "env": {}, "setup": [],
+           "map_host_user": map_host_user}
+    if user is not None:
+        cfg["user"] = user
+    return cfg
+
+
+def test_chown_user_owned_volumes_chowns_by_name(xdg, ws_factory, monkeypatch):
+    """A user_owned volume is chowned -R to the `user` BY NAME (so a setup-
+    provisioned user resolves), owner only."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a"); ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    lifecycle.chown_user_owned_volumes(ws, _uo_cfg(user="dev"), lambda *_: None)
+    args = calls[-1]
+    assert args[:4] == ["exec", "-u", "0", ws.ws_container]
+    assert args[4:7] == ["chown", "-R", "dev"]
+    assert args[-1] == "/home/vscode/.cache"
+
+
+def test_chown_user_owned_volumes_independent_of_map_host_user(xdg, ws_factory, monkeypatch):
+    """Unlike chown_mount_parents, this runs even without map_host_user -- the
+    root-owned-volume gap exists on plain Docker too."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a"); ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    lifecycle.chown_user_owned_volumes(ws, _uo_cfg(map_host_user=False), lambda *_: None)
+    assert calls and calls[-1][4:7] == ["chown", "-R", "vscode"]
+
+
+def test_chown_user_owned_volumes_noop_without_flag(xdg, ws_factory, monkeypatch):
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a"); ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    lifecycle.chown_user_owned_volumes(ws, _uo_cfg(user_owned=False), lambda *_: None)
+    assert calls == []
+
+
+def test_chown_user_owned_volumes_noop_root_or_no_user(xdg, ws_factory, monkeypatch):
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a"); ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    lifecycle.chown_user_owned_volumes(ws, _uo_cfg(user=None), lambda *_: None)
+    lifecycle.chown_user_owned_volumes(ws, _uo_cfg(user="root"), lambda *_: None)
+    assert calls == []
+
+
 def test_chown_mount_parents_noop_without_mapping(xdg, ws_factory, monkeypatch):
     from credproxy_cli.core import lifecycle
     ws = ws_factory("a"); ws.ensure_state_dir()

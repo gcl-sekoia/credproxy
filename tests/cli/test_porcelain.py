@@ -1061,6 +1061,37 @@ def test_mount_add_plain_edits_toml(xdg, workspaces_dir):
     assert "start" in err            # deferred-apply hint on stderr
 
 
+def test_mount_add_user_owned_writes_flag(xdg, workspaces_dir):
+    """`mount add --user-owned` persists `user_owned = true` (workspace has a
+    non-root user)."""
+    import tomllib
+    _mkws(workspaces_dir, body='image = "x"\nuser = "dev"\n')
+    ec, out, err = _run(["workspace", "ws", "mount", "add",
+                         "--volume", "cache", "--target", "/home/dev/.cache",
+                         "--user-owned"])
+    assert ec == 0, err
+    raw = tomllib.loads((workspaces_dir / "ws.toml").read_text())
+    vol = next(m for m in raw["mounts"] if m["volume"] == "cache")
+    assert vol["user_owned"] is True
+
+
+def test_mount_add_user_owned_needs_non_root_user(xdg, workspaces_dir):
+    """--user-owned on a root workspace (no `user`) is rejected up front."""
+    _mkws(workspaces_dir)  # image only, no user
+    ec, out, err = _run(["workspace", "ws", "mount", "add",
+                         "--volume", "cache", "--target", "/c", "--user-owned"])
+    assert ec != 0 and "non-root `user`" in err
+
+
+def test_mount_add_home_user_owned_rejected(xdg, workspaces_dir):
+    """The `home` sugar can't carry flags -> --user-owned on it is rejected with
+    a hint to use an explicit [[mounts]] table."""
+    _mkws(workspaces_dir, body='image = "x"\nuser = "dev"\n')
+    ec, out, err = _run(["workspace", "ws", "mount", "add",
+                         "--volume", "home", "--target", "/home/dev", "--user-owned"])
+    assert ec != 0 and "can't carry user_owned" in err
+
+
 def test_mount_add_requires_volume_and_target(xdg, workspaces_dir):
     _mkws(workspaces_dir)
     ec, out, err = _run(["workspace", "ws", "mount", "add", "--target", "/c"])
