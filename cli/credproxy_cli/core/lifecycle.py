@@ -699,6 +699,102 @@ def recreate_workspace(ws: Workspace, notify: Notify = _noop,
         start_workspace(ws, notify=notify)
 
 
+def add_managed_volume(ws: Workspace, *, name: str, target: str,
+                       readonly: bool, preserve: bool,
+                       notify: Notify = _noop) -> None:
+    """Add a managed-volume mount to the workspace config, optionally seeding it
+    with the live container's data at `target` before the recreate that applies
+    it.
+
+    Without `preserve`: a pure config edit -- the new volume is image-seeded on
+    the next `start`, like any added volume, and the change is deferred (the
+    caller hints `start`). With `preserve`: capture the current container's data
+    at `target` into the new volume, then recreate so the volume mounts
+    populated. A mount can't be attached to a running container, so applying ANY
+    new mount requires recreating it; `preserve` just carries the data across
+    that unavoidable recreate (Docker skips its own image-seed because the
+    pre-seeded volume is non-empty).
+
+    Validation mirrors load_config (absolute target, valid volume name, no
+    duplicate target/name), so a bad request fails before anything is touched.
+    A volume named `home` is the `home = "..."` sugar, handled by write_added_mount."""
+    from . import config as core_config
+
+    cfg = load_config(ws)
+
+    # ---- validate up front (touch nothing until this passes) ----
+    if not target.startswith("/"):
+        raise ConfigError(f"mount target must be absolute: {target!r}")
+    norm = target.rstrip("/") or "/"
+    if name == "home":
+        if readonly:
+            raise ConfigError("the home volume can't be read-only")
+        existing_home = cfg.get("home")
+        if existing_home and (existing_home.rstrip("/") or "/") != norm:
+            raise ConfigError(
+                f"workspace '{ws.name}' already sets home = {existing_home!r}; "
+                f"edit it directly to change the home path"
+            )
+    elif not core_config._VOLUME_NAME_RE.match(name):
+        raise ConfigError(
+            f"volume name {name!r} is invalid (letters/digits/_.-, starting alnum)"
+        )
+    for m in cfg["mounts"]:
+        if (m["target"].rstrip("/") or "/") == norm:
+            raise ConfigError(
+                f"workspace '{ws.name}' already mounts {m['target']!r}"
+            )
+        if m["kind"] == "volume" and m["name"] == name:
+            raise ConfigError(
+                f"workspace '{ws.name}' already has a volume named {name!r}"
+            )
+
+    volume = ws.volume(name)
+
+    with ws.lock():
+        if preserve:
+            status = docker.container_status(ws.ws_container)
+            if status is None:
+                raise WorkspaceError(
+                    f"workspace '{ws.name}' has no container to preserve data "
+                    f"from; add the mount without --preserve"
+                )
+            # Pre-create the labelled volume (idempotent; same labels as
+            # _ensure_managed_volumes) so the capture has a target.
+            docker.docker_quiet([
+                "volume", "create",
+                "--label", f"{_VOLUME_OWNER_LABEL}={ws.name}",
+                "--label", f"credproxy.volume={name}",
+                volume,
+            ])
+            # Quiesce the WORKSPACE container only (not stop_workspace, which
+            # would also stop the proxy) for a consistent snapshot.
+            if status == "running":
+                notify(f"stopping workspace container to snapshot {target}...")
+                docker.docker_quiet(["stop", "-t", "1", ws.ws_container])
+            notify(f"capturing {target} into volume '{name}'...")
+            try:
+                docker.seed_volume_from_container(
+                    ws.ws_container, target, volume, IMAGE_TAG,
+                    userns_flags=_host_user_run_flags(cfg),
+                )
+            except DockerError:
+                # Roll back: drop the half-seeded volume, leave the TOML
+                # untouched, and bring the container back up.
+                docker.docker_quiet(["volume", "rm", volume])
+                docker.docker_quiet(["start", ws.ws_container])
+                raise
+
+        # Apply the config edit (surgical, comment-preserving).
+        core_config.write_added_mount(ws, name, target, readonly)
+
+        if preserve:
+            # Recreate so the populated volume is mounted. start_workspace skips
+            # Docker's image-seed because the volume is non-empty.
+            notify("recreating workspace container with the new volume...")
+            recreate_workspace(ws, notify=notify)
+
+
 def delete_workspace(ws: Workspace, keep_volumes: bool = False) -> None:
     """Remove both containers, the workspace's managed volumes (unless
     `keep_volumes`), the config file, and the state dir. Best-effort on the

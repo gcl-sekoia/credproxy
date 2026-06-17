@@ -232,6 +232,18 @@ class Renderer:
     def binding_removed(self, name: str, ws: str) -> None:
         print(f"removed binding '{name}' from workspace '{ws}'")
 
+    # -- mount add --
+    def mount_added(self, ws: str, name: str, target: str, readonly: bool,
+                    applied: bool = False) -> None:
+        ro = " (read-only)" if readonly else ""
+        print(f"added volume '{name}' -> {target}{ro} to workspace '{ws}'")
+        if applied:
+            print("  preserved the previous container's data; "
+                  "recreated and running")
+        else:
+            say(f"run `credproxy workspace {ws} start` to apply "
+                f"(recreates the container; the volume starts empty)")
+
     # -- binding list --
     def binding_list(self, ws: str, rows: list[dict]) -> None:
         from ..core.bindings import secret_display
@@ -407,6 +419,13 @@ class JsonRenderer(Renderer):
 
     def binding_removed(self, name: str, ws: str) -> None:
         self._emit({"workspace": ws, "removed": name})
+
+    def mount_added(self, ws: str, name: str, target: str, readonly: bool,
+                    applied: bool = False) -> None:
+        self._emit({"workspace": ws,
+                    "mount": {"volume": name, "target": target,
+                              "readonly": readonly},
+                    "applied": applied})
 
     def binding_list(self, ws: str, rows: list[dict]) -> None:
         self._emit({"workspace": ws, "bindings": rows})

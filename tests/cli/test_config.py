@@ -847,3 +847,98 @@ def test_both_orphans_named_in_error(xdg, workspaces_dir):
     _write(workspaces_dir, "b", 'image = "alpine:3"\nmap_host_user = true\nuser_uid = 1000\n')
     with pytest.raises(ConfigError, match="`map_host_user` and `user_uid` require `user`"):
         load_config(Workspace("b"))
+
+
+# ---- add_volume_mount / write_added_mount (surgical TOML edits) --------------
+
+
+def _added(text, name, target, readonly=False):
+    """Apply add_volume_mount and return (new_text, parsed_mounts)."""
+    import tomllib
+    from credproxy_cli.core.config import add_volume_mount
+    new = add_volume_mount(text, name, target, readonly)
+    return new, tomllib.loads(new).get("mounts")
+
+
+def test_add_volume_mount_absent_appends_block(xdg):
+    """No `mounts` key -> a [[mounts]] block is appended (comments preserved)."""
+    text = 'image = "x"\n# keep me\nhome = "/h"\n'
+    new, mounts = _added(text, "cache", "/c")
+    assert "# keep me" in new
+    assert "[[mounts]]" in new
+    assert mounts == [{"volume": "cache", "target": "/c"}]
+
+
+def test_add_volume_mount_inline_nonempty_prepends(xdg):
+    text = 'image = "x"\nmounts = ["~/code:/code"]\n'
+    new, mounts = _added(text, "cache", "/c", readonly=True)
+    assert mounts == [{"volume": "cache", "target": "/c", "readonly": True},
+                      "~/code:/code"]
+
+
+def test_add_volume_mount_inline_empty(xdg):
+    new, mounts = _added('image = "x"\nmounts = []\n', "cache", "/c")
+    assert mounts == [{"volume": "cache", "target": "/c"}]
+
+
+def test_add_volume_mount_multiline_with_comment(xdg):
+    text = 'image = "x"\nmounts = [\n  "~/code:/code",  # bind\n]\n'
+    new, mounts = _added(text, "cache", "/c")
+    assert "# bind" in new                       # comment preserved
+    assert {"volume": "cache", "target": "/c"} in mounts
+    assert "~/code:/code" in mounts
+
+
+def test_add_volume_mount_ignores_commented_mounts(xdg):
+    """A commented-out `mounts = [...]` (the template) is not edited; a block is
+    appended instead, and the commented lines survive verbatim."""
+    text = 'image = "x"\n# mounts = [\n#   "a:/b",\n# ]\n'
+    new, mounts = _added(text, "cache", "/c")
+    assert "# mounts = [" in new
+    assert "[[mounts]]" in new
+    assert mounts == [{"volume": "cache", "target": "/c"}]
+
+
+def test_add_volume_mount_twice_yields_two_blocks(xdg):
+    """Repeated adds on a block-style file append more [[mounts]] blocks (valid
+    TOML array-of-tables), never an inline/array mix."""
+    import tomllib
+    from credproxy_cli.core.config import add_volume_mount
+    text = add_volume_mount('image = "x"\n', "cache", "/c")
+    text = add_volume_mount(text, "data", "/d")
+    mounts = tomllib.loads(text).get("mounts")
+    assert mounts == [{"volume": "cache", "target": "/c"},
+                      {"volume": "data", "target": "/d"}]
+
+
+def test_add_volume_mount_escapes_quotes(xdg):
+    import tomllib
+    from credproxy_cli.core.config import add_volume_mount
+    new = add_volume_mount('image = "x"\n', "cache", '/weird"path')
+    assert tomllib.loads(new)["mounts"] == [{"volume": "cache",
+                                             "target": '/weird"path'}]
+
+
+def test_write_added_mount_home_uses_sugar(xdg, workspaces_dir):
+    """A volume named `home` is written as the `home = ...` top-level sugar, not
+    a mounts entry (which would collide with the sugar at load time)."""
+    import tomllib
+    from credproxy_cli.core.config import write_added_mount
+    from credproxy_cli.core.workspace import Workspace
+    _write(workspaces_dir, "w", 'image = "x"\n')
+    ws = Workspace("w")
+    write_added_mount(ws, "home", "/home/vscode", False)
+    raw = tomllib.loads(ws.config_path.read_text())
+    assert raw["home"] == "/home/vscode"
+    assert "mounts" not in raw
+
+
+def test_write_added_mount_roundtrips_through_load_config(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config, write_added_mount
+    from credproxy_cli.core.workspace import Workspace
+    _write(workspaces_dir, "w", 'image = "x"\n')
+    ws = Workspace("w")
+    write_added_mount(ws, "cache", "/c", True)
+    cfg = load_config(ws)
+    assert {"kind": "volume", "name": "cache", "target": "/c",
+            "readonly": True} in cfg["mounts"]

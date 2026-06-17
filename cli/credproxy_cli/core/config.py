@@ -398,6 +398,123 @@ def associate_directory(ws: Workspace, directory: str) -> None:
     atomic_write_text(ws.config_path, new)
 
 
+def _toml_basic_str(s: str) -> str:
+    """A TOML basic (double-quoted) string literal for `s`."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _render_volume_mount_inline(name: str, target: str, readonly: bool) -> str:
+    """An inline-table mount entry, e.g. `{ volume = "cache", target = "/c" }`."""
+    parts = [f"volume = {_toml_basic_str(name)}",
+             f"target = {_toml_basic_str(target)}"]
+    if readonly:
+        parts.append("readonly = true")
+    return "{ " + ", ".join(parts) + " }"
+
+
+def _render_volume_mount_block(name: str, target: str, readonly: bool) -> str:
+    """A `[[mounts]]` array-of-tables block for a managed volume."""
+    lines = ["[[mounts]]",
+             f"volume = {_toml_basic_str(name)}",
+             f"target = {_toml_basic_str(target)}"]
+    if readonly:
+        lines.append("readonly = true")
+    return "\n".join(lines) + "\n"
+
+
+def _inline_mounts_array_span(text: str) -> tuple[int, int] | None:
+    """If the doc has an uncommented top-level `mounts = [ ... ]` inline array,
+    return `(open_bracket_index, close_bracket_index)`; else None.
+
+    The bracket scan skips string contents and `#` comments and balances nested
+    `[]`, so a path containing a bracket or a multi-line array doesn't fool it.
+    Returns None when `mounts` is absent, commented, declared as `[[mounts]]`
+    blocks (a header, not a `mounts =` assignment), or not an inline array -- all
+    cases where the caller appends a `[[mounts]]` block instead."""
+    m = re.search(r"(?m)^[ \t]*mounts[ \t]*=[ \t]*", text)
+    if not m:
+        return None
+    open_idx = m.end()
+    if open_idx >= len(text) or text[open_idx] != "[":
+        return None
+    depth = 0
+    in_str = False
+    str_ch = ""
+    j = open_idx
+    while j < len(text):
+        c = text[j]
+        if in_str:
+            if str_ch == '"' and c == "\\":
+                j += 2
+                continue
+            if c == str_ch:
+                in_str = False
+        elif c in "\"'":
+            in_str = True
+            str_ch = c
+        elif c == "#":
+            nl = text.find("\n", j)
+            if nl == -1:
+                break
+            j = nl
+            continue
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                return (open_idx, j)
+        j += 1
+    return None  # unbalanced -> let the caller append a block instead
+
+
+def add_volume_mount(text: str, name: str, target: str,
+                     readonly: bool = False) -> str:
+    """Add a managed-volume mount to a workspace TOML, preserving comments.
+
+    If an uncommented inline `mounts = [ ... ]` array exists, the entry is
+    prepended inside it (prepending avoids trailing-comma/last-entry guesswork).
+    Otherwise a `[[mounts]]` block is appended -- which also composes with
+    existing `[[mounts]]` blocks (TOML merges them), but is never mixed with an
+    inline array (TOML forbids a key and a table-array of the same name)."""
+    span = _inline_mounts_array_span(text)
+    if span is None:
+        block = _render_volume_mount_block(name, target, readonly)
+        if text and not text.endswith("\n"):
+            text += "\n"
+        sep = "\n" if text and not text.endswith("\n\n") else ""
+        return text + sep + block
+    open_idx, close_idx = span
+    entry = _render_volume_mount_inline(name, target, readonly)
+    inner = text[open_idx + 1:close_idx]
+    # Strip comments to decide whether the array already has entries (a trailing
+    # comma is then needed before the existing content).
+    has_entries = bool(re.sub(r"(?m)#.*$", "", inner).strip())
+    if has_entries:
+        # Space after the comma only when the next entry follows on the same line
+        # (an inline array); a multi-line array already has its own newline.
+        sep = "" if inner[:1] in ("\n", " ", "\t", "\r") else " "
+        insertion = f" {entry},{sep}"
+    else:
+        insertion = f" {entry}"
+    return text[:open_idx + 1] + insertion + inner + text[close_idx:]
+
+
+def write_added_mount(ws: Workspace, name: str, target: str,
+                      readonly: bool) -> None:
+    """Persist a new managed-volume mount into <name>.toml (atomic, surgical).
+
+    A volume named `home` is the `home = "..."` sugar (a top-level key), not a
+    `mounts` entry -- writing it as a mount would collide with the sugar's
+    duplicate-volume check at load time."""
+    text = ws.config_path.read_text()
+    if name == "home":
+        new = set_top_level_key(text, "home", target)
+    else:
+        new = add_volume_mount(text, name, target, readonly)
+    atomic_write_text(ws.config_path, new)
+
+
 def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
     """Identity of the workspace container's launch spec. Changing the
     image, mounts (incl. the home volume), env, setup, run_flags, map_host_user,

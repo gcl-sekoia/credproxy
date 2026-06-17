@@ -85,6 +85,58 @@ def logs_tail(name: str, n: int = 20) -> str:
     return r.stdout + r.stderr
 
 
+def seed_volume_from_container(
+    container: str, src_path: str, volume: str, helper_image: str,
+    userns_flags: list[str] | None = None,
+) -> None:
+    """Stream the CONTENTS of `container:src_path` into the named `volume`, via
+    `docker cp ... - | docker run -i ... tar -x`, preserving ownership.
+
+    `docker cp` reads the container's merged filesystem (image + writable layer),
+    so this captures data that was never on a volume -- the whole point of
+    "preserve". `src_path/.` copies the directory's contents (not the directory
+    itself), so they land at the volume root, which mounts AT `src_path` in the
+    recreated container.
+
+    The extract helper runs with the SAME userns mapping as the workspace
+    container (`userns_flags`, from lifecycle._host_user_run_flags) so file
+    ownership round-trips identically on rootless podman, and as `--user 0`
+    (namespace-root) so it can restore ownership across the whole mapped uid
+    range. On rootful Docker / a root workspace `userns_flags` is empty and it
+    runs as real root -- uids are 1:1 either way.
+
+    Both pipe stages' exit codes are checked, so a partial/failed capture raises
+    rather than silently leaving a half-seeded volume."""
+    userns_flags = userns_flags or []
+    cp = subprocess.Popen(
+        ["docker", "cp", "-a", f"{container}:{src_path}/.", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    extract = subprocess.Popen(
+        ["docker", "run", "--rm", "-i", *userns_flags, "--user", "0",
+         "-v", f"{volume}:/dst", helper_image, "tar", "-xpf", "-", "-C", "/dst"],
+        stdin=cp.stdout, stderr=subprocess.PIPE,
+    )
+    # Close our copy of the read end so `cp` gets SIGPIPE if the helper dies.
+    assert cp.stdout is not None
+    cp.stdout.close()
+    _, extract_err = extract.communicate()
+    cp.wait()
+    cp_err = cp.stderr.read() if cp.stderr else b""
+    if cp.stderr:
+        cp.stderr.close()
+    if cp.returncode != 0:
+        raise DockerError(
+            f"capturing {container}:{src_path} failed: "
+            f"{cp_err.decode(errors='replace').strip()}"
+        )
+    if extract.returncode != 0:
+        raise DockerError(
+            f"seeding volume {volume} failed: "
+            f"{extract_err.decode(errors='replace').strip()}"
+        )
+
+
 def resolve_host_port(container_name: str, container_port: int) -> int:
     """Return the host port Docker mapped to *container_port* for *container_name*.
 

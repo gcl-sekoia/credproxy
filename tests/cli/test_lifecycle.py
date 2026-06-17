@@ -1293,3 +1293,101 @@ def test_workspace_volumes_label_isolates_name_prefix_siblings(xdg, workspaces_d
     finally:
         docker.docker_quiet(["volume", "rm", foo.volume("home")])
         docker.docker_quiet(["volume", "rm", foobar.volume("home")])
+
+
+# ---- add_managed_volume ------------------------------------------------------
+
+
+def test_add_managed_volume_plain_edits_toml_only(xdg, workspaces_dir, monkeypatch):
+    """No --preserve: a pure config edit, no docker calls, no recreate."""
+    import tomllib
+    from credproxy_cli.core import lifecycle
+    ws = _write_ws(workspaces_dir, "w")
+    # Any docker call would be a bug on this path.
+    monkeypatch.setattr(lifecycle.docker, "container_status",
+                        lambda c: (_ for _ in ()).throw(AssertionError("no docker")))
+    monkeypatch.setattr(lifecycle, "recreate_workspace",
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("no recreate")))
+    lifecycle.add_managed_volume(ws, name="cache", target="/c",
+                                 readonly=False, preserve=False)
+    raw = tomllib.loads(ws.config_path.read_text())
+    assert {"volume": "cache", "target": "/c"} in raw["mounts"]
+
+
+def test_add_managed_volume_preserve_ordering(xdg, workspaces_dir, monkeypatch):
+    """--preserve: create volume -> stop ws container -> seed -> edit TOML ->
+    recreate, in that order."""
+    import tomllib
+    from credproxy_cli.core import lifecycle
+    ws = _write_ws(workspaces_dir, "w")
+    events = []
+    monkeypatch.setattr(lifecycle.docker, "container_status", lambda c: "running")
+    monkeypatch.setattr(lifecycle.docker, "docker_quiet",
+                        lambda args: events.append(("quiet", tuple(args))))
+
+    def _seed(container, src, vol, image, userns_flags=None):
+        # TOML must NOT be edited yet, and the volume must exist already.
+        assert "mounts" not in tomllib.loads(ws.config_path.read_text())
+        events.append(("seed", container, src, vol, tuple(userns_flags or [])))
+    monkeypatch.setattr(lifecycle.docker, "seed_volume_from_container", _seed)
+    monkeypatch.setattr(lifecycle, "recreate_workspace",
+                        lambda *a, **kw: events.append(("recreate",)))
+
+    lifecycle.add_managed_volume(ws, name="cache", target="/c",
+                                 readonly=False, preserve=True)
+
+    kinds = [e[0] for e in events]
+    assert kinds == ["quiet", "quiet", "seed", "recreate"]
+    assert events[0][1][:2] == ("volume", "create")        # create the volume
+    assert events[1][1][:2] == ("stop", "-t")              # quiesce ws container
+    assert events[2][2] == "/c" and events[2][3] == ws.volume("cache")
+    # TOML edited before the recreate.
+    raw = tomllib.loads(ws.config_path.read_text())
+    assert {"volume": "cache", "target": "/c"} in raw["mounts"]
+
+
+def test_add_managed_volume_preserve_rollback_on_capture_failure(
+        xdg, workspaces_dir, monkeypatch):
+    """A capture failure rolls back: drop the volume, restart the container,
+    leave the TOML untouched, and propagate the error."""
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.errors import DockerError
+    ws = _write_ws(workspaces_dir, "w")
+    quiet = []
+    monkeypatch.setattr(lifecycle.docker, "container_status", lambda c: "running")
+    monkeypatch.setattr(lifecycle.docker, "docker_quiet",
+                        lambda args: quiet.append(tuple(args)))
+    monkeypatch.setattr(lifecycle.docker, "seed_volume_from_container",
+                        lambda *a, **kw: (_ for _ in ()).throw(DockerError("boom")))
+    monkeypatch.setattr(lifecycle, "recreate_workspace",
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("no recreate")))
+
+    with pytest.raises(DockerError, match="boom"):
+        lifecycle.add_managed_volume(ws, name="cache", target="/c",
+                                     readonly=False, preserve=True)
+
+    # Volume removed and container restarted during rollback.
+    assert ("volume", "rm", ws.volume("cache")) in quiet
+    assert ("start", ws.ws_container) in quiet
+    # TOML never touched.
+    assert "mounts" not in ws.config_path.read_text()
+
+
+def test_add_managed_volume_preserve_requires_container(xdg, workspaces_dir, monkeypatch):
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.errors import WorkspaceError
+    ws = _write_ws(workspaces_dir, "w")
+    monkeypatch.setattr(lifecycle.docker, "container_status", lambda c: None)
+    with pytest.raises(WorkspaceError, match="no container to preserve"):
+        lifecycle.add_managed_volume(ws, name="cache", target="/c",
+                                     readonly=False, preserve=True)
+
+
+def test_add_managed_volume_home_uses_sugar(xdg, workspaces_dir):
+    import tomllib
+    from credproxy_cli.core import lifecycle
+    ws = _write_ws(workspaces_dir, "w")
+    lifecycle.add_managed_volume(ws, name="home", target="/home/vscode",
+                                 readonly=False, preserve=False)
+    raw = tomllib.loads(ws.config_path.read_text())
+    assert raw["home"] == "/home/vscode" and "mounts" not in raw

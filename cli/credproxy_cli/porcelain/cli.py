@@ -53,7 +53,7 @@ from .render import fail, say
 # Workspace-scoped verbs (the `workspace NAME <verb>` tail).
 _WS_VERBS = {
     "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
-    "config", "logs", "binding", "bind-dir",
+    "config", "logs", "binding", "bind-dir", "mount",
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
@@ -121,6 +121,30 @@ def _confirm_destructive(ctx: Ctx, ws: Workspace, implicit: bool, verb: str) -> 
           end="", file=sys.stderr, flush=True)
     reply = sys.stdin.readline()
     if reply.strip().lower() not in ("y", "yes"):
+        fail("aborted")
+
+
+def _confirm_running_recreate(ctx: Ctx, ws: Workspace, sessions: int) -> None:
+    """Gate `mount add --preserve` when it would stop+recreate a RUNNING
+    workspace that has live `enter` session(s) -- those sessions are killed by
+    the recreate. Unlike _confirm_destructive, the trigger is runtime state (live
+    sessions), not resolution mode, so it fires even for an explicit NAME.
+
+    `--yes` bypasses. STRICT refuses (scriptable, never prompts -- a script must
+    opt in with --yes). LOOSE prompts; fails closed without a TTY."""
+    if ctx.assume_yes:
+        return
+    plural = "s" if sessions != 1 else ""
+    msg = (f"workspace '{ws.name}' is running with {sessions} active "
+           f"session{plural}; --preserve stops and recreates it "
+           f"(those sessions are terminated)")
+    if not ctx.loose:
+        fail(f"{msg}. Re-run with --yes to proceed.")
+    if not sys.stdin.isatty():
+        fail(f"{msg}, and stdin is not a TTY. Re-run with --yes.")
+    # Prompt to STDERR (input() would corrupt a --json stdout). EOF -> abort.
+    print(f"{msg}. Continue? [y/N] ", end="", file=sys.stderr, flush=True)
+    if sys.stdin.readline().strip().lower() not in ("y", "yes"):
         fail("aborted")
 
 
@@ -701,6 +725,40 @@ def _do_binding_test_adhoc(ctx: Ctx, name: str | None, a: argparse.Namespace) ->
         sys.exit(1)
 
 
+# ---- mount commands ----------------------------------------------------------
+
+
+def do_mount_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    """Add a managed-volume mount to a workspace. `--preserve` first captures the
+    live container's data at --target into the new volume, then recreates so the
+    volume mounts populated (otherwise the change is deferred to the next
+    `start`, with the volume image-seeded as usual)."""
+    if not a.mount_volume:
+        fail("`mount add` needs --volume NAME")
+    if not a.mount_target:
+        fail("`mount add` needs --target PATH")
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+
+    # Gate only the disruptive path: --preserve restarts the container, killing
+    # any live `enter` sessions. A plain add is a deferred config edit, like
+    # editing the file, so it isn't gated (mirrors un-gated plain `recreate`).
+    if a.mount_preserve:
+        status = core_docker.container_status(ws.ws_container)
+        sessions = (lifecycle._count_live_sessions(ws)
+                    if status == "running" else 0)
+        if sessions:
+            _confirm_running_recreate(ctx, ws, sessions)
+
+    lifecycle.add_managed_volume(
+        ws, name=a.mount_volume, target=a.mount_target,
+        readonly=a.mount_ro, preserve=a.mount_preserve, notify=say,
+    )
+    render.OUT.mount_added(ws.name, a.mount_volume, a.mount_target,
+                           a.mount_ro, applied=a.mount_preserve)
+
+
 # ---- injector / provider -----------------------------------------------------
 
 
@@ -876,6 +934,17 @@ def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     p.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
 
 
+def _mount_subparsers(parent: argparse._SubParsersAction) -> None:
+    p = parent.add_parser("add")
+    p.add_argument("--volume", dest="mount_volume", default=None, metavar="NAME")
+    p.add_argument("--target", dest="mount_target", default=None, metavar="PATH")
+    p.add_argument("--ro", dest="mount_ro", action="store_true")
+    # Seed the new volume with the current container's data at --target before
+    # the recreate that applies the mount (otherwise the volume starts empty /
+    # image-seeded). Requires an existing container to copy from.
+    p.add_argument("--preserve", dest="mount_preserve", action="store_true")
+
+
 class _LeafParser(argparse.ArgumentParser):
     """ArgumentParser whose `error` routes through the porcelain renderer, so a
     bad/unknown/missing arg serializes as a JSON error object under --json (and a
@@ -935,6 +1004,10 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     bsub = binding.add_subparsers(dest="bindingcmd", required=True)
     _binding_subparsers(bsub)
 
+    mount = sub.add_parser("mount")
+    msub = mount.add_subparsers(dest="mountcmd", required=True)
+    _mount_subparsers(msub)
+
     return parser
 
 
@@ -959,6 +1032,7 @@ _STRICT_HELP = (
     "  credproxy current                   (print the default workspace)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
+    "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve]\n"
     "  credproxy workspace NAME binding add|remove|list|test ...\n"
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
@@ -987,6 +1061,7 @@ _LOOSE_HELP = (
     "  credp bind-dir [NAME] [--dir PATH]  associate a workspace with a directory\n"
     "  credp list [FILTER]\n"
     "  credp enter|edit|start|stop|recreate|delete|apply|inspect|logs [NAME]\n"
+    "  credp mount add --volume NAME --target PATH [--ro] [--preserve]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
     "  credp binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
@@ -1040,6 +1115,23 @@ _BINDING_TEST_HELP = (
     "  --provider P --secret REF [--injector I]\n"
     "                                ad-hoc: test a definition before it is\n"
     "                                bound (no workspace needed).\n"
+)
+
+_MOUNT_ADD_HELP = (
+    "credproxy workspace NAME mount add -- add a managed-volume mount to the\n"
+    "workspace (a named, persistent, per-workspace Docker volume).\n"
+    "\n"
+    "  --volume NAME   the volume's name (letters/digits/_.-). `home` writes the\n"
+    "                  `home = ...` sugar instead of a mounts entry.\n"
+    "  --target PATH   absolute path the volume mounts at inside the workspace.\n"
+    "  --ro            mount read-only.\n"
+    "  --preserve      seed the new volume with the CURRENT container's data at\n"
+    "                  --target before applying. A mount can't attach to a live\n"
+    "                  container, so this stops + recreates the workspace (which\n"
+    "                  carries the data across); without it the volume starts\n"
+    "                  empty/image-seeded and the change is deferred to `start`.\n"
+    "                  On a running workspace with live `enter` sessions it asks\n"
+    "                  first (loose) / needs --yes (strict), since they're killed.\n"
 )
 
 _CREATE_HELP = (
@@ -1181,6 +1273,12 @@ def _verb_help(verb_argv: list[str]) -> str:
             return _BINDING_TEST_HELP
         return ("credproxy workspace NAME binding {add|remove|list|test} ...\n"
                 "Run `binding add --help` or `binding test --help` for details.")
+    if verb == "mount":
+        sub = verb_argv[1] if len(verb_argv) > 1 and not verb_argv[1].startswith("-") else ""
+        if sub == "add":
+            return _MOUNT_ADD_HELP
+        return ("credproxy workspace NAME mount add ...\n"
+                "Run `mount add --help` for details.")
     if verb in _VERB_HELP:
         return _VERB_HELP[verb]
     return f"usage: credproxy workspace NAME {verb}"
@@ -1305,6 +1403,9 @@ def _run_ws_verb(
             do_binding_list(ctx, name)
         elif bc == "test":
             do_binding_test(ctx, name, a)
+    elif verb == "mount":
+        if a.mountcmd == "add":
+            do_mount_add(ctx, name, a)
 
 
 def _parse_create(argv: list[str]) -> argparse.Namespace:
@@ -1337,7 +1438,7 @@ def _create_dir(a: argparse.Namespace) -> str | None:
 
 _ALIAS_TO_WS_VERB = {
     "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
-    "config", "logs", "binding", "bind-dir",
+    "config", "logs", "binding", "bind-dir", "mount",
 }
 
 
@@ -1365,6 +1466,14 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
         # NAME is never given on the alias (the alias assumes the default);
         # an explicit workspace uses the canonical `workspace NAME binding`.
         _run_ws_verb(ctx, None, ["binding", *rest], trailing)
+        return
+
+    if head == "mount":
+        # Like `binding`: the sub-noun's subcommand (`add`) would otherwise be
+        # eaten as a NAME by the generic alias path below. The alias always acts
+        # on the resolved default workspace; explicit names use the canonical
+        # `workspace NAME mount` form.
+        _run_ws_verb(ctx, None, ["mount", *rest], trailing)
         return
 
     if head in _ALIAS_TO_WS_VERB:

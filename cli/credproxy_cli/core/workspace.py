@@ -50,8 +50,8 @@ RESERVED_NAMES = frozenset({
     # workspace-level verbs (used both name-before-verb and as bare verbs)
     "create", "use", "list", "enter", "edit", "start", "stop", "recreate",
     "delete", "apply", "inspect", "config", "logs", "bind-dir",
-    # sub-noun
-    "binding",
+    # sub-nouns
+    "binding", "mount",
     # top-level meta commands (no workspace argument)
     "current",
 })

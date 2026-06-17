@@ -107,7 +107,7 @@ hosts    = ["sts.amazonaws.com"]
 |---|---|---|---|
 | `image` | string | **required** | The workspace container image — your own image; never modified or privileged. `credproxy create` scaffolds this to a devcontainers base that ships a non-root sudo user (`vscode`, uid 1000) plus curl + ca-certificates (so the bootstrap and a non-root shell work with no setup), along with the matching `user`/`home`/`map_host_user`. To run a different image, edit `image` here (and `user`/`home` to match — the scaffold comments explain). There is no built-in default: `image` is mandatory, and omitting it is an error. |
 | `home` | string | _(none)_ | Sugar for a managed volume named `home` mounted at this (absolute) path — the persistent, image-seeded home. **Optional**: omit it for an ephemeral home (the image's, lost on recreate). The volume survives stop/start and recreate; wiped by `recreate --reset-volume home` or `delete`. Also the default `workdir`. |
-| `mounts` | list | `[]` | Things mounted into the workspace. A **string** is a host **bind** (`"SRC:DST[:ro]"`; `~` expanded on `SRC`, which must be an existing absolute path; `DST` absolute). A **table** is a typed mount with exactly one of: `{ bind = "SRC", target = "/dst", readonly = false }` (host bind), `{ volume = "NAME", target = "/dst" }` (a managed named volume — persistent, image-seeded, ownership-clean; namespaced per workspace; great for caches), or `{ profile = "REL", target = "/dst" }` (a path **relative to the profile overlay dir**, confined within it, read-only by default — for static files shipped with a fork; see [forking.md](forking.md)). No two mounts may share a `target`; no two volumes a name (`home` is reserved for the home sugar). |
+| `mounts` | list | `[]` | Things mounted into the workspace. A **string** is a host **bind** (`"SRC:DST[:ro]"`; `~` expanded on `SRC`, which must be an existing absolute path; `DST` absolute). A **table** is a typed mount with exactly one of: `{ bind = "SRC", target = "/dst", readonly = false }` (host bind), `{ volume = "NAME", target = "/dst" }` (a managed named volume — persistent, image-seeded, ownership-clean; namespaced per workspace; great for caches), or `{ profile = "REL", target = "/dst" }` (a path **relative to the profile overlay dir**, confined within it, read-only by default — for static files shipped with a fork; see [forking.md](forking.md)). No two mounts may share a `target`; no two volumes a name (`home` is reserved for the home sugar). Managed volumes can also be added with `credproxy workspace NAME mount add --volume VOL --target PATH [--ro] [--preserve]` (a surgical TOML edit; `--volume home` writes the home sugar) — see *Adding a volume, keeping existing data* below. |
 | `env` | table (string → string) | `{}` | Passed to the container as `-e KEY=VALUE`. Both keys and values must be strings. |
 | `setup` | list of strings | `[]` | Shell commands run **once**, right after the container is (re)created, via `sh -lc`. A failing command stops `start` and leaves the container in place for debugging. Re-run only happens when the container is recreated (see drift below), not on every `start`. |
 | `run_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the workspace `docker run`. credproxy's structural flags (`--name`, labels, `--network`, the home volume) are applied **after** these and win on conflict, so `run_flags` can't detach the netns or rename the container; additive flags (`--userns`, an extra `--mount`/`-v`, `--security-opt`) take effect. The main use is runtime-specific uid mapping (see *Non-root user & mount ownership* below). |
@@ -119,6 +119,27 @@ Changing `image`, `home`, `mounts`, `env`, `setup`, `run_flags`, or
 `map_host_user` is **container-spec drift**: it requires recreating the
 workspace container, which happens on the next `start` (the home volume is
 preserved). Editing bindings does **not** require a recreate — see below.
+
+#### Adding a volume, keeping existing data
+
+If you've been using a workspace and realize a directory that lives only in the
+container's writable layer (commonly an ephemeral `home`) should have been a
+persistent volume, `mount add --preserve` converts it without losing the data:
+
+```
+credproxy workspace myproj mount add --volume home --target /home/vscode --preserve
+```
+
+This captures the current container's data at `--target` into the new volume,
+then recreates the container with the volume mounted **populated** (a non-empty
+volume suppresses Docker's image-seed). A mount can't be attached to a running
+container, so applying any new mount recreates it regardless — `--preserve` just
+carries the data across that recreate. File ownership is preserved across the
+copy on both Docker and rootless podman (the copy helper inherits the
+workspace's userns mapping). Without `--preserve` the volume starts empty
+(image-seeded) and the change is deferred to the next `start`, like editing the
+file. On a **running** workspace with live `enter` sessions — which the recreate
+terminates — the command asks first (loose) or needs `--yes` (strict).
 
 ### Exec settings
 

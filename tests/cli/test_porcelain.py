@@ -880,3 +880,152 @@ def test_recreate_plain_implicit_not_gated(xdg, workspaces_dir, monkeypatch):
     ec, out, err = _run_loose(["recreate"])
     assert ec == 0, err
     assert calls == [(False, [])]
+
+
+# ---- mount add ---------------------------------------------------------------
+
+
+def _mkws(workspaces_dir, name="ws", body='image = "x"\n'):
+    (workspaces_dir / f"{name}.toml").write_text(body)
+
+
+def test_mount_add_plain_edits_toml(xdg, workspaces_dir):
+    """A plain `mount add` (no --preserve) is a deferred config edit -- it writes
+    the volume into the TOML and hints `start`; no container ops."""
+    import tomllib
+    _mkws(workspaces_dir)
+    ec, out, err = _run(["workspace", "ws", "mount", "add",
+                         "--volume", "cache", "--target", "/c"])
+    assert ec == 0, err
+    raw = tomllib.loads((workspaces_dir / "ws.toml").read_text())
+    assert {"volume": "cache", "target": "/c"} in raw["mounts"]
+    assert "added volume 'cache'" in out
+    assert "start" in err            # deferred-apply hint on stderr
+
+
+def test_mount_add_requires_volume_and_target(xdg, workspaces_dir):
+    _mkws(workspaces_dir)
+    ec, out, err = _run(["workspace", "ws", "mount", "add", "--target", "/c"])
+    assert ec != 0 and "--volume" in err
+    ec, out, err = _run(["workspace", "ws", "mount", "add", "--volume", "cache"])
+    assert ec != 0 and "--target" in err
+
+
+def test_mount_add_duplicate_target_rejected(xdg, workspaces_dir):
+    _mkws(workspaces_dir, body='image = "x"\nmounts = [{ volume = "a", target = "/c" }]\n')
+    ec, out, err = _run(["workspace", "ws", "mount", "add",
+                         "--volume", "cache", "--target", "/c"])
+    assert ec != 0 and "already mounts" in err
+
+
+def test_mount_add_duplicate_name_rejected(xdg, workspaces_dir):
+    _mkws(workspaces_dir, body='image = "x"\nmounts = [{ volume = "cache", target = "/x" }]\n')
+    ec, out, err = _run(["workspace", "ws", "mount", "add",
+                         "--volume", "cache", "--target", "/c"])
+    assert ec != 0 and "already has a volume named" in err
+
+
+def test_mount_add_home_writes_sugar(xdg, workspaces_dir):
+    import tomllib
+    _mkws(workspaces_dir)
+    ec, out, err = _run(["workspace", "ws", "mount", "add",
+                         "--volume", "home", "--target", "/home/vscode"])
+    assert ec == 0, err
+    raw = tomllib.loads((workspaces_dir / "ws.toml").read_text())
+    assert raw["home"] == "/home/vscode"
+    assert "mounts" not in raw
+
+
+def test_mount_add_json_shape(xdg, workspaces_dir):
+    _mkws(workspaces_dir)
+    ec, out, err = _run(["--json", "workspace", "ws", "mount", "add",
+                         "--volume", "cache", "--target", "/c"])
+    assert ec == 0, err
+    obj = json.loads(out)
+    assert obj["workspace"] == "ws"
+    assert obj["mount"] == {"volume": "cache", "target": "/c", "readonly": False}
+    assert obj["applied"] is False
+
+
+def _stub_preserve_docker(monkeypatch, *, running=True, sessions=1):
+    """Stub the runtime probes do_mount_add consults for the --preserve gate, and
+    no-op the actual add so no real docker runs."""
+    from credproxy_cli.core import docker as _d
+    from credproxy_cli.core import lifecycle as _l
+    monkeypatch.setattr(_d, "container_status",
+                        lambda c: "running" if running else None)
+    monkeypatch.setattr(_l, "_count_live_sessions", lambda ws, **kw: sessions)
+    called = {}
+    def _add(ws, **kw):
+        called.update(kw)
+    monkeypatch.setattr(_l, "add_managed_volume", _add)
+    return called
+
+
+def test_mount_add_preserve_strict_running_sessions_refuses(xdg, workspaces_dir, monkeypatch):
+    """Strict surface: --preserve on a running workspace with live sessions
+    refuses without --yes (never prompts)."""
+    _mkws(workspaces_dir)
+    _stub_preserve_docker(monkeypatch, running=True, sessions=2)
+    ec, out, err = _run(["workspace", "ws", "mount", "add", "--volume", "cache",
+                         "--target", "/c", "--preserve"])
+    assert ec != 0
+    assert "--yes" in err and "2 active session" in err
+
+
+def test_mount_add_preserve_yes_bypasses(xdg, workspaces_dir, monkeypatch):
+    _mkws(workspaces_dir)
+    called = _stub_preserve_docker(monkeypatch, running=True, sessions=3)
+    ec, out, err = _run(["workspace", "ws", "mount", "add", "--volume", "cache",
+                         "--target", "/c", "--preserve", "--yes"])
+    assert ec == 0, err
+    assert called.get("preserve") is True
+
+
+def test_mount_add_preserve_loose_no_tty_fails_closed(xdg, workspaces_dir, monkeypatch):
+    _mkws(workspaces_dir)
+    _stub_preserve_docker(monkeypatch, running=True, sessions=1)
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("ws"))
+    ec, out, err = _run_loose(["mount", "add", "--volume", "cache",
+                               "--target", "/c", "--preserve"])
+    assert ec != 0
+    assert "not a TTY" in err or "--yes" in err
+
+
+def test_mount_add_preserve_loose_prompt_accepts(xdg, workspaces_dir, monkeypatch):
+    _mkws(workspaces_dir)
+    called = _stub_preserve_docker(monkeypatch, running=True, sessions=1)
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("ws"))
+    ec, out, err = _run_loose(["mount", "add", "--volume", "cache", "--target",
+                               "/c", "--preserve"],
+                              stdin_text="y\n", stdin_isatty=True)
+    assert ec == 0, err
+    assert called.get("preserve") is True
+
+
+def test_mount_add_preserve_no_sessions_not_gated(xdg, workspaces_dir, monkeypatch):
+    """Running but idle (no sessions) is not gated -- behaves like plain recreate."""
+    _mkws(workspaces_dir)
+    called = _stub_preserve_docker(monkeypatch, running=True, sessions=0)
+    ec, out, err = _run(["workspace", "ws", "mount", "add", "--volume", "cache",
+                         "--target", "/c", "--preserve"])
+    assert ec == 0, err
+    assert called.get("preserve") is True
+
+
+def test_mount_add_alias_resolves_default(xdg, workspaces_dir):
+    """`credp mount add` (alias) acts on the resolved default workspace; the
+    subcommand `add` is not mistaken for a workspace name."""
+    import tomllib
+    _mkws(workspaces_dir)
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("ws"))
+    ec, out, err = _run_loose(["mount", "add", "--volume", "cache", "--target", "/c"])
+    assert ec == 0, err
+    raw = tomllib.loads((workspaces_dir / "ws.toml").read_text())
+    assert {"volume": "cache", "target": "/c"} in raw["mounts"]
