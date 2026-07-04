@@ -142,14 +142,18 @@ def _parse_preset_rule(entry, i: int, src: str) -> _PresetRule:
     `core.rules._parse_rule_entry` the load path and `rule add` use -- so a bad
     preset rule fails at preset load with the same errors (and inherits the
     CLI<->proxy validator mirror + #36's `[rule.params]` validation)."""
-    where = f"{src} rule[{i}]"
+    # `where` is the location fragment; `src` is passed separately as the message
+    # source (both to _parse_rule_entry and our own raises), so it must NOT be
+    # baked into `where` too -- else _parse_rule_entry's `f"{source}: {where}..."`
+    # would print the preset path twice.
+    where = f"rule[{i}]"
     if not isinstance(entry, dict):
-        raise ConfigError(f"{where}: must be a table")
+        raise ConfigError(f"{src}: {where} must be a table")
     suffix = entry.get("suffix")
     if not isinstance(suffix, str) or not suffix:
-        raise ConfigError(f"{where}: 'suffix' must be a non-empty string")
+        raise ConfigError(f"{src}: {where} 'suffix' must be a non-empty string")
     if "name" in entry:
-        raise ConfigError(f"{where}: a preset rule uses 'suffix' (-> "
+        raise ConfigError(f"{src}: {where} a preset rule uses 'suffix' (-> "
                           f"name '<preset>-<suffix>'), not a literal 'name'")
     fields = {k: v for k, v in entry.items() if k != "suffix"}
     try:

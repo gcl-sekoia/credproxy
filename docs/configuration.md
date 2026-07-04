@@ -373,7 +373,7 @@ It's **expansion, not a link**: `preset add` writes ordinary `[[binding]]` /
 remove them individually afterward; the proxy never sees a "preset". The add is
 atomic (a name collision fails the whole thing before any write) and announces
 any host it **newly TLS-intercepts** (a preset rule on a bindings-free host flips
-it — see [`rules.md`](rules.md#interception-is-a-union)). `credproxy preset list`
+it — see [`rules.md`](rules.md#interception-is-a-union--a-rule-can-flip-a-host-to-intercepted)). `credproxy preset list`
 shows every pack's full expansion (bindings and rules) before you apply. Presets
 are data in the layered registry, so an org ships its own by dropping a TOML in
 its profile overlay — see [`forking.md`](forking.md).

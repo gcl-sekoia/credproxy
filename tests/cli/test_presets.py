@@ -154,13 +154,17 @@ def test_preset_rule_literal_name_rejected(xdg):
 
 def test_preset_rule_field_error_surfaces_with_preset_path(xdg):
     """A bad preset rule fails at preset LOAD via the shared _parse_rule_entry,
-    with the preset path in the message (not a deferred crash at apply)."""
+    with the preset path in the message ONCE (not doubled -- review #38), not a
+    deferred crash at apply."""
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.presets import load_presets
     _write_raw_preset("bad", '[[rule]]\nsuffix="g"\nhosts=["h.example"]\n'
                              'action="nope"\n')
-    with pytest.raises(ConfigError, match="preset 'bad'.*action must be one of"):
+    with pytest.raises(ConfigError, match="action must be one of") as ei:
         load_presets()
+    msg = str(ei.value)
+    assert "preset 'bad'" in msg and "rule[0]" in msg
+    assert msg.count("preset 'bad'") == 1        # not doubled
 
 
 def test_describe_presets_includes_rules(xdg):
