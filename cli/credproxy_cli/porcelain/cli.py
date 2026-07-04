@@ -344,22 +344,33 @@ def do_enter(ctx: Ctx, name: str | None, trailing: list[str],
     sys.exit(exit_code)
 
 
-def do_exec(ctx: Ctx, name: str | None, trailing: list[str],
-            login: bool = False, push: bool = False) -> None:
+def do_exec(ctx: Ctx, name: str | None, trailing: list[str], *,
+            login: bool = False, raw: bool = False, push: bool = False,
+            user: str | None = None) -> None:
     """One-shot: run `-- CMD...` in the workspace and propagate its exit code.
-    The non-interactive sibling of `enter` -- no session pidfile / auto-stop, so
-    it's safe to fire many times from a script."""
+    The non-interactive sibling of `enter` -- never initiates an auto-stop, so
+    it's safe to fire many times from a script.
+
+    Environment: default sources the CA-trust env (like `enter -- CMD`); `--raw`
+    is a direct execve (no shell, for minimal images); `--login` a bash login
+    shell. `--user` overrides the config user for this call."""
     if not trailing:
         fail("`exec` needs a command: `credproxy workspace NAME exec -- CMD...` "
              "(for an interactive shell use `enter`)")
+    if login and raw:
+        fail("`--login` and `--raw` are mutually exclusive (they select different "
+             "command environments)")
+    # `exec` is a transparent pipe: the command's own stdout is arbitrary bytes,
+    # not credproxy's to structure, so --json has nothing to wrap. Reject it
+    # rather than emit non-JSON on a --json invocation (which a jq pipeline would
+    # choke on); the exit code is already the process's exit code.
+    if ctx.json:
+        fail("`exec` streams the command's output verbatim; `--json` does not "
+             "apply (the exit code is the command's exit code)")
+    mode = "login" if login else "raw" if raw else "shim"
     ws = _resolve_ws(ctx, name)
     exit_code = lifecycle.exec_workspace(
-        ws, trailing, notify=say, login=login, push=push)
-    if ctx.json:
-        import json
-        # The command's own stdout/stderr already streamed through; this final
-        # line carries the structured result (the exit code).
-        print(json.dumps({"exit": exit_code}))
+        ws, trailing, notify=say, mode=mode, user_override=user, push=push)
     sys.exit(exit_code)
 
 
@@ -1413,9 +1424,13 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     # the push when the proxy's config fingerprint already matches.
     p_enter.add_argument("--push", dest="enter_push", action="store_true")
     p_exec = sub.add_parser("exec")
-    # Wrap the command in a bash login shell so /etc/profile.d + the login rc
-    # load (mise shims, CA-trust env). Opt-in (needs bash); default is raw argv.
+    # Default sources the CA-trust env (like `enter -- CMD`). `--login` upgrades to
+    # a full bash login shell (/etc/profile.d + rc, mise shims); `--raw` drops to a
+    # direct execve (no shell, for minimal images) -- the two are exclusive.
     p_exec.add_argument("--login", dest="exec_login", action="store_true")
+    p_exec.add_argument("--raw", dest="exec_raw", action="store_true")
+    # One-off `-u` override, beating config `user` for this call (parity with enter).
+    p_exec.add_argument("--user", dest="exec_user", default=None)
     p_exec.add_argument("--push", dest="exec_push", action="store_true")
     sub.add_parser("edit")
     sub.add_parser("start")
@@ -1485,7 +1500,7 @@ _STRICT_HELP = (
     "  credproxy info                      (global config & state: paths, profile, registries)\n"
     "  credproxy version                   (or: credproxy --version)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
-    "  credproxy workspace NAME exec [--login] -- CMD...   (one-shot; scriptable)\n"
+    "  credproxy workspace NAME exec [--login|--raw] -- CMD...   (one-shot; scriptable)\n"
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
     "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credproxy workspace NAME binding add|remove|list|test ...\n"
@@ -1692,15 +1707,18 @@ _VERB_HELP = {
         "                rotating a secret in place. Default skips the redundant push."
     ),
     "exec": (
-        "credproxy workspace NAME exec [--login] [--push] -- CMD... -- run a\n"
-        "one-shot command in the workspace (starting it if needed) and propagate\n"
-        "its exit code. The non-interactive sibling of `enter`: NO session pidfile\n"
-        "or auto-stop, so it's safe to fire many times from a script/agent.\n"
-        "  --login  wrap CMD in a bash login shell so /etc/profile.d + the login\n"
-        "           rc load (mise shims, CA-trust env). Opt-in; needs bash in the\n"
-        "           image. Default runs CMD as raw argv (predictable, no shell).\n"
-        "  --push   force a config re-push (as `enter --push`).\n"
-        "  --json   emit {\"exit\": N} after the command's own streamed output."
+        "credproxy workspace NAME exec [--login|--raw] [--user U] [--push] -- CMD...\n"
+        "-- run a one-shot command in the workspace (starting it if needed) and\n"
+        "propagate its exit code. The non-interactive sibling of `enter`: it never\n"
+        "INITIATES an auto-stop, so it's safe to fire many times from a script/agent,\n"
+        "and it takes a fast path when the workspace is already running.\n"
+        "  (default) source the CA-trust env, like `enter -- CMD` (so `exec -- curl\n"
+        "           https://…` works against the proxy). Honours `enter_prelude`.\n"
+        "  --raw    direct execve: no shell wrapper, no CA-trust env (minimal images).\n"
+        "  --login  a bash login shell (/etc/profile.d + rc, mise shims); needs bash.\n"
+        "  --user U run as U for this call (overrides config `user`).\n"
+        "  --push   force a config re-push (as `enter --push`); also the full start.\n"
+        "(`--json` does not apply -- exec streams the command's output verbatim.)"
     ),
     "start": (
         "credproxy workspace NAME start -- (re)start the proxy, wait for health,\n"
@@ -1885,7 +1903,8 @@ def _run_ws_verb(
     if verb == "enter":
         do_enter(ctx, name, trailing, a.enter_user, a.enter_push)
     elif verb == "exec":
-        do_exec(ctx, name, trailing, a.exec_login, a.exec_push)
+        do_exec(ctx, name, trailing, login=a.exec_login, raw=a.exec_raw,
+                push=a.exec_push, user=a.exec_user)
     elif verb == "edit":
         do_edit(ctx, name)
     elif verb == "start":

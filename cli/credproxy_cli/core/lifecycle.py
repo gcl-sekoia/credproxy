@@ -1341,21 +1341,23 @@ def _count_live_sessions(ws: Workspace, exclude_pid: int | None = None) -> int:
     return count
 
 
-def _enter_exec_cmd(cfg: dict, container: str, cmd: list[str], *,
-                    user_override: str | None, isatty: bool) -> list[str]:
-    """Assemble the `docker exec` argv for `enter`.
+def _docker_exec_argv(cfg: dict, container: str, cmd_argv: list[str], *,
+                      user_override: str | None, isatty: bool) -> list[str]:
+    """The `docker exec` argv shared by `enter` and `exec` (so the two verbs can't
+    drift on how they honour the same config). `cmd_argv` is the ALREADY-assembled
+    command -- env-shim vs login-shell vs raw is the caller's decision.
 
     Ordering exploits docker's last-wins flag parsing to keep credproxy in
     control of session behaviour while still honouring `user` + the `exec_flags`
     escape hatch: the default `--workdir` (config `workdir`, else `home`), then
     config `user`, then `exec_flags` (may override -w/-u or add -e), then the
-    per-session `user_override`, then credproxy's session-control flags as
-    EXPLICIT booleans last -- so a stray -d/-t/-i in `exec_flags` can't detach
-    the session or break pidfile/auto-stop tracking, and a -w there still wins."""
+    per-call `user_override`, then credproxy's session-control flags as EXPLICIT
+    booleans last -- so a stray -d/-t/-i in `exec_flags` can't detach the session
+    or break pidfile tracking, and a -w there still wins."""
     out = ["docker", "exec"]
-    # Land in `workdir` (the workspaceFolder analog), defaulting to `home`, so
-    # enter drops you in your project/home rather than the image's WORKDIR.
-    # Emitted before exec_flags so a --workdir there still wins (docker last-wins).
+    # Land in `workdir` (the workspaceFolder analog), defaulting to `home`, so we
+    # drop into the project/home rather than the image's WORKDIR. Emitted before
+    # exec_flags so a --workdir there still wins (docker last-wins).
     workdir = cfg.get("workdir") or cfg.get("home")
     if workdir:
         out += ["--workdir", workdir]
@@ -1366,14 +1368,22 @@ def _enter_exec_cmd(cfg: dict, container: str, cmd: list[str], *,
         out += ["-u", user_override]
     out += ["--interactive=true", f"--tty={'true' if isatty else 'false'}", "--detach=false"]
     out.append(container)
+    out += cmd_argv
+    return out
+
+
+def _enter_exec_cmd(cfg: dict, container: str, cmd: list[str], *,
+                    user_override: str | None, isatty: bool) -> list[str]:
+    """Assemble the `docker exec` argv for `enter`: the shared prefix plus the
+    command wrapped in the env shim (`_enter_command`)."""
     if not cmd:
         # No explicit `-- CMD`: run the config `shell`, defaulting to a login
         # shell. `enter` is "log into the workspace" (ssh model), so the
         # interactive entry sources the full login env; an explicit command
         # stays bare/non-login (the ssh `host cmd` model).
         cmd = list(cfg.get("shell") or DEFAULT_ENTER_CMD)
-    out += _enter_command(cfg, cmd)
-    return out
+    return _docker_exec_argv(cfg, container, _enter_command(cfg, cmd),
+                             user_override=user_override, isatty=isatty)
 
 
 # Default `enter` command when none is given and no `shell` is configured: a
@@ -1390,26 +1400,28 @@ DEFAULT_ENTER_PRELUDE = (
 )
 
 
-def _enter_command(cfg: dict, cmd: list[str]) -> list[str]:
-    """The command argv for `enter`, optionally wrapped in an env shim.
+def _enter_command(cfg: dict, cmd: list[str], label: str = "credproxy-enter") -> list[str]:
+    """The command argv, optionally wrapped in an env shim. Shared by `enter` and
+    `exec`'s default mode (`label` sets `$0`, shown in errors, per verb).
 
     By default credproxy wraps the command in `sh -c '<prelude>; exec "$@"'`,
     where the prelude sources the proxy's bootstrap-written env file
     (/etc/profile.d/credproxy.sh -- the CA-bundle vars). This is the only way to
-    get that env into BOTH an interactive shell AND `enter -- cmd` AND their
+    get that env into BOTH an interactive shell AND a bare `-- cmd` AND their
     subprocesses: docker exec is a direct execve (no shell init, no PAM), so the
     env file otherwise loads only in a login shell. `exec "$@"` replaces the shim
     in place, so there's no extra PID and signals/TTY/exit code/argv all pass
-    through; `$0` is a label shown in error messages.
+    through; `$0` is the label shown in error messages.
 
     Escape hatch: `enter_prelude` overrides the shell snippet; set it to "" to
-    skip wrapping entirely (direct execve, no /bin/sh dependency)."""
+    skip wrapping entirely (direct execve, no /bin/sh dependency). `exec --raw`
+    is the per-call equivalent."""
     prelude = cfg.get("enter_prelude")
     if prelude is None:
         prelude = DEFAULT_ENTER_PRELUDE
     if not prelude:
         return list(cmd)
-    return ["sh", "-c", f'{prelude}; exec "$@"', "credproxy-enter", *cmd]
+    return ["sh", "-c", f'{prelude}; exec "$@"', label, *cmd]
 
 
 def effective_config(cfg: dict) -> dict:
@@ -1486,54 +1498,92 @@ def enter_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop,
     # Auto-stop: read config fresh (live config edit semantics).
     _maybe_auto_stop(ws, pid, notify)
 
-    return exit_code
+    # Map a signal death (-N) to 128+N, matching the shell convention (SIGINT ->
+    # 130, not the OS-truncated 254) and the subprocess's own exit code.
+    return 128 - exit_code if exit_code < 0 else exit_code
 
 
-def exec_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop,
-                   login: bool = False, push: bool = False) -> int:
+def _start_for_exec(ws: Workspace, notify: Notify, *, push: bool) -> None:
+    """Bring the workspace up for `exec`, with a fast path for the hot loop.
+
+    If BOTH containers are already running and no `--push` was asked, skip the
+    full `start` reconciliation (image/spec-drift checks, host-port resolve, the
+    `wait_for_ready` HTTP round-trip) -- ~6 docker forks + a network hop that
+    would otherwise dominate a burst of quick commands. `exec` is the "fire many
+    commands" verb; keeping config/drift in sync is what `start`/`apply` are for,
+    and `--push` (or either container being down) forces the full path. The
+    trade-off: an `exec` right after editing a binding won't pick it up until a
+    `start`/`apply`/`exec --push`."""
+    if not push and ws.exists() \
+            and docker.container_status(ws.proxy_container) == "running" \
+            and docker.container_status(ws.ws_container) == "running":
+        return
+    start_workspace(ws, notify, force_push=push)
+
+
+def exec_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop, *,
+                   mode: str = "shim", user_override: str | None = None,
+                   push: bool = False) -> int:
     """One-shot: start the workspace if needed, run `cmd` inside it, return its
-    exit code. Unlike `enter`, writes NO session pidfile and never auto-stops --
-    a scripted caller firing many quick commands gets no start/stop churn or
-    surprising teardown. Default runs `cmd` as RAW argv (predictable, no quoting/
-    injection surprises, no /bin/sh dependency -- works on a minimal image);
-    `login=True` wraps it in a bash login shell so /etc/profile.d + the user's
-    login rc load (mise shims, CA-trust env). The lock is held ONLY around start,
-    not the (possibly long) command."""
+    exit code. The scriptable sibling of `enter`: it never INITIATES an auto-stop
+    (no teardown churn when firing many quick commands) and takes the `exec` fast
+    path when the workspace is already up.
+
+    It DOES register a session pidfile for the command's duration -- so a
+    concurrent `enter` session's auto-stop teardown counts this in-flight exec and
+    can't `docker stop` the box out from under it -- but never calls
+    `_maybe_auto_stop` itself. So `exec` is protected from the reaper without ever
+    becoming one.
+
+    `mode` picks the command's environment: "shim" (default) sources the CA-trust
+    env like `enter -- CMD`; "raw" is a direct execve (no shell, minimal images);
+    "login" is a `bash -lc` login shell. `user_override` (`--user`) beats config
+    `user` for this call. The lock is held only around start + pidfile
+    registration, not the (possibly long) command."""
+    import os
     import sys
+
+    pid = os.getpid()
     with ws.lock():
-        start_workspace(ws, notify, force_push=push)
+        _start_for_exec(ws, notify, push=push)
         cfg = load_config(ws)
-        exec_cmd = _exec_cmd(cfg, ws.ws_container, cmd, login=login,
-                             isatty=sys.stdin.isatty())
-    return subprocess.run(exec_cmd, check=False).returncode
+        exec_cmd = _exec_cmd(cfg, ws.ws_container, cmd, mode=mode,
+                             user_override=user_override, isatty=sys.stdin.isatty())
+        ws.sessions_dir.mkdir(parents=True, exist_ok=True)
+        pidfile = _session_pidfile(ws, pid)
+        pidfile.write_text(str(pid))
+    try:
+        rc = subprocess.run(exec_cmd, check=False).returncode
+    finally:
+        pidfile.unlink(missing_ok=True)
+    # Map a signal death (-N) to the shell convention 128+N, so SIGINT reports 130
+    # (not the OS-truncated 254) and the returned code matches the process's own
+    # exit -- this verb's whole headline is "propagate its exit code".
+    return 128 - rc if rc < 0 else rc
 
 
-def _exec_cmd(cfg: dict, container: str, cmd: list[str], *, login: bool,
-             isatty: bool) -> list[str]:
-    """Assemble the `docker exec` argv for `exec`. Same workdir/user/exec_flags
-    honouring as enter (docker last-wins ordering), then the command. By default
-    the command is RAW argv (no shell -- predictable, works with no /bin/sh);
-    `login=True` wraps it in `bash -lc` so the login rc loads (opt-in: needs bash
-    in the image). `--interactive` always; `--tty` only when stdin is a TTY, so a
-    piped one-shot isn't given a pseudo-terminal."""
-    out = ["docker", "exec"]
-    workdir = cfg.get("workdir") or cfg.get("home")
-    if workdir:
-        out += ["--workdir", workdir]
-    if cfg.get("user"):
-        out += ["-u", cfg["user"]]
-    out += cfg.get("exec_flags") or []
-    out += ["--interactive=true", f"--tty={'true' if isatty else 'false'}",
-            "--detach=false"]
-    out.append(container)
-    if login:
-        # A login shell so /etc/profile.d + the login rc load. `exec "$@"`
-        # replaces the shim in place (no extra PID; signals/exit code/argv pass
-        # through); $0 is a label shown in errors.
-        out += ["bash", "-lc", 'exec "$@"', "credproxy-exec", *cmd]
-    else:
-        out += list(cmd)
-    return out
+def _exec_cmd(cfg: dict, container: str, cmd: list[str], *, mode: str,
+              user_override: str | None, isatty: bool) -> list[str]:
+    """Assemble the `docker exec` argv for `exec` via the shared prefix
+    (`_docker_exec_argv`), wrapping the command per `mode`:
+
+    - "shim" (default): the same env shim `enter -- CMD` uses, so the CA-trust
+      env (SSL_CERT_FILE etc.) is set -- `exec -- curl https://…` works against
+      the intercepting proxy just like `enter -- curl …`. Honours `enter_prelude`.
+    - "raw": direct execve, no shell wrapper -- predictable, no /bin/sh dependency
+      (minimal/distroless images), at the cost of the CA-trust env.
+    - "login": `bash -lc` login shell, so /etc/profile.d + the login rc load
+      (mise shims); needs bash in the image.
+
+    `--tty` only when stdin is a TTY, so a piped one-shot isn't given a pty."""
+    if mode == "raw":
+        cmd_argv = list(cmd)
+    elif mode == "login":
+        cmd_argv = ["bash", "-lc", 'exec "$@"', "credproxy-exec", *cmd]
+    else:  # "shim" -- CA-trust env, parity with `enter -- CMD`
+        cmd_argv = _enter_command(cfg, cmd, label="credproxy-exec")
+    return _docker_exec_argv(cfg, container, cmd_argv,
+                             user_override=user_override, isatty=isatty)
 
 
 def _maybe_auto_stop(ws: Workspace, our_pid: int, notify: Notify) -> None:
