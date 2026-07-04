@@ -667,3 +667,24 @@ def test_visible_respond_single_attribution():
     flow = _flow()
     log.request(flow)
     assert flow.response.headers.get_all("X-Credproxy-Rule") == ["vis"]
+
+
+# ---- #15: per-binding decline reason -----------------------------------------
+
+def test_no_inject_names_binding_and_reason(capsys):
+    # A bearer binding whose placeholder isn't present: the no-inject audit event
+    # names the candidate binding + a coarse reason, and the [http] marker names it.
+    creds = _creds([], bindings=[_bearer_binding("api.github.com", "PH", "REAL")])
+    log = addon.HostnameLogger(_state(creds))
+    # (a) header absent entirely
+    log.request(_flow())
+    recs = _records(capsys.readouterr().out)
+    ni = [e for e in recs if e.get("kind") == "audit" and e["event"] == "no-inject"]
+    assert ni and ni[0]["binding"] == "b" and "absent" in ni[0]["reason"]
+    http = [e for e in recs if e.get("kind") == "http"][0]
+    assert "no-inject:b" in http["marks"]
+    # (b) header present but placeholder doesn't match -> distinct reason
+    log.request(_flow(headers={"Authorization": "Bearer WRONG"}))
+    ni2 = [e for e in _records(capsys.readouterr().out)
+           if e.get("kind") == "audit" and e["event"] == "no-inject"]
+    assert ni2 and "did not match" in ni2[0]["reason"]

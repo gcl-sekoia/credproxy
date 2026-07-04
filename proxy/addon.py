@@ -42,6 +42,25 @@ class _RulePhaseResult:
     terminal_mark: str | None = None       # "block:NAME" | "respond:NAME" | "rule-error:NAME"
 
 
+def _decline_reason(t, req) -> str:
+    """A coarse, secret-free reason a candidate binding didn't fire, for the
+    no-inject audit event (#15). Distinguishes the two common misconfigs -- the
+    expected header absent vs present-but-placeholder/format-mismatch (e.g. the
+    token in a different header than `params` expects, or the placeholder not
+    matching); a body scheme's placeholder not in the body; and the sign family
+    (no placeholder) as 'not eligible'. Reads only header PRESENCE, never a value."""
+    scheme = t.scheme
+    if getattr(scheme, "family", None) == "substitute" and t.placeholder:
+        if scheme.location_kind == "header":
+            header = t.params.get("header", scheme.header_default)
+            present = bool(header) and req.headers.get(header) is not None
+            return (f"{header} present but placeholder/format did not match"
+                    if present else f"{header} header absent")
+        if scheme.location_kind == "body":
+            return "placeholder not found in request body"
+    return "request not eligible (no re-signable material / no placeholder)"
+
+
 class HostnameLogger:
     def __init__(self, state):
         # `state` is duck-typed: anything with a `.creds` attribute
@@ -124,26 +143,29 @@ class HostnameLogger:
         if applied:
             marks.append(f"inject:{','.join(applied)}")
         elif candidates:
-            # `candidates` (bindings evaluated for this host), NOT
-            # creds.intercepts(host): a rule-only host is intercepted but has no
-            # binding to decline, so `(no-inject)` would falsely imply one was
-            # evaluated -- and the audit below keys on `candidates` too, so the
-            # marker and the event must agree.
-            marks.append("no-inject")
+            # Name the candidate binding(s) that declined (#15), NOT a bare
+            # `no-inject`: from inside the workspace an un-injected placeholder
+            # forwarded verbatim just looks like an upstream 401, so the proxy log
+            # is the only place the misconfig is observable. Key on `candidates`
+            # (bindings evaluated for this host), NOT creds.intercepts(host): a
+            # rule-only host is intercepted but has no binding to decline.
+            marks.append("no-inject:" + ",".join(t.name for t in candidates))
         log.emit("http", method=req.method, host=host, path=path,
                  marks=marks or None)
 
-        # Durable audit stream (#24): one event per fired binding, plus a single
-        # no-inject event when an intercepted host had candidate bindings but
-        # none fired. Names/host/method/path only -- never a secret or a header
-        # value. The addon marks bindings that fired via `fired`; emit from that.
+        # Durable audit stream: one event per fired binding, plus a per-candidate
+        # no-inject event (with a coarse decline REASON, #15) when an intercepted
+        # host had candidate bindings but none fired. Names/host/method/path/reason
+        # only -- never a secret or a header value.
         for t in fired:
             audit.emit("inject", binding=t.name, scheme=t.scheme.name,
                        host=host, method=req.method, path=path,
                        outcome="injected")
         if candidates and not applied:  # candidate bindings existed, none fired
-            audit.emit("no-inject", host=host, method=req.method, path=path,
-                       outcome="declined")
+            for t in candidates:
+                audit.emit("no-inject", binding=t.name, scheme=t.scheme.name,
+                           host=host, method=req.method, path=path,
+                           reason=_decline_reason(t, req), outcome="declined")
 
     # ---- rule evaluation ----------------------------------------------------
 
