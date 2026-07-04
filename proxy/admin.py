@@ -39,12 +39,6 @@ CONFIG_PATH = Path(os.environ["CREDPROXY_TMPFS"]) / "config.json"
 @dataclass
 class AppState:
     creds: Credentials = field(default_factory=lambda: BindingCredentials({}))
-    # Capture-readiness (distinct from process liveness): flipped True by the
-    # mitmproxy addon's `running` hook once the transparent listener is bound.
-    # `/health` gates on this AND the CA existing, so "healthy" means egress is
-    # actually being captured -- not merely that the HTTP listener answers. See
-    # bootstrap.health / addon.HostnameLogger.running.
-    capture_ready: bool = False
 
 
 STATE_KEY: web.AppKey[AppState] = web.AppKey("state", AppState)

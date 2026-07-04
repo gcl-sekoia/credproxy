@@ -41,7 +41,7 @@ def test_diagnostics_running_but_unready(monkeypatch, ws):
     from credproxy_cli.core import lifecycle
     _patch_docker(monkeypatch, status="running", logs="starting up...\n")
     out = lifecycle._proxy_diagnostics(ws)
-    assert "running" in out and "not answering /health" in out
+    assert "running" in out and "not yet capture-ready" in out
 
 
 def test_diagnostics_container_gone(monkeypatch, ws):

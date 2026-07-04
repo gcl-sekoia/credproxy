@@ -492,10 +492,12 @@ def stop_workspace(ws: Workspace) -> None:
 
 
 def _proxy_diagnostics(ws: Workspace) -> str:
-    """Explain why the proxy isn't answering /health, by inspecting its
+    """Explain why the proxy didn't become capture-ready, by inspecting its
     container. The common case is a crash on boot (the container has exited);
     surface its exit code and recent log tail so the failure is actionable
-    without a second command."""
+    without a second command. (When the container is still up, /health answered
+    503 with the specific pending reason -- carried in the ProxyError this
+    appends to -- so the tail below explains why it's stuck, not that it's mute.)"""
     status = docker.container_status(ws.proxy_container)
     if status is None:
         return f"  (the proxy container {ws.proxy_container} is gone)"
@@ -503,7 +505,7 @@ def _proxy_diagnostics(ws: Workspace) -> str:
         code = docker.inspect(ws.proxy_container, "{{.State.ExitCode}}") or "?"
         head = f"  the proxy container exited (code {code}) -- it crashed on startup."
     else:
-        head = f"  the proxy container is '{status}' but not answering /health."
+        head = f"  the proxy container is '{status}' but not yet capture-ready."
     lines = [head]
     tail = [ln for ln in docker.logs_tail(ws.proxy_container, 20).splitlines() if ln.strip()]
     if tail:
@@ -1286,11 +1288,19 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
 
 
 def reload_proxy(ws: Workspace) -> None:
-    """SIGHUP the workspace's proxy so python re-execs in place. Raises
-    WorkspaceError if the proxy is not running."""
+    """SIGHUP the workspace's proxy so python re-execs in place, then wait until
+    it is capture-ready again. Raises WorkspaceError if the proxy is not running.
+
+    The re-exec'd process starts un-ready (/health 503 until the mitmproxy
+    listener rebinds), so `reload` blocks on `/health` -- it means "reloaded AND
+    capturing again", not just "signal delivered"; otherwise a caller could hit
+    the box during the reload's un-ready window."""
     if docker.container_status(ws.proxy_container) != "running":
         raise WorkspaceError(f"proxy for workspace '{ws.name}' is not running")
     docker.docker(["kill", "--signal=HUP", ws.proxy_container])
+    meta = ImageEnv.load()
+    host_port = docker.resolve_host_port(ws.proxy_container, meta.http_port)
+    wait_for_ready(host_port)
 
 
 # ---- auto-stop / session tracking -------------------------------------------

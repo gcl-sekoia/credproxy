@@ -86,8 +86,15 @@ def rule_test_live(ws: Workspace, http_port: int, method: str, url: str) -> dict
 
 
 def wait_for_ready(http_port: int, timeout: float = 15.0) -> None:
-    """Poll /health until the proxy answers 200 or `timeout` elapses."""
+    """Poll /health until the proxy is capture-ready (200) or `timeout` elapses.
+
+    /health returns 503 with a `{"pending": [...]}` body while the mitmproxy
+    listener or CA isn't up yet (urllib raises HTTPError, a URLError subclass, so
+    that's treated as keep-polling). On timeout we surface the LAST pending reason
+    -- the exact thing that was still missing -- instead of a bare 503, so a stuck
+    boot names what it's stuck on rather than leaving the operator to guess."""
     deadline = time.monotonic() + timeout
+    last_pending: list | None = None
     last_err: Exception | None = None
     while time.monotonic() < deadline:
         try:
@@ -96,11 +103,22 @@ def wait_for_ready(http_port: int, timeout: float = 15.0) -> None:
             ) as resp:
                 if resp.status == 200:
                     return
+        except urllib.error.HTTPError as e:
+            last_err = e
+            # 503 carries the capture-readiness reason in its body; keep the most
+            # recent so the timeout message can name it.
+            if e.code == 503:
+                try:
+                    last_pending = json.loads(e.read()).get("pending")
+                except (ValueError, OSError):
+                    pass
         except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
             last_err = e
         time.sleep(0.1)
+    detail = (f"still waiting on: {', '.join(last_pending)}"
+              if last_pending else str(last_err))
     raise ProxyError(
-        f"proxy did not become ready within {timeout:.0f}s ({last_err})"
+        f"proxy did not become capture-ready within {timeout:.0f}s ({detail})"
     )
 
 

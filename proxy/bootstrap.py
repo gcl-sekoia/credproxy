@@ -11,6 +11,7 @@ only the fields the workspace needs for self-configuration:
 It does NOT expose provider, secret-id, or real credential values --
 those never reach the proxy from the push model anyway.
 """
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -19,9 +20,16 @@ from aiohttp import web
 
 from admin import STATE_KEY
 from config import Credentials
+from constants import PROXY_PORT
 
 CA_CERT_PATH = Path("/home/mitmuser/.mitmproxy/mitmproxy-ca-cert.pem")
 VERSION = "0.0.1"
+
+# Where the mitmproxy transparent listener binds (main.run). `/health` TCP-probes
+# it directly rather than trusting an addon-set flag, so readiness is observed
+# live -- version-proof against mitmproxy's (undocumented, unpinned) hook ordering
+# and continuously truthful if the listener ever dies without taking PID 1 down.
+PROXY_HOST = "127.0.0.1"
 
 CA_ENV = {
     "SSL_CERT_FILE": "/tmp/proxy-ca.crt",
@@ -190,39 +198,57 @@ def _json(obj, status: int = 200) -> web.Response:
         obj, status=status, dumps=lambda o: json.dumps(o, indent=2) + "\n")
 
 
-def _capture_pending(state) -> list[str]:
+async def _listener_bound(host: str, port: int, timeout: float = 0.5) -> bool:
+    """True if the mitmproxy transparent listener is accepting connections. A
+    live connect+close observes the actual bind state each call -- no addon flag
+    to go stale if the server dies, no reliance on mitmproxy internal hook order.
+    A failed connect (refused, during boot) is cheap and never reaches mitmproxy;
+    a success is one benign empty connection (the probe closes immediately)."""
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return True
+
+
+async def _capture_pending() -> list[str]:
     """What's still missing for the proxy to be *capture-ready* (not merely
     alive), most-fundamental first. Empty list == ready.
 
-    - `mitmproxy-listener`: the transparent listener isn't bound yet (the addon's
-      `running` hook hasn't fired). The HTTP listener answering `/health` proves
-      only its OWN bind, not mitmproxy's.
-    - `ca-cert`: mitmproxy hasn't generated its CA yet, so the first TLS
-      connection to an intercepted host would fail with a cert error even though
-      the listener is up.
+    - `mitmproxy-listener`: the transparent listener isn't accepting yet. The HTTP
+      listener answering `/health` proves only its OWN bind, not mitmproxy's, so
+      we probe the mitmproxy port directly.
+    - `ca-cert`: mitmproxy hasn't written its CA yet, so the first TLS connection
+      to an intercepted host would fail with a cert error even though the listener
+      is up. (Cheap belt-and-suspenders -- today the CA is written at DumpMaster
+      construction, before the listener binds, but this guards an odd confdir.)
 
     iptables is NOT probed: the entrypoint installs the rules under `set -e`
     before it execs python, so any answer at all implies they're in; and python
     then runs as an unprivileged uid that couldn't read the nat table anyway."""
     pending = []
-    if not getattr(state, "capture_ready", False):
+    if not await _listener_bound(PROXY_HOST, PROXY_PORT):
         pending.append("mitmproxy-listener")
     if not CA_CERT_PATH.exists():
         pending.append("ca-cert")
     return pending
 
 
-async def health(request: web.Request) -> web.Response:
+async def health(_: web.Request) -> web.Response:
     """Capture-readiness probe (not liveness): 200 only once egress is actually
-    being intercepted -- the mitmproxy listener is bound AND its CA exists.
-    503 with a `pending` list until then, so `start`/`push --wait` and an
-    external health-gate (Compose `service_healthy`) hold off handing the
-    workspace a proxy that isn't yet capturing traffic (#23). Creds-readiness
-    (a config having been pushed) is deliberately a SEPARATE, future signal --
-    folding it in here would deadlock standalone `start`, which waits on
-    `/health` and only THEN pushes config."""
-    state = request.app[STATE_KEY]
-    pending = _capture_pending(state)
+    being intercepted -- the mitmproxy listener accepts connections AND its CA
+    exists. 503 with a `pending` list until then, so `start`/`push --wait` hold
+    off handing the workspace a proxy that isn't yet capturing traffic (#23).
+    Creds-readiness (a config having been pushed) is deliberately a SEPARATE,
+    future signal -- folding it in here would deadlock standalone `start`, which
+    waits on `/health` and only THEN pushes config."""
+    pending = await _capture_pending()
     body = {"ok": not pending, "version": VERSION}
     if pending:
         body["pending"] = pending

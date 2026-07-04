@@ -70,13 +70,10 @@ class HostnameLogger:
 
     def running(self) -> None:
         # mitmproxy fires `running` once the transparent listener is bound and
-        # serving. Until now `/health` was liveness-only -- green the instant the
-        # HTTP listener bound (main.run), i.e. BEFORE this point, so a consumer
-        # could push config / hand off the workspace during a window where TLS
-        # intercept wasn't actually up and the CA didn't yet exist (#23). Flip
-        # the shared AppState's capture-ready flag so `/health` reports readiness,
-        # not mere liveness. (CA existence is checked separately in the handler.)
-        self._state.capture_ready = True
+        # serving. Purely a boot-visibility log line: `/health` observes the
+        # listener live by probing the port (bootstrap._listener_bound), so it
+        # doesn't rely on this hook -- which keeps readiness truthful even if a
+        # future mitmproxy changes hook ordering or the server later dies (#23).
         log.emit("main", msg="capture-ready (mitmproxy listener bound)")
 
     def tls_clienthello(self, data: tls.ClientHelloData) -> None:
