@@ -19,12 +19,19 @@ def _xform(placeholder, real, *, header="Authorization", name="b"):
 @pytest.fixture
 def state(monkeypatch, tmp_path):
     """Fresh AppState; TOKEN_PATH/CONFIG_PATH redirected to tmp_path,
-    token file pre-populated so admin_config's per-call read succeeds."""
+    token file pre-populated so admin_config's per-call read succeeds.
+
+    Marked capture-ready with a CA present so `/health` answers 200 by default
+    (readiness has its own dedicated tests below); most tests don't exercise the
+    startup window."""
     token_path = tmp_path / "auth.token"
     monkeypatch.setattr(admin, "TOKEN_PATH", token_path)
     monkeypatch.setattr(admin, "CONFIG_PATH", tmp_path / "config.json")
     token_path.write_text("established")
-    return admin.AppState()
+    ca = tmp_path / "mitmproxy-ca-cert.pem"
+    ca.write_text("-----BEGIN CERTIFICATE-----\n")
+    monkeypatch.setattr(bootstrap, "CA_CERT_PATH", ca)
+    return admin.AppState(capture_ready=True)
 
 
 @pytest.fixture
@@ -291,11 +298,57 @@ async def test_sfs_missing_allowed(aiohttp_client, app):
 # ---- bootstrap routes on the merged listener ----
 
 async def test_health_route(aiohttp_client, app):
+    """Capture-ready (fixture default): 200, ok, no `pending`."""
     client = await aiohttp_client(app)
     resp = await client.get("/health")
     assert resp.status == 200
     body = await resp.json()
     assert body["ok"] is True
+    assert "pending" not in body
+
+
+async def test_health_503_before_mitmproxy_listener(aiohttp_client, app, state):
+    """Liveness != readiness: the HTTP listener answers, but until the mitmproxy
+    `running` hook fires, `/health` reports 503 with the listener pending (#23)."""
+    state.capture_ready = False
+    client = await aiohttp_client(app)
+    resp = await client.get("/health")
+    assert resp.status == 503
+    body = await resp.json()
+    assert body["ok"] is False
+    assert body["pending"] == ["mitmproxy-listener"]
+
+
+async def test_health_503_before_ca_generated(aiohttp_client, app, monkeypatch, tmp_path):
+    """Listener up but CA not yet written: 503 with `ca-cert` pending -- the
+    exact window #23 names (ready reported before the CA exists)."""
+    monkeypatch.setattr(bootstrap, "CA_CERT_PATH", tmp_path / "absent-ca.pem")
+    client = await aiohttp_client(app)
+    resp = await client.get("/health")
+    assert resp.status == 503
+    body = await resp.json()
+    assert body["pending"] == ["ca-cert"]
+
+
+async def test_health_503_lists_all_pending_at_boot(aiohttp_client, app, state, monkeypatch, tmp_path):
+    """Cold start -- neither listener nor CA up: both pending, most-fundamental
+    (listener) first."""
+    state.capture_ready = False
+    monkeypatch.setattr(bootstrap, "CA_CERT_PATH", tmp_path / "absent-ca.pem")
+    client = await aiohttp_client(app)
+    resp = await client.get("/health")
+    assert resp.status == 503
+    assert (await resp.json())["pending"] == ["mitmproxy-listener", "ca-cert"]
+
+
+def test_running_hook_flips_capture_ready():
+    """The addon's `running` hook (mitmproxy listener bound) marks the shared
+    AppState capture-ready -- the signal `/health` gates on."""
+    import addon
+    st = admin.AppState()
+    assert st.capture_ready is False
+    addon.HostnameLogger(st).running()
+    assert st.capture_ready is True
 
 
 async def test_index_route_map(aiohttp_client, app):

@@ -68,6 +68,17 @@ class HostnameLogger:
         # admin.AppState; in tests, a SimpleNamespace.
         self._state = state
 
+    def running(self) -> None:
+        # mitmproxy fires `running` once the transparent listener is bound and
+        # serving. Until now `/health` was liveness-only -- green the instant the
+        # HTTP listener bound (main.run), i.e. BEFORE this point, so a consumer
+        # could push config / hand off the workspace during a window where TLS
+        # intercept wasn't actually up and the CA didn't yet exist (#23). Flip
+        # the shared AppState's capture-ready flag so `/health` reports readiness,
+        # not mere liveness. (CA existence is checked separately in the handler.)
+        self._state.capture_ready = True
+        log.emit("main", msg="capture-ready (mitmproxy listener bound)")
+
     def tls_clienthello(self, data: tls.ClientHelloData) -> None:
         sni = data.client_hello.sni
         # The earliest, highest-blast-radius hook: it runs user-influenced glob

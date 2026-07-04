@@ -152,7 +152,7 @@ hangs or a host is unreachable):
 If proxy.local does not resolve, use 169.254.1.1 directly.
 
 Endpoints (all GET):
-  /health        liveness probe (json)
+  /health        capture-readiness probe (json; 503 until intercept+CA are up)
   /ca.crt        CA certificate (PEM)
   /bootstrap.sh  one-shot setup: install CA + write /etc/profile.d
   /env.sh        env-var exports only (for `eval` use)
@@ -182,15 +182,52 @@ def workspace_bindings(creds: Credentials) -> list[dict]:
     ]
 
 
-def _json(obj) -> web.Response:
+def _json(obj, status: int = 200) -> web.Response:
     """JSON response, pretty-printed with a trailing newline so a bare `curl`
     of a bootstrap route reads cleanly. Insertion order is preserved (no key
     sorting). `jq` and parsers are unaffected by the whitespace."""
-    return web.json_response(obj, dumps=lambda o: json.dumps(o, indent=2) + "\n")
+    return web.json_response(
+        obj, status=status, dumps=lambda o: json.dumps(o, indent=2) + "\n")
 
 
-async def health(_: web.Request) -> web.Response:
-    return _json({"ok": True, "version": VERSION})
+def _capture_pending(state) -> list[str]:
+    """What's still missing for the proxy to be *capture-ready* (not merely
+    alive), most-fundamental first. Empty list == ready.
+
+    - `mitmproxy-listener`: the transparent listener isn't bound yet (the addon's
+      `running` hook hasn't fired). The HTTP listener answering `/health` proves
+      only its OWN bind, not mitmproxy's.
+    - `ca-cert`: mitmproxy hasn't generated its CA yet, so the first TLS
+      connection to an intercepted host would fail with a cert error even though
+      the listener is up.
+
+    iptables is NOT probed: the entrypoint installs the rules under `set -e`
+    before it execs python, so any answer at all implies they're in; and python
+    then runs as an unprivileged uid that couldn't read the nat table anyway."""
+    pending = []
+    if not getattr(state, "capture_ready", False):
+        pending.append("mitmproxy-listener")
+    if not CA_CERT_PATH.exists():
+        pending.append("ca-cert")
+    return pending
+
+
+async def health(request: web.Request) -> web.Response:
+    """Capture-readiness probe (not liveness): 200 only once egress is actually
+    being intercepted -- the mitmproxy listener is bound AND its CA exists.
+    503 with a `pending` list until then, so `start`/`push --wait` and an
+    external health-gate (Compose `service_healthy`) hold off handing the
+    workspace a proxy that isn't yet capturing traffic (#23). Creds-readiness
+    (a config having been pushed) is deliberately a SEPARATE, future signal --
+    folding it in here would deadlock standalone `start`, which waits on
+    `/health` and only THEN pushes config."""
+    state = request.app[STATE_KEY]
+    pending = _capture_pending(state)
+    body = {"ok": not pending, "version": VERSION}
+    if pending:
+        body["pending"] = pending
+        return _json(body, status=503)
+    return _json(body)
 
 
 async def ca_crt(_: web.Request) -> web.Response:
@@ -242,7 +279,7 @@ async def index(_: web.Request) -> web.Response:
         f"credproxy proxy — workspace '{ws}'\n\n"
         "Bootstrap routes (open, no auth):\n"
         "  GET /             this page\n"
-        "  GET /health       liveness\n"
+        "  GET /health       capture-readiness (503 until intercept+CA up)\n"
         "  GET /ca.crt       proxy CA certificate (PEM)\n"
         "  GET /bootstrap.sh install CA + trust env  (curl -sSL proxy.local/bootstrap.sh | sh)\n"
         "  GET /env.sh       CA-trust env exports\n"
