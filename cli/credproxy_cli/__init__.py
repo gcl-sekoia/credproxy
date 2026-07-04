@@ -16,3 +16,9 @@ The package is laid out in two layers:
 
 Dependency runs one way: porcelain -> core.
 """
+
+# Single source of truth for the CLI version (surfaced by `credproxy version` /
+# `--version`). Keep in sync with `version = ...` in pyproject.toml. The proxy
+# image carries its own separate VERSION (proxy/bootstrap.py), reported by
+# /health and /setup.
+__version__ = "0.1.0"

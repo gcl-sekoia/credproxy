@@ -1316,3 +1316,13 @@ def test_rule_test_json_envelope_offline_and_live(capsys):
     assert live["live"] is True and live["intercepted"] is True
     assert live["method"] == "GET" and live["url"] == "https://h/x"
     assert live["matches"][0]["phase"] == "response"
+
+
+def test_version_command_and_flag(xdg):
+    import json
+    from credproxy_cli import __version__
+    for argv in (["version"], ["--version"]):
+        ec, out, err = _run(argv)
+        assert ec == 0 and __version__ in out
+    ec, out, err = _run(["--json", "version"])
+    assert ec == 0 and json.loads(out) == {"credproxy": __version__}

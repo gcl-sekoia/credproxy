@@ -9,7 +9,7 @@
 # in the image (`--container` forces the image).
 [project]
 name = "credproxy"
-version = "0.1.0"
+version = "0.1.0"                     # keep in sync with credproxy_cli.__version__
 description = "credproxy host CLI: workspace manager for the credential-injecting egress proxy"
 requires-python = ">=3.11"            # stdlib tomllib
 dependencies = []                     # the CLI is standard-library only, by design

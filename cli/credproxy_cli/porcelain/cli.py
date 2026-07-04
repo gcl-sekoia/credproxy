@@ -1452,6 +1452,7 @@ _STRICT_HELP = (
     "  credproxy workspace create NAME\n"
     "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
     "  credproxy info                      (global config & state: paths, profile, registries)\n"
+    "  credproxy version                   (or: credproxy --version)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
     "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
@@ -1993,6 +1994,13 @@ def main(loose_default: bool = False) -> None:
 
     if not argv or argv[0] in ("-h", "--help", "help"):
         _print_help(loose)
+        sys.exit(0)
+
+    if argv[0] in ("version", "--version"):
+        import json
+        from .. import __version__
+        print(json.dumps({"credproxy": __version__}) if as_json
+              else f"credproxy {__version__}")
         sys.exit(0)
 
     render.set_format(as_json)
