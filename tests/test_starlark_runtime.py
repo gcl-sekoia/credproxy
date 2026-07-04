@@ -11,6 +11,7 @@ threads or holds a ctx. Stateful primitives are flat, prefixed `req_`/`resp_`
 which also encodes the phase.
 """
 import base64
+import json
 import time
 from pathlib import Path
 
@@ -380,6 +381,98 @@ def test_on_response_error_message_is_sanitized(capsys):
         s.on_response(rc)
     assert "DETAIL-LEAK-12345" not in str(ei.value)
     assert "DETAIL-LEAK-12345" not in capsys.readouterr().out
+
+
+# ---- rung 3 (#33): sanitized failure carries the LINE, never the message -----
+
+
+def _last_script_record(out: str) -> dict:
+    recs = [json.loads(l[len("credproxy "):]) for l in out.splitlines()
+            if l.startswith("credproxy ")]
+    scripts = [r for r in recs if r.get("kind") == "script"]
+    assert scripts, f"no script record in: {out!r}"
+    return scripts[-1]
+
+
+def test_script_failure_record_carries_line_and_source(capsys):
+    """The sanitized on_request failure record now includes the failing line +
+    source file, so an author can jump to it -- while the message (which could be
+    `fail(secret())`) stays out of the record entirely (#33 rung 3)."""
+    src = "def on_request():\n    x = 1\n    fail(secret())\n"   # fail at line 3
+    s = ScriptedScheme("loc", src)
+    ctx, _ = _ctx(secrets={"value": "SUPER-SECRET-XYZZY"})
+    assert s.on_request(ctx) is False
+    out = capsys.readouterr().out
+    assert "SUPER-SECRET-XYZZY" not in out         # message still sanitized
+    rec = _last_script_record(out)
+    assert rec["hook"] == "on_request"
+    assert rec["source"] == "loc.star"
+    assert rec["line"] == 3
+    assert rec["outcome"] == "failing closed"
+
+
+def test_on_response_error_reports_location_not_message(capsys):
+    from starlark_runtime import ScriptResponseError
+    s = ScriptedScheme("boom", 'def on_response():\n    fail("DETAIL-LEAK")\n')
+    rc, _ = _resp_ctx()
+    with pytest.raises(ScriptResponseError) as ei:
+        s.on_response(rc)
+    msg = str(ei.value)
+    assert "DETAIL-LEAK" not in msg          # message never surfaces
+    assert "boom.star:2" in msg              # but the location does
+
+
+def test_error_location_ignores_fully_formed_message_decoys():
+    """Integrity: the reported line is read from the call-stack FRAME (which
+    renders before the `error:` message), so a secret whose value embeds a
+    FULLY-FORMED decoy -- a `-->` pointer AND a `* file:N, in` frame, after the
+    message -- can't change the reported line. Only the real frame (23) wins.
+    (The old test planted only an arrowless decoy and passed vacuously.)"""
+    from starlark_runtime import _error_location
+
+    class E(Exception):
+        pass
+    s = ("Traceback (most recent call last):\n"
+         "  File <builtin>, in <module>\n"
+         "  * ovh.star:23, in on_request\n"      # the REAL frame, before error:
+         "error: fail: leaking\n"                # message begins here
+         "  * ovh.star:888, in on_request\n"     # decoy frame (inside secret)
+         " --> ovh.star:999:1\n"                 # decoy pointer (inside secret)
+         " --> ovh.star:23:5\n  |\n")            # real pointer (ignored anyway)
+    assert _error_location(E(s), "ovh.star") == 23
+
+
+def test_error_location_pointer_fallback_takes_last_not_decoy():
+    """When there's no frame (rare), fall back to the `-->` pointer -- taking the
+    LAST match, since the real pointer renders after the message, so a
+    message-planted decoy pointer that renders earlier still loses."""
+    from starlark_runtime import _error_location
+
+    class E(Exception):
+        pass
+    # Models a newline-containing secret: `error: fail: leak\n --> ovh.star:999:1`
+    # then the real pointer.
+    s = ("error: fail: leak\n"
+         " --> ovh.star:999:1\n"                 # decoy (part of the message)
+         " --> ovh.star:23:5\n  |\n")            # real pointer, renders last
+    assert _error_location(E(s), "ovh.star") == 23
+
+
+def test_error_location_none_when_unparseable():
+    from starlark_runtime import _error_location
+    assert _error_location(Exception("no location here"), "ovh.star") is None
+
+
+def test_no_cancellation_warns_once(monkeypatch, capsys):
+    """When the starlark build can't cancel, a load-time warning fires exactly
+    once (tied to script usage), not per-script (#33 rung-3 bundle)."""
+    import starlark_runtime as sr
+    monkeypatch.setattr(sr, "_CALL_SUPPORTS_CANCEL", False)
+    monkeypatch.setattr(sr, "_CANCEL_WARNING_EMITTED", False)
+    sr._warn_if_no_cancellation()
+    sr._warn_if_no_cancellation()
+    out = capsys.readouterr().out
+    assert out.count("cannot be timed out") == 1
 
 
 def test_primitive_outside_hook_raises_not_silent():

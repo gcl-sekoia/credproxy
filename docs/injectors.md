@@ -286,11 +286,24 @@ even a shared third-party script can't choose a destination or exfiltrate the
 secret. See `proxy/starlark_runtime.py`.
 
 **Fail-closed.** Any uncaught error in a hook makes the proxy skip injection and
-forward the request **unmodified**. The error is logged by **exception type
-only**, never its message — so a script cannot do something like `fail(secret())`
-to leak the credential into a log. A hook also signals its outcome by return
-value: return `True` if it acted, `False` to no-op (which also fails closed —
-the request is forwarded unmodified).
+forward the request **unmodified**. The failure is logged by **exception type
+and the failing location (`source:line` + hook)** — e.g. `StarlarkError at
+ovh.star:23 in on_request` — but **never the error message**, so a script cannot
+do something like `fail(secret())` to leak the credential into a log. The message
+is the arbitrary-content exfiltration channel and stays closed: the location is
+read from the call-stack frame, keyed on the credproxy-chosen filename, so only a
+`file:line` number enters the log — never message content. (A *deliberately*
+malicious script could still encode a few bits by choosing which line to fail at,
+but that lands only in host-side `docker logs` the workspace can't read, and is
+not a meaningful exfiltration path.) A hook also signals its outcome by return
+value: return `True` if it acted, `False` to no-op (which also fails closed — the
+request is forwarded unmodified).
+
+> **Timeouts.** A runaway hook is aborted at a wall-clock deadline **only if** the
+> installed `starlark-pyo3` build exposes cancellation on the call path. If it
+> doesn't, the proxy logs a one-time warning at load (*"a runaway script hook
+> cannot be timed out and would hang the proxy"*) — upgrade to a build with
+> eval-cancel for the timeout to take effect.
 
 **Total vs. partial reads.** The primitives follow one convention: a read for
 something that is merely *absent* returns `None` (test it with `== None`), while

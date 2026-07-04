@@ -151,6 +151,24 @@ def _detect_call_cancel() -> bool:
 
 _CALL_SUPPORTS_CANCEL = _detect_call_cancel()
 
+_CANCEL_WARNING_EMITTED = False
+
+
+def _warn_if_no_cancellation() -> None:
+    """If the installed starlark-pyo3 build can't cancel a runaway hook, warn ONCE
+    (the first time any script is loaded), at load rather than only in the module
+    docstring: a non-terminating script would hang the whole proxy with no
+    timeout. Tied to actual script usage so a script-free workspace stays quiet."""
+    global _CANCEL_WARNING_EMITTED
+    if _CALL_SUPPORTS_CANCEL or _CANCEL_WARNING_EMITTED:
+        return
+    _CANCEL_WARNING_EMITTED = True
+    import log
+    log.emit("main", level="warning",
+             msg="starlark build lacks check_cancelled on the call path: a "
+                 "runaway script hook cannot be timed out and would hang the "
+                 "proxy (upgrade starlark-pyo3 to a build with eval-cancel)")
+
 
 # ---- trusted primitives ------------------------------------------------------
 #
@@ -545,12 +563,59 @@ def _module_defines(source: str, name: str, primitives: dict, filename: str) -> 
         return False
 
 
+def _error_location(exc: Exception, fname: str) -> int | None:
+    """The line number of a script runtime error, extracted SAFELY.
+
+    starlark-pyo3's StarlarkError carries no structured location -- the line lives
+    only inside str(exc), which ALSO contains the (secret-bearing) `error: <msg>`
+    line. We capture only `<line>` against the credproxy-chosen `fname`, so the
+    record can never carry message *content*: every captured token is
+    `<known-file>:<digits>`.
+
+    Decoy-resistance matters for INTEGRITY (a truthful jump target), not secrecy:
+    the rendering order is call-stack frames, then `error: <msg>`, then the
+    ` --> file:line` pointer. So we read the location from the FRAMES, which
+    render strictly BEFORE the message -- we split str(exc) at the first `error:`
+    line and scan only that head, line-anchored to the `  * file:N, in hook`
+    frame marker. A decoy planted in the message therefore can't win (it's after
+    the split, and would need a newline + exact frame prefix anyway). The `-->`
+    pointer is a fallback for the rare no-frame error, taking the LAST match
+    (it renders after the message) and line-anchored likewise.
+
+    Residual channel (accepted, per #33): a *deliberately* malicious script can
+    still choose WHICH line it fails at (branch on secret(), fail at a computed
+    line) -- at most ~log2(#lines) attacker-chosen bits per failed request, into
+    host-side `docker logs` the workspace can't read. The message -- the
+    arbitrary-content channel -- stays closed; this is not a meaningful exfil
+    path. Returns None if no location is parseable (deadline / non-Starlark);
+    defensive -- any failure here yields None rather than propagating."""
+    try:
+        s = str(exc)
+        f = re.escape(fname)
+        # Frames render before the message; split there so a message-embedded
+        # decoy (after `error:`) is out of scope entirely.
+        head = re.split(r"(?m)^error:", s, maxsplit=1)[0]
+        frames = re.findall(rf"(?m)^\s*\*\s*{f}:(\d+), in\b", head)
+        if frames:
+            return int(frames[-1])                       # innermost frame
+        # No frame: fall back to the `-->` pointer (renders after the message, so
+        # take the last), line-anchored so a mid-message decoy needs a crafted
+        # newline+prefix inside the secret.
+        ptrs = re.findall(rf"(?m)^\s*-->\s*{f}:(\d+)", s)
+        if ptrs:
+            return int(ptrs[-1])
+    except Exception:
+        return None
+    return None
+
+
 class ScriptResponseError(Exception):
     """Raised by a scripted scheme's on_response when the hook fails, so the
     addon FAILS CLOSED (withholds the response) instead of forwarding a body that
     may still carry the real minted token. The message carries only the
-    scheme/hook name and a coarse reason -- NEVER the underlying error message,
-    which could be `fail(secret())` and leak the credential to proxy stdout."""
+    scheme/hook name and a coarse reason (type + location) -- NEVER the
+    underlying error message, which could be `fail(secret())` and leak the
+    credential to proxy stdout."""
 
 
 class ScriptedScheme:
@@ -590,8 +655,15 @@ class ScriptedScheme:
         # kind picks the primitive set; credential-bearing primitives are simply
         # absent from RULE_PRIMITIVES, so the resolver rejects a rule that
         # references one (no source scan needed).
+        # A script is loaded -> if this build can't time out a runaway hook, say
+        # so once, at load, not just in the module docstring (#33 rung-3 bundle).
+        _warn_if_no_cancellation()
+
         primitives = RULE_PRIMITIVES if kind == "rule" else PRIMITIVES
         fname = filename or f"{name}.star"
+        # The filename script errors reference; used to extract the failing line
+        # safely for the sanitized failure record (see _error_location).
+        self._fname = fname
         module = starlark.Module()
         for prim_name, fn in primitives.items():
             module.add_callable(prim_name, fn)
@@ -679,10 +751,12 @@ class ScriptedScheme:
         otherwise (the request phase) we fail closed by returning False (the
         request just proceeds un-injected).
 
-        The error is surfaced by EXCEPTION TYPE / a coarse reason ONLY -- never
-        the underlying message -- because a script could `fail(secret())` and the
-        message would carry the real credential (to stdout, or via the raised
-        error) and defeat the non-exfiltration guarantee.
+        The error is surfaced by EXCEPTION TYPE + LOCATION (file:line) ONLY --
+        never the underlying message -- because a script could `fail(secret())`
+        and the message would carry the real credential (to stdout, or via the
+        raised error) and defeat the non-exfiltration guarantee. The location is
+        extracted from the credproxy-chosen filename only (see _error_location),
+        so it adds authoring value at zero secret risk (#33 rung 3).
         """
         cancel = make_deadline_cancel(self._timeout) if _CALL_SUPPORTS_CANCEL else None
         token = _ctx_var.set(ctx)
@@ -701,16 +775,19 @@ class ScriptedScheme:
                     reason = "deadline exceeded" if timed_out else str(e)
                     raise RuntimeError(
                         f"{self.name}.{fn_name} failed: {reason}") from e
+                # Sanitized: type + safe location (never the message).
                 reason = "deadline" if timed_out else type(e).__name__
+                line = None if timed_out else _error_location(e, self._fname)
+                at = f" at {self._fname}:{line}" if line is not None else ""
                 if raise_on_error:
                     # `from None`: drop the chained cause so its (secret-bearing)
                     # message can't surface in a traceback the addon logs.
                     raise ScriptResponseError(
-                        f"{self.name}.{fn_name} failed ({reason}); "
+                        f"{self.name}.{fn_name} failed ({reason}{at}); "
                         f"response withheld") from None
                 import log
                 log.emit("script", scheme=self.name, hook=fn_name, reason=reason,
-                         outcome="failing closed")
+                         source=self._fname, line=line, outcome="failing closed")
                 return False
             return bool(result)
         finally:
