@@ -2,6 +2,21 @@
 
 credproxy runs a persistent, named workspace (container) whose outbound network passes through a per-workspace credential-injecting proxy. The proxy holds the real secrets; the workspace holds only inert placeholder tokens that are format-valid for each service. When the workspace sends a request to an approved host, the proxy substitutes the placeholder for the real credential before forwarding — so an agent or tool inside the workspace authenticates normally while the actual secret never enters the container.
 
+## How it works (two containers)
+
+A credproxy workspace is a pair of containers sharing **one network namespace**:
+
+1. A privileged **proxy** container (Linux, needs `NET_ADMIN`) that owns the netns: it installs the iptables redirect rules, runs mitmproxy (transparent TLS intercept) and a small HTTP API, and injects credentials for approved hosts.
+2. **Your** workspace container — your own image, run unprivileged and **never modified** — which joins that netns.
+
+All egress from the workspace is transparently redirected to the proxy: TLS to approved hosts is terminated (the workspace trusts the proxy's CA) and gets its placeholder swapped for the real secret; everything else is byte-passthrough. Secrets live only in the proxy and enter it only via the host CLI's authenticated config push — never in the workspace. See `docs/workspace.md` and `CLAUDE.md` for the architecture.
+
+## Requirements
+
+- **Docker** (or **rootless Podman**) — credproxy is two containers, so a container engine is required. Validated on Docker Desktop (macOS/Windows) and rootless Podman (Fedora/RHEL).
+- **Python ≥ 3.11** for the host CLI (uses stdlib `tomllib`).
+- **No installation needed for normal use.** The `bin/credproxy` and `bin/credp` shims put `cli/` on `sys.path` and run the standard-library-only CLI directly from a checkout — clone the repo and run `./bin/credproxy …`. (`uv sync` / `pip install` is only for packaging or running the test suite.)
+
 ## Quickstart
 
 ```sh
