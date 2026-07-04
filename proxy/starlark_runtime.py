@@ -151,6 +151,24 @@ def _detect_call_cancel() -> bool:
 
 _CALL_SUPPORTS_CANCEL = _detect_call_cancel()
 
+_CANCEL_WARNING_EMITTED = False
+
+
+def _warn_if_no_cancellation() -> None:
+    """If the installed starlark-pyo3 build can't cancel a runaway hook, warn ONCE
+    (the first time any script is loaded), at load rather than only in the module
+    docstring: a non-terminating script would hang the whole proxy with no
+    timeout. Tied to actual script usage so a script-free workspace stays quiet."""
+    global _CANCEL_WARNING_EMITTED
+    if _CALL_SUPPORTS_CANCEL or _CANCEL_WARNING_EMITTED:
+        return
+    _CANCEL_WARNING_EMITTED = True
+    import log
+    log.emit("main", level="warning",
+             msg="starlark build lacks check_cancelled on the call path: a "
+                 "runaway script hook cannot be timed out and would hang the "
+                 "proxy (upgrade starlark-pyo3 to a build with eval-cancel)")
+
 
 # ---- trusted primitives ------------------------------------------------------
 #
@@ -545,12 +563,40 @@ def _module_defines(source: str, name: str, primitives: dict, filename: str) -> 
         return False
 
 
+def _error_location(exc: Exception, fname: str) -> int | None:
+    """The line number of a script runtime error, extracted SAFELY.
+
+    starlark-pyo3's StarlarkError carries no structured location -- the line lives
+    only inside str(exc), which ALSO contains the (secret-bearing) error message.
+    But the location always renders as `<fname>:<line>`, and `fname` is
+    credproxy-chosen (never secret), so we match ONLY that against the structural
+    traceback markers (`--> <fname>:N` pointer, or `* <fname>:N, in <hook>`
+    frame). Every captured token is therefore `<known-file>:<digits>` -- a line
+    number, never message content -- so this adds authoring value (jump to the
+    failing line, rung 3 of #33) at zero secret risk. Returns None if no location
+    is parseable (e.g. a deadline abort, or a non-Starlark error). Defensive: any
+    failure here yields None rather than propagating."""
+    try:
+        s = str(exc)
+        f = re.escape(fname)
+        m = re.search(rf"-->\s*{f}:(\d+)", s)          # precise error pointer
+        if m:
+            return int(m.group(1))
+        frames = re.findall(rf"{f}:(\d+), in\b", s)      # call-stack frames
+        if frames:
+            return int(frames[-1])                       # innermost
+    except Exception:
+        return None
+    return None
+
+
 class ScriptResponseError(Exception):
     """Raised by a scripted scheme's on_response when the hook fails, so the
     addon FAILS CLOSED (withholds the response) instead of forwarding a body that
     may still carry the real minted token. The message carries only the
-    scheme/hook name and a coarse reason -- NEVER the underlying error message,
-    which could be `fail(secret())` and leak the credential to proxy stdout."""
+    scheme/hook name and a coarse reason (type + location) -- NEVER the
+    underlying error message, which could be `fail(secret())` and leak the
+    credential to proxy stdout."""
 
 
 class ScriptedScheme:
@@ -590,8 +636,15 @@ class ScriptedScheme:
         # kind picks the primitive set; credential-bearing primitives are simply
         # absent from RULE_PRIMITIVES, so the resolver rejects a rule that
         # references one (no source scan needed).
+        # A script is loaded -> if this build can't time out a runaway hook, say
+        # so once, at load, not just in the module docstring (#33 rung-3 bundle).
+        _warn_if_no_cancellation()
+
         primitives = RULE_PRIMITIVES if kind == "rule" else PRIMITIVES
         fname = filename or f"{name}.star"
+        # The filename script errors reference; used to extract the failing line
+        # safely for the sanitized failure record (see _error_location).
+        self._fname = fname
         module = starlark.Module()
         for prim_name, fn in primitives.items():
             module.add_callable(prim_name, fn)
@@ -679,10 +732,12 @@ class ScriptedScheme:
         otherwise (the request phase) we fail closed by returning False (the
         request just proceeds un-injected).
 
-        The error is surfaced by EXCEPTION TYPE / a coarse reason ONLY -- never
-        the underlying message -- because a script could `fail(secret())` and the
-        message would carry the real credential (to stdout, or via the raised
-        error) and defeat the non-exfiltration guarantee.
+        The error is surfaced by EXCEPTION TYPE + LOCATION (file:line) ONLY --
+        never the underlying message -- because a script could `fail(secret())`
+        and the message would carry the real credential (to stdout, or via the
+        raised error) and defeat the non-exfiltration guarantee. The location is
+        extracted from the credproxy-chosen filename only (see _error_location),
+        so it adds authoring value at zero secret risk (#33 rung 3).
         """
         cancel = make_deadline_cancel(self._timeout) if _CALL_SUPPORTS_CANCEL else None
         token = _ctx_var.set(ctx)
@@ -701,16 +756,19 @@ class ScriptedScheme:
                     reason = "deadline exceeded" if timed_out else str(e)
                     raise RuntimeError(
                         f"{self.name}.{fn_name} failed: {reason}") from e
+                # Sanitized: type + safe location (never the message).
                 reason = "deadline" if timed_out else type(e).__name__
+                line = None if timed_out else _error_location(e, self._fname)
+                at = f" at {self._fname}:{line}" if line is not None else ""
                 if raise_on_error:
                     # `from None`: drop the chained cause so its (secret-bearing)
                     # message can't surface in a traceback the addon logs.
                     raise ScriptResponseError(
-                        f"{self.name}.{fn_name} failed ({reason}); "
+                        f"{self.name}.{fn_name} failed ({reason}{at}); "
                         f"response withheld") from None
                 import log
                 log.emit("script", scheme=self.name, hook=fn_name, reason=reason,
-                         outcome="failing closed")
+                         source=self._fname, line=line, outcome="failing closed")
                 return False
             return bool(result)
         finally:

@@ -626,6 +626,9 @@ def _format_record(rec: dict) -> str:
         return f"{ts}  rule   {rec.get('rule', '')} failed: {rec.get('error', '')}"
     if kind in ("scheme", "script"):
         detail = rec.get("error") or rec.get("reason", "")
+        # Sanitized script failures carry a safe source:line location (#33 rung 3).
+        if rec.get("line") is not None:
+            detail = f"{detail} at {rec.get('source', '?')}:{rec['line']}".strip()
         return f"{ts}  {kind:<6} {rec.get('scheme', '')} " \
                f"{rec.get('phase') or rec.get('hook', '')}: {detail}".rstrip(": ")
     rest = " ".join(f"{k}={v}" for k, v in rec.items() if k not in ("ts", "kind"))

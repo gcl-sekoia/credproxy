@@ -1339,6 +1339,21 @@ def test_format_record_handles_every_kind():
     assert "weird" in _format_record({"ts": "t", "kind": "weird", "foo": "bar"})
 
 
+def test_format_record_script_failure_shows_location():
+    """A sanitized script-failure record renders its safe source:line (#33 rung 3)."""
+    from credproxy_cli.porcelain.cli import _format_record
+    line = _format_record(
+        {"ts": "t", "kind": "script", "scheme": "ovh", "hook": "on_request",
+         "reason": "StarlarkError", "source": "ovh.star", "line": 23,
+         "outcome": "failing closed"})
+    assert "ovh" in line and "on_request" in line and "ovh.star:23" in line
+    # A record without a line (e.g. a deadline) still renders cleanly.
+    no_line = _format_record(
+        {"ts": "t", "kind": "script", "scheme": "ovh", "hook": "on_request",
+         "reason": "deadline"})
+    assert "deadline" in no_line and ":None" not in no_line
+
+
 def test_rule_test_json_envelope_offline_and_live(capsys):
     """Offline and --live `rule test --json` share one envelope (method/url/live/
     matches), so a consumer parses one shape; --live just adds intercepted/phase."""

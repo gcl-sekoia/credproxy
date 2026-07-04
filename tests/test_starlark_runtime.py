@@ -11,6 +11,7 @@ threads or holds a ctx. Stateful primitives are flat, prefixed `req_`/`resp_`
 which also encodes the phase.
 """
 import base64
+import json
 import time
 from pathlib import Path
 
@@ -380,6 +381,79 @@ def test_on_response_error_message_is_sanitized(capsys):
         s.on_response(rc)
     assert "DETAIL-LEAK-12345" not in str(ei.value)
     assert "DETAIL-LEAK-12345" not in capsys.readouterr().out
+
+
+# ---- rung 3 (#33): sanitized failure carries the LINE, never the message -----
+
+
+def _last_script_record(out: str) -> dict:
+    recs = [json.loads(l[len("credproxy "):]) for l in out.splitlines()
+            if l.startswith("credproxy ")]
+    scripts = [r for r in recs if r.get("kind") == "script"]
+    assert scripts, f"no script record in: {out!r}"
+    return scripts[-1]
+
+
+def test_script_failure_record_carries_line_and_source(capsys):
+    """The sanitized on_request failure record now includes the failing line +
+    source file, so an author can jump to it -- while the message (which could be
+    `fail(secret())`) stays out of the record entirely (#33 rung 3)."""
+    src = "def on_request():\n    x = 1\n    fail(secret())\n"   # fail at line 3
+    s = ScriptedScheme("loc", src)
+    ctx, _ = _ctx(secrets={"value": "SUPER-SECRET-XYZZY"})
+    assert s.on_request(ctx) is False
+    out = capsys.readouterr().out
+    assert "SUPER-SECRET-XYZZY" not in out         # message still sanitized
+    rec = _last_script_record(out)
+    assert rec["hook"] == "on_request"
+    assert rec["source"] == "loc.star"
+    assert rec["line"] == 3
+    assert rec["outcome"] == "failing closed"
+
+
+def test_on_response_error_reports_location_not_message(capsys):
+    from starlark_runtime import ScriptResponseError
+    s = ScriptedScheme("boom", 'def on_response():\n    fail("DETAIL-LEAK")\n')
+    rc, _ = _resp_ctx()
+    with pytest.raises(ScriptResponseError) as ei:
+        s.on_response(rc)
+    msg = str(ei.value)
+    assert "DETAIL-LEAK" not in msg          # message never surfaces
+    assert "boom.star:2" in msg              # but the location does
+
+
+def test_error_location_extracts_only_filename_line_not_message():
+    """The extractor keys on the credproxy-chosen filename against the STRUCTURAL
+    `-->` pointer, so a secret whose VALUE happens to contain `<fname>:<n>` in the
+    error message can't influence the reported line -- only a real location does."""
+    from starlark_runtime import _error_location
+
+    class E(Exception):
+        pass
+    # `--> ovh.star:23` is the true location; `ovh.star:999` is planted in the
+    # (secret) message line and must be ignored.
+    s = ("Traceback (most recent call last):\n"
+         "  * ovh.star:23, in on_request\n"
+         "error: fail: SECRET-CONTAINS-ovh.star:999\n"
+         " --> ovh.star:23:5\n  |\n")
+    assert _error_location(E(s), "ovh.star") == 23
+
+
+def test_error_location_none_when_unparseable():
+    from starlark_runtime import _error_location
+    assert _error_location(Exception("no location here"), "ovh.star") is None
+
+
+def test_no_cancellation_warns_once(monkeypatch, capsys):
+    """When the starlark build can't cancel, a load-time warning fires exactly
+    once (tied to script usage), not per-script (#33 rung-3 bundle)."""
+    import starlark_runtime as sr
+    monkeypatch.setattr(sr, "_CALL_SUPPORTS_CANCEL", False)
+    monkeypatch.setattr(sr, "_CANCEL_WARNING_EMITTED", False)
+    sr._warn_if_no_cancellation()
+    sr._warn_if_no_cancellation()
+    out = capsys.readouterr().out
+    assert out.count("cannot be timed out") == 1
 
 
 def test_primitive_outside_hook_raises_not_silent():
