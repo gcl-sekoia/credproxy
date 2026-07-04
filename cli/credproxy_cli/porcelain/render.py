@@ -403,6 +403,17 @@ class Renderer:
         for m in matches:
             print(self._rule_match_line(m))
 
+    def doctor(self, checks: list[dict]) -> None:
+        for c in checks:
+            mark = "✓" if c["ok"] else "✗"      # ok / fail
+            line = f"{mark} {c['message']}"
+            if not c["ok"] and c.get("hint"):
+                line += f"  → {c['hint']}"
+            print(line)
+        failed = sum(1 for c in checks if not c["ok"])
+        say(f"{failed} of {len(checks)} checks FAILED" if failed
+            else f"all {len(checks)} checks passed")
+
     def rule_test_live(self, method: str, url: str, result: dict) -> None:
         matches = result.get("matches", [])
         passthrough = "" if result.get("intercepted") else \
@@ -593,6 +604,9 @@ class JsonRenderer(Renderer):
     def rule_test(self, method: str, url: str, matches: list[dict]) -> None:
         self._emit({"method": method, "url": url, "live": False,
                     "matches": matches})
+
+    def doctor(self, checks: list[dict]) -> None:
+        self._emit(checks)
 
     def rule_test_live(self, method: str, url: str, result: dict) -> None:
         # Same envelope as offline (`method`/`url`/`live`/`matches`) so a consumer
