@@ -94,32 +94,60 @@ That installs the proxy CA system-wide and writes env vars to
 /etc/profile.d/credproxy.sh. HTTPS to configured hosts is intercepted;
 everything else is byte-passthrough.
 
-For intercepted hosts, the proxy injects credentials automatically by
-substituting placeholder tokens. Fetch the current bindings from /setup
-to find out which placeholders to use and where:
+For intercepted hosts, the proxy injects credentials automatically. Fetch the
+active bindings -- what to present, and where -- from /setup:
 
     curl -s http://proxy.local/setup | jq .bindings
 
 Each binding entry has:
   name        -- a handle for this credential (e.g. "github-api")
-  placeholder -- the inert sentinel to use as the credential value (may be null
-                 for sign-family schemes that need no static placeholder)
+  placeholder -- the inert sentinel to send as the credential value. null for
+                 sign-family schemes (sigv4) that compute auth per request.
   env         -- suggested env var name to export the placeholder as (may be null)
-  scheme      -- how the proxy injects: bearer/basic/body (substitute), ...
+  scheme      -- how the proxy injects: bearer | basic | body (swap a
+                 placeholder), sigv4 (re-sign), oauth2-reseal, or script
   params      -- scheme-specific settings (e.g. {"header": "Authorization"})
-  hosts       -- the hostnames for which this binding is active
+  hosts       -- hostnames this binding covers (may be GLOBS -- see below)
 
-Example: if a binding has env "GITHUB_TOKEN" and placeholder "ghp_xxx...",
-set GITHUB_TOKEN=ghp_xxx... in your environment. The proxy will substitute
-the real credential on requests to the binding's hosts.
+What YOU must do, per scheme:
+  bearer/basic/body  Send the `placeholder` where the credential normally goes
+                     (bearer: the header in params.header, default Authorization;
+                     basic: as the username or password of HTTP Basic; body:
+                     anywhere in the request body). The proxy swaps in the real
+                     value. Example: env "GITHUB_TOKEN", placeholder "ghp_xxx..."
+                     -> export GITHUB_TOKEN=ghp_xxx... and use it as usual.
+  sigv4              No placeholder. Configure your AWS SDK with ANY dummy STATIC
+                     credentials (an access key id + secret) and NO session
+                     token, and sign normally; the proxy re-signs with the real
+                     key. Do NOT use temporary/STS credentials (a session token)
+                     -- they pass through unsigned and get rejected.
+  oauth2-reseal      The `placeholder` is your client_secret for the TOKEN
+                     endpoint (send it in the token request body). The proxy
+                     authenticates, then returns a placeholder in place of the
+                     minted access token -- present THAT on the API hosts. The
+                     real token never enters the sandbox.
+  script             A custom injector: present the `placeholder` as usual. Some
+                     scripts need it in a SPECIFIC header that /setup does not
+                     disclose -- if a script binding won't authenticate, ask the
+                     operator where its placeholder must ride.
 
-You will never see the real credential value -- the proxy holds it.
-A request to an intercepted host with no matching placeholder is forwarded
-as-is and logged.
+You never see a real credential value -- the proxy holds it. A request to an
+intercepted host whose placeholder doesn't match is forwarded AS-IS: if you get
+an upstream 401 while sending a placeholder-shaped token, the binding didn't fire
+(wrong header, missing placeholder). The reason is in the proxy log -- ask the
+operator to check `credproxy workspace NAME logs`.
 
-Responses on intercepted hosts may be modified or refused by policy; listed
-rules (in /setup's `rules` array) are not necessarily exhaustive. A refused
-request may return a synthetic status/body rather than the upstream's.
+Responses on intercepted hosts may be modified or refused by policy; the rules in
+/setup's `rules` array are not necessarily exhaustive. A refused request returns
+a synthetic status/body rather than the upstream's.
+
+Network limits (invisible from inside the sandbox -- suspect these if a tool
+hangs or a host is unreachable):
+  - IPv6 is dropped entirely; use IPv4.
+  - HTTP/3 / QUIC (UDP port 443) is dropped to force TCP fallback; a QUIC-pinned
+    tool that won't fall back will hang. Disable HTTP/3.
+  - `intercept_hosts` in /setup may contain GLOB patterns (e.g. *.amazonaws.com)
+    where `*` spans dots -- match accordingly, don't compare literally.
 
 If proxy.local does not resolve, use 169.254.1.1 directly.
 

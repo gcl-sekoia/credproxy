@@ -526,3 +526,13 @@ async def test_rule_test_endpoint_requires_token(aiohttp_client, app):
     resp = await client.post(
         "/admin/rule-test", json={"method": "GET", "url": "https://x.example.com/"})
     assert resp.status == 401
+
+
+async def test_llms_txt_covers_schemes_and_network_limits(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    resp = await client.get("/llms.txt")
+    assert resp.status == 200
+    txt = await resp.text()
+    for anchor in ("sigv4", "oauth2-reseal", "script", "session token",
+                   "IPv6", "HTTP/3", "GLOB", "credproxy workspace NAME logs"):
+        assert anchor in txt, anchor
