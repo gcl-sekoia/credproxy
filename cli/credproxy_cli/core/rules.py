@@ -15,6 +15,7 @@ proxy/config.py so a bad rule fails at `rule add`, not only at push. The matcher
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, replace
 from typing import Callable
@@ -142,7 +143,14 @@ def _check_json_clean(value, source: str, where: str) -> None:
     elif isinstance(value, list):
         for i, v in enumerate(value):
             _check_json_clean(v, source, f"{where}[{i}]")
-    elif value is None or isinstance(value, (str, bool, int, float)):
+    elif isinstance(value, float):
+        # TOML has nan/inf literals; JSON has no way to carry them (json.dumps
+        # emits bare `NaN`/`Infinity`, which strict parsers -- and a future Go CLI
+        # -- reject). Fail here with the path, not silently on the wire POST.
+        if not math.isfinite(value):
+            raise ConfigError(f"{source}: {where} must be a finite number "
+                              f"(nan/inf are not JSON)")
+    elif value is None or isinstance(value, (str, bool, int)):
         return  # bool is an int subclass; both are JSON-clean
     else:
         raise ConfigError(

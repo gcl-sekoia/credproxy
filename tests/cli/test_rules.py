@@ -391,6 +391,33 @@ def test_wire_entry_includes_script_params():
     assert "params" not in e2
 
 
+def test_parse_rule_entry_rejects_non_finite_float_params():
+    """nan/inf are valid TOML floats but not JSON -- reject them (else json.dumps
+    emits bare NaN/Infinity that strict parsers, incl. a future Go CLI, refuse)."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.rules import _parse_rule_entry
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ConfigError, match="finite"):
+            _parse_rule_entry({"action": "script", "hosts": ["api.x.com"],
+                               "script": "g", "params": {"x": bad}}, "src", "rule")
+    # a finite float is fine (regression: don't over-reject).
+    r = _parse_rule_entry({"action": "script", "hosts": ["api.x.com"],
+                           "script": "g", "params": {"ratio": 0.5}}, "src", "rule")
+    assert r.params == {"ratio": 0.5}
+
+
+def test_rule_row_includes_params():
+    """`rule list`/`inspect`/`rule_added` rows carry params (operator-plaintext),
+    so the docs' "shown in rule list" claim is true -- #36 review."""
+    from credproxy_cli.core.rules import Rule
+    from credproxy_cli.porcelain.cli import _rule_row
+    row = _rule_row(Rule(name="g", hosts=("h",), action="script", script="s",
+                         params={"allow": ["/a"]}))
+    assert row["params"] == {"allow": ["/a"]}
+    # a params-less rule still has the key, null (present-but-empty).
+    assert _rule_row(Rule(name="b", hosts=("h",), action="block"))["params"] is None
+
+
 def test_remove_rule_with_child_table(xdg, workspaces_dir):
     # A hand-written `[rule.headers]` child sub-table must be removed WITH its
     # parent rule, not orphaned (which would corrupt the TOML).
