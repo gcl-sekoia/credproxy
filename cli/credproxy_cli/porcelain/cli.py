@@ -52,8 +52,8 @@ from .render import fail, say
 
 # Workspace-scoped verbs (the `workspace NAME <verb>` tail).
 _WS_VERBS = {
-    "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
-    "config", "logs", "binding", "bind-dir", "mount", "rule",
+    "enter", "exec", "edit", "start", "stop", "recreate", "delete", "apply",
+    "inspect", "config", "logs", "binding", "bind-dir", "mount", "rule",
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
@@ -341,6 +341,25 @@ def do_enter(ctx: Ctx, name: str | None, trailing: list[str],
     # has the loaded config.
     exit_code = lifecycle.enter_workspace(
         ws, trailing, notify=say, user_override=user_override, push=push)
+    sys.exit(exit_code)
+
+
+def do_exec(ctx: Ctx, name: str | None, trailing: list[str],
+            login: bool = False, push: bool = False) -> None:
+    """One-shot: run `-- CMD...` in the workspace and propagate its exit code.
+    The non-interactive sibling of `enter` -- no session pidfile / auto-stop, so
+    it's safe to fire many times from a script."""
+    if not trailing:
+        fail("`exec` needs a command: `credproxy workspace NAME exec -- CMD...` "
+             "(for an interactive shell use `enter`)")
+    ws = _resolve_ws(ctx, name)
+    exit_code = lifecycle.exec_workspace(
+        ws, trailing, notify=say, login=login, push=push)
+    if ctx.json:
+        import json
+        # The command's own stdout/stderr already streamed through; this final
+        # line carries the structured result (the exit code).
+        print(json.dumps({"exit": exit_code}))
     sys.exit(exit_code)
 
 
@@ -1393,6 +1412,11 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     # the current config -- e.g. after rotating a secret in place. Default skips
     # the push when the proxy's config fingerprint already matches.
     p_enter.add_argument("--push", dest="enter_push", action="store_true")
+    p_exec = sub.add_parser("exec")
+    # Wrap the command in a bash login shell so /etc/profile.d + the login rc
+    # load (mise shims, CA-trust env). Opt-in (needs bash); default is raw argv.
+    p_exec.add_argument("--login", dest="exec_login", action="store_true")
+    p_exec.add_argument("--push", dest="exec_push", action="store_true")
     sub.add_parser("edit")
     sub.add_parser("start")
     sub.add_parser("stop")
@@ -1461,6 +1485,7 @@ _STRICT_HELP = (
     "  credproxy info                      (global config & state: paths, profile, registries)\n"
     "  credproxy version                   (or: credproxy --version)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
+    "  credproxy workspace NAME exec [--login] -- CMD...   (one-shot; scriptable)\n"
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
     "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credproxy workspace NAME binding add|remove|list|test ...\n"
@@ -1666,6 +1691,17 @@ _VERB_HELP = {
         "                proxy already has the current config -- e.g. after\n"
         "                rotating a secret in place. Default skips the redundant push."
     ),
+    "exec": (
+        "credproxy workspace NAME exec [--login] [--push] -- CMD... -- run a\n"
+        "one-shot command in the workspace (starting it if needed) and propagate\n"
+        "its exit code. The non-interactive sibling of `enter`: NO session pidfile\n"
+        "or auto-stop, so it's safe to fire many times from a script/agent.\n"
+        "  --login  wrap CMD in a bash login shell so /etc/profile.d + the login\n"
+        "           rc load (mise shims, CA-trust env). Opt-in; needs bash in the\n"
+        "           image. Default runs CMD as raw argv (predictable, no shell).\n"
+        "  --push   force a config re-push (as `enter --push`).\n"
+        "  --json   emit {\"exit\": N} after the command's own streamed output."
+    ),
     "start": (
         "credproxy workspace NAME start -- (re)start the proxy, wait for health,\n"
         "push the resolved bindings, then (re)start the workspace. Creates the\n"
@@ -1848,6 +1884,8 @@ def _run_ws_verb(
     verb = a.verb
     if verb == "enter":
         do_enter(ctx, name, trailing, a.enter_user, a.enter_push)
+    elif verb == "exec":
+        do_exec(ctx, name, trailing, a.exec_login, a.exec_push)
     elif verb == "edit":
         do_edit(ctx, name)
     elif verb == "start":
@@ -1922,8 +1960,8 @@ def _create_dir(a: argparse.Namespace) -> str | None:
 # independent behavior. They simply translate to the workspace dispatcher.
 
 _ALIAS_TO_WS_VERB = {
-    "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
-    "config", "logs", "binding", "bind-dir", "mount", "rule",
+    "enter", "exec", "edit", "start", "stop", "recreate", "delete", "apply",
+    "inspect", "config", "logs", "binding", "bind-dir", "mount", "rule",
 }
 
 

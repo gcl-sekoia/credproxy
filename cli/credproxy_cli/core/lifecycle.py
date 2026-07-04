@@ -1489,6 +1489,53 @@ def enter_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop,
     return exit_code
 
 
+def exec_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop,
+                   login: bool = False, push: bool = False) -> int:
+    """One-shot: start the workspace if needed, run `cmd` inside it, return its
+    exit code. Unlike `enter`, writes NO session pidfile and never auto-stops --
+    a scripted caller firing many quick commands gets no start/stop churn or
+    surprising teardown. Default runs `cmd` as RAW argv (predictable, no quoting/
+    injection surprises, no /bin/sh dependency -- works on a minimal image);
+    `login=True` wraps it in a bash login shell so /etc/profile.d + the user's
+    login rc load (mise shims, CA-trust env). The lock is held ONLY around start,
+    not the (possibly long) command."""
+    import sys
+    with ws.lock():
+        start_workspace(ws, notify, force_push=push)
+        cfg = load_config(ws)
+        exec_cmd = _exec_cmd(cfg, ws.ws_container, cmd, login=login,
+                             isatty=sys.stdin.isatty())
+    return subprocess.run(exec_cmd, check=False).returncode
+
+
+def _exec_cmd(cfg: dict, container: str, cmd: list[str], *, login: bool,
+             isatty: bool) -> list[str]:
+    """Assemble the `docker exec` argv for `exec`. Same workdir/user/exec_flags
+    honouring as enter (docker last-wins ordering), then the command. By default
+    the command is RAW argv (no shell -- predictable, works with no /bin/sh);
+    `login=True` wraps it in `bash -lc` so the login rc loads (opt-in: needs bash
+    in the image). `--interactive` always; `--tty` only when stdin is a TTY, so a
+    piped one-shot isn't given a pseudo-terminal."""
+    out = ["docker", "exec"]
+    workdir = cfg.get("workdir") or cfg.get("home")
+    if workdir:
+        out += ["--workdir", workdir]
+    if cfg.get("user"):
+        out += ["-u", cfg["user"]]
+    out += cfg.get("exec_flags") or []
+    out += ["--interactive=true", f"--tty={'true' if isatty else 'false'}",
+            "--detach=false"]
+    out.append(container)
+    if login:
+        # A login shell so /etc/profile.d + the login rc load. `exec "$@"`
+        # replaces the shim in place (no extra PID; signals/exit code/argv pass
+        # through); $0 is a label shown in errors.
+        out += ["bash", "-lc", 'exec "$@"', "credproxy-exec", *cmd]
+    else:
+        out += list(cmd)
+    return out
+
+
 def _maybe_auto_stop(ws: Workspace, our_pid: int, notify: Notify) -> None:
     """Stop the workspace if auto_stop is enabled and no other sessions live."""
     import tomllib

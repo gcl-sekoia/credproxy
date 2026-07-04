@@ -1349,3 +1349,19 @@ def test_version_command_and_flag(xdg):
         assert ec == 0 and __version__ in out
     ec, out, err = _run(["--json", "version"])
     assert ec == 0 and json.loads(out) == {"credproxy": __version__}
+
+
+def test_exec_empty_command_fails(xdg, workspaces_dir):
+    _mkws(workspaces_dir)
+    ec, out, err = _run(["workspace", "ws", "exec"])
+    assert ec != 0 and "needs a command" in err
+
+
+def test_exec_json_emits_exit_and_propagates_code(xdg, workspaces_dir, monkeypatch):
+    import json
+    _mkws(workspaces_dir)
+    monkeypatch.setattr(
+        "credproxy_cli.porcelain.cli.lifecycle.exec_workspace",
+        lambda ws, cmd, notify=None, login=False, push=False: 7)
+    ec, out, err = _run(["--json", "workspace", "ws", "exec", "--", "false"])
+    assert ec == 7 and json.loads(out) == {"exit": 7}
