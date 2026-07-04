@@ -68,6 +68,14 @@ class HostnameLogger:
         # admin.AppState; in tests, a SimpleNamespace.
         self._state = state
 
+    def running(self) -> None:
+        # mitmproxy fires `running` once the transparent listener is bound and
+        # serving. Purely a boot-visibility log line: `/health` observes the
+        # listener live by probing the port (bootstrap._listener_bound), so it
+        # doesn't rely on this hook -- which keeps readiness truthful even if a
+        # future mitmproxy changes hook ordering or the server later dies (#23).
+        log.emit("main", msg="capture-ready (mitmproxy listener bound)")
+
     def tls_clienthello(self, data: tls.ClientHelloData) -> None:
         sni = data.client_hello.sni
         # The earliest, highest-blast-radius hook: it runs user-influenced glob

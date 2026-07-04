@@ -1444,3 +1444,36 @@ def test_add_managed_volume_home_uses_sugar(xdg, workspaces_dir):
                                  readonly=False, preserve=False)
     raw = tomllib.loads(ws.config_path.read_text())
     assert raw["home"] == "/home/vscode" and "mounts" not in raw
+
+
+# ---- reload_proxy waits for capture-readiness (#23 review) -------------------
+
+
+def test_reload_proxy_waits_for_ready(monkeypatch, ws_factory):
+    """After SIGHUP the re-exec'd proxy starts un-ready (/health 503 until the
+    mitmproxy listener rebinds), so `reload` must wait on /health -- else a caller
+    hits the box during the reload's un-ready window."""
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.imageenv import ImageEnv
+
+    ws = ws_factory("r")
+    events = []
+    monkeypatch.setattr(lifecycle.docker, "container_status", lambda n: "running")
+    monkeypatch.setattr(lifecycle.docker, "docker",
+                        lambda args, **k: events.append(("docker", args)))
+    monkeypatch.setattr(lifecycle.ImageEnv, "load",
+                        classmethod(lambda cls, image=None: ImageEnv(
+                            http_port=39998, tmpfs="/t", token="/tok",
+                            source="/opt/proxy", mitmproxy_uid=31337)))
+    monkeypatch.setattr(lifecycle.docker, "resolve_host_port",
+                        lambda c, p: 54321)
+    monkeypatch.setattr(lifecycle, "wait_for_ready",
+                        lambda port: events.append(("wait", port)))
+
+    lifecycle.reload_proxy(ws)
+
+    # SIGHUP delivered, THEN a readiness wait on the resolved host port.
+    assert ("docker", ["kill", "--signal=HUP", ws.proxy_container]) in events
+    assert ("wait", 54321) in events
+    assert events.index(("wait", 54321)) > events.index(
+        ("docker", ["kill", "--signal=HUP", ws.proxy_container]))

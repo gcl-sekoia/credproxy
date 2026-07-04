@@ -16,14 +16,30 @@ def _xform(placeholder, real, *, header="Authorization", name="b"):
                      placeholder, {"value": real})
 
 
+def _async_return(value):
+    """A monkeypatch stand-in for the async `_listener_bound` probe."""
+    async def _f(*a, **k):
+        return value
+    return _f
+
+
 @pytest.fixture
 def state(monkeypatch, tmp_path):
     """Fresh AppState; TOKEN_PATH/CONFIG_PATH redirected to tmp_path,
-    token file pre-populated so admin_config's per-call read succeeds."""
+    token file pre-populated so admin_config's per-call read succeeds.
+
+    Makes `/health` capture-ready by default -- the mitmproxy-listener probe
+    returns True and the CA exists -- so the guard/route tests get 200; the
+    readiness tests below override one or the other. (The real probe has its own
+    unit test.)"""
     token_path = tmp_path / "auth.token"
     monkeypatch.setattr(admin, "TOKEN_PATH", token_path)
     monkeypatch.setattr(admin, "CONFIG_PATH", tmp_path / "config.json")
     token_path.write_text("established")
+    ca = tmp_path / "mitmproxy-ca-cert.pem"
+    ca.write_text("-----BEGIN CERTIFICATE-----\n")
+    monkeypatch.setattr(bootstrap, "CA_CERT_PATH", ca)
+    monkeypatch.setattr(bootstrap, "_listener_bound", _async_return(True))
     return admin.AppState()
 
 
@@ -291,11 +307,75 @@ async def test_sfs_missing_allowed(aiohttp_client, app):
 # ---- bootstrap routes on the merged listener ----
 
 async def test_health_route(aiohttp_client, app):
+    """Capture-ready (fixture default): 200, ok, no `pending`."""
     client = await aiohttp_client(app)
     resp = await client.get("/health")
     assert resp.status == 200
     body = await resp.json()
     assert body["ok"] is True
+    assert "pending" not in body
+
+
+async def test_health_503_when_listener_not_bound(aiohttp_client, app, monkeypatch):
+    """Liveness != readiness: the HTTP listener answers, but while the mitmproxy
+    listener isn't accepting, `/health` reports 503 with the listener pending (#23)."""
+    monkeypatch.setattr(bootstrap, "_listener_bound", _async_return(False))
+    client = await aiohttp_client(app)
+    resp = await client.get("/health")
+    assert resp.status == 503
+    body = await resp.json()
+    assert body["ok"] is False
+    assert body["pending"] == ["mitmproxy-listener"]
+
+
+async def test_health_503_before_ca_generated(aiohttp_client, app, monkeypatch, tmp_path):
+    """Listener up but CA not yet written: 503 with `ca-cert` pending -- the
+    exact window #23 names (ready reported before the CA exists)."""
+    monkeypatch.setattr(bootstrap, "CA_CERT_PATH", tmp_path / "absent-ca.pem")
+    client = await aiohttp_client(app)
+    resp = await client.get("/health")
+    assert resp.status == 503
+    body = await resp.json()
+    assert body["pending"] == ["ca-cert"]
+
+
+async def test_health_503_lists_all_pending_at_boot(aiohttp_client, app, monkeypatch, tmp_path):
+    """Cold start -- neither listener nor CA up: both pending, most-fundamental
+    (listener) first."""
+    monkeypatch.setattr(bootstrap, "_listener_bound", _async_return(False))
+    monkeypatch.setattr(bootstrap, "CA_CERT_PATH", tmp_path / "absent-ca.pem")
+    client = await aiohttp_client(app)
+    resp = await client.get("/health")
+    assert resp.status == 503
+    assert (await resp.json())["pending"] == ["mitmproxy-listener", "ca-cert"]
+
+
+async def test_listener_bound_probe_observes_real_socket():
+    """The probe `/health` relies on: True against a live listener, False against
+    a closed port. This is the version-proof replacement for trusting an addon
+    flag -- so it gets a real-socket test."""
+    import socket
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    host, port = srv.getsockname()
+    try:
+        assert await bootstrap._listener_bound(host, port) is True
+    finally:
+        srv.close()
+    # Port is closed now -> connect refused -> not bound.
+    assert await bootstrap._listener_bound(host, port) is False
+
+
+def test_running_hook_is_log_only_no_state():
+    """The addon's `running` hook is now boot-visibility logging only -- it must
+    NOT touch AppState (readiness is observed live via the port probe), and
+    AppState carries no capture-ready field to go stale."""
+    import addon
+    st = admin.AppState()
+    assert not hasattr(st, "capture_ready")
+    addon.HostnameLogger(st).running()          # must not raise / set anything
+    assert not hasattr(st, "capture_ready")
 
 
 async def test_index_route_map(aiohttp_client, app):
