@@ -53,7 +53,7 @@ from .render import fail, say
 # Workspace-scoped verbs (the `workspace NAME <verb>` tail).
 _WS_VERBS = {
     "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
-    "config", "logs", "binding", "bind-dir", "mount",
+    "config", "logs", "binding", "bind-dir", "mount", "rule",
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
@@ -365,12 +365,15 @@ def do_edit(ctx: Ctx, name: str | None) -> None:
         fail(f"editor exited with status {rc}; config left as-is")
 
     # Post-edit validation: report problems but never revert -- it's the
-    # user's file. load_config/load_bindings parse and validate without writing.
+    # user's file. load_config/load_bindings/load_rules parse and validate
+    # without writing; `[[rule]]` is part of the file this edits, so validate it.
     from ..core import bindings as core_bindings
     from ..core import config as core_config
+    from ..core import rules as core_rules
     try:
         core_config.load_config(ws)
         core_bindings.load_bindings(ws)
+        core_rules.load_rules(ws)
     except CredproxyError as e:
         say(f"warning: config is invalid — {e}")
         say("fix it before `start`/`apply`, or the workspace won't update cleanly.")
@@ -468,6 +471,18 @@ def do_inspect(ctx: Ctx, name: str | None) -> None:
             }
             for b in data.bindings
         ],
+        "rules": [
+            {
+                "name": r.name,
+                "hosts": list(r.hosts),
+                "methods": list(r.methods) if r.methods else None,
+                "path": r.path,
+                "action": r.action,
+                "visible": r.effective_visible,
+                "script": r.script,
+            }
+            for r in data.rules
+        ],
         "drift": {
             "in_sync": data.drift.in_sync,
             "changes": [
@@ -486,34 +501,63 @@ def do_inspect(ctx: Ctx, name: str | None) -> None:
     })
 
 
-def do_logs(ctx: Ctx, name: str | None) -> None:
+def do_logs(ctx: Ctx, name: str | None, audit: bool = False) -> None:
     ws = _resolve_ws(ctx, name)
-    if ctx.json:
-        _logs_json(ws)
-        return
-    os.execvp("docker", ["docker", "logs", "-f", ws.proxy_container])
+    _logs_stream(ws, as_json=ctx.json, audit_only=audit)
 
 
-def _logs_json(ws: Workspace) -> None:
-    """JSON-lines log streaming: one `{"line": ...}` object per log line.
-    The proxy's lines aren't structured yet, so we just wrap them."""
+# The proxy prefixes every structured record with this (see proxy/log.py).
+_LOG_PREFIX = "credproxy "
+
+
+def _parse_credproxy_line(line: str) -> dict | None:
+    """Parse one `docker logs` line into a proxy structured record, or None if it
+    isn't one. Requires the `credproxy ` prefix at the START of the line (not
+    anywhere in it) plus a JSON object carrying a `kind`. Because the proxy
+    JSON-encodes every untrusted value (a rule/scheme error message that can echo
+    workspace input), such content is escaped inside the record and can NEVER
+    spill a forged `credproxy {...}` line of its own -- the substring-forgery the
+    old text stream allowed is structurally impossible."""
+    import json
+    if not line.startswith(_LOG_PREFIX):
+        return None
+    try:
+        rec = json.loads(line[len(_LOG_PREFIX):])
+    except json.JSONDecodeError:
+        return None
+    return rec if isinstance(rec, dict) and "kind" in rec else None
+
+
+def _logs_stream(ws: Workspace, as_json: bool, audit_only: bool) -> None:
+    """Tail `docker logs -f` and reformat the proxy's structured `credproxy {json}`
+    records; mitmproxy's own termlog passes through verbatim (never mistaken for
+    a proxy record). Default: pretty one line per record. `--json`: the raw
+    records as JSON-lines (a non-proxy line wraps as `{"kind":"raw","line":...}`).
+    `--audit`: only `kind == "audit"` records. docker's log driver is the durable
+    store (survives stop/start)."""
     import json
     import subprocess
 
-    # Merge stderr into the stream so docker daemon errors (e.g. "No such
-    # container") surface as JSON lines instead of bare text, and so a startup
-    # failure is visible to a --json consumer.
     proc = subprocess.Popen(
         ["docker", "logs", "-f", ws.proxy_container],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     interrupted = False
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
-            print(json.dumps({"line": line.rstrip("\n")}), flush=True)
+            rec = _parse_credproxy_line(line)
+            if audit_only:
+                if rec is not None and rec.get("kind") == "audit":
+                    print(json.dumps(rec) if as_json else _format_record(rec),
+                          flush=True)
+            elif rec is not None:
+                print(json.dumps(rec) if as_json else _format_record(rec),
+                      flush=True)
+            elif as_json:      # non-proxy line (mitmproxy etc.)
+                print(json.dumps({"kind": "raw", "line": line.rstrip("\n")}),
+                      flush=True)
+            else:
+                print(line, end="", flush=True)   # pass mitmproxy output through
     except KeyboardInterrupt:
         interrupted = True
     finally:
@@ -523,6 +567,36 @@ def _logs_json(ws: Workspace) -> None:
     # container doesn't exist; propagate it rather than reporting success.
     if not interrupted and rc:
         fail(f"docker logs exited with status {rc}")
+
+
+def _format_record(rec: dict) -> str:
+    """One-line human rendering of a proxy structured record (log.py). Tolerant of
+    missing keys and unknown/future kinds."""
+    ts = rec.get("ts", "")
+    kind = rec.get("kind", "?")
+    where = f"{rec.get('method', '')} {rec.get('host', '')}" \
+            f"{rec.get('path', '')}".strip()
+    if kind == "audit":
+        subj = rec.get("binding") or rec.get("rule") or ""
+        detail = " ".join(p for p in (subj and f"'{subj}'", rec.get("outcome", ""))
+                          if p)
+        return f"{ts}  audit {rec.get('event', '?'):<9} {where}  {detail}".rstrip()
+    if kind in ("http", "api"):
+        marks = rec.get("marks")
+        return f"{ts}  {kind:<6} {where}" \
+               f"{' (' + ' '.join(marks) + ')' if marks else ''}".rstrip()
+    if kind == "sni":
+        err = f" -- {rec['error']}" if rec.get("error") else ""
+        return f"{ts}  sni    {rec.get('sni') or '<no-sni>'} " \
+               f"({rec.get('decision', '?')}){err}"
+    if kind == "rule-error":
+        return f"{ts}  rule   {rec.get('rule', '')} failed: {rec.get('error', '')}"
+    if kind in ("scheme", "script"):
+        detail = rec.get("error") or rec.get("reason", "")
+        return f"{ts}  {kind:<6} {rec.get('scheme', '')} " \
+               f"{rec.get('phase') or rec.get('hook', '')}: {detail}".rstrip(": ")
+    rest = " ".join(f"{k}={v}" for k, v in rec.items() if k not in ("ts", "kind"))
+    return f"{ts}  {kind:<6} {rest}".rstrip()
 
 
 # ---- binding commands --------------------------------------------------------
@@ -714,7 +788,10 @@ def do_binding_list(ctx: Ctx, name: str | None) -> None:
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
-    bindings = core_bindings.materialize_bindings(ws, notify=say)
+    # Hold the lock: materialize may write back generated names/placeholders, so
+    # a concurrent add/remove must not race this read-modify-write.
+    with ws.lock():
+        bindings = core_bindings.materialize_bindings(ws, notify=say)
     rows = [
         {
             "name": b.name,
@@ -741,7 +818,10 @@ def do_binding_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
-    bindings = core_bindings.materialize_bindings(ws, notify=say)
+    # Hold the lock only for the materializing read-modify-write; the provider
+    # fetch below needs no lock (and can be slow).
+    with ws.lock():
+        bindings = core_bindings.materialize_bindings(ws, notify=say)
     if a.binding_name is not None:
         bindings = [b for b in bindings if b.name == a.binding_name]
         if not bindings:
@@ -806,6 +886,172 @@ def _do_binding_test_adhoc(ctx: Ctx, name: str | None, a: argparse.Namespace) ->
     }])
     if not r.ok:
         sys.exit(1)
+
+
+# ---- rule commands -----------------------------------------------------------
+
+
+def _parse_kv(values: list[str] | None, flag: str) -> dict | None:
+    """Parse repeated `K=V` flags into a dict (order-preserving). None if unset."""
+    if not values:
+        return None
+    out: dict[str, str] = {}
+    for v in values:
+        key, sep, val = v.partition("=")
+        if not sep or not key:
+            fail(f"{flag} '{v}' must be K=V")
+        out[key] = val
+    return out
+
+
+def _rule_row(rule) -> dict:
+    """Workspace-safe rule summary for rendering (no secret -- rules have none)."""
+    return {
+        "name": rule.name,
+        "hosts": list(rule.hosts),
+        "methods": list(rule.methods) if rule.methods else None,
+        "path": rule.path,
+        "action": rule.action,
+        "visible": rule.effective_visible,
+        "script": rule.script,
+        "status": rule.status,
+    }
+
+
+def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    from dataclasses import replace as _replace
+
+    from ..core import rules as core_rules
+
+    action = a.rule_action                   # the subcommand: block/respond/rewrite/script
+    if not a.host:
+        fail("`rule add` needs at least one --host")
+
+    # Each action's subparser owns exactly its own flags (argparse rejects the
+    # rest), so we just marshal the flags that are present into the `[[rule]]`
+    # entry shape and route it through the ONE field validator (_parse_rule_entry)
+    # -- the same one the load path uses. Missing/malformed action params (a
+    # respond without --status, an empty rewrite) fail there, uniformly.
+    entry: dict = {"action": action, "hosts": list(a.host)}
+    if a.method:
+        entry["methods"] = list(a.method)
+    if a.path is not None:
+        entry["path"] = a.path
+    if a.rule_visible is not None:
+        entry["visible"] = a.rule_visible
+    if action == "block":
+        if a.status is not None:
+            entry["status"] = a.status
+    elif action == "respond":
+        if a.status is not None:
+            entry["status"] = a.status       # _parse_rule_entry requires it
+        if a.body is not None:
+            entry["body"] = a.body
+        if a.header:
+            entry["headers"] = _parse_kv(a.header, "--header")
+    elif action == "rewrite":
+        if a.header:
+            entry["set_headers"] = _parse_kv(a.header, "--header")
+        if a.remove_header:
+            entry["remove_headers"] = list(a.remove_header)
+        if a.resp_header:
+            entry["resp_set_headers"] = _parse_kv(a.resp_header, "--resp-header")
+        if a.resp_remove_header:
+            entry["resp_remove_headers"] = list(a.resp_remove_header)
+    elif action == "script":
+        if a.script is not None:
+            entry["script"] = a.script
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+
+    with ws.lock():                          # atomic read-validate-write
+        existing = core_rules.load_rules(ws)
+        taken = {r.name for r in existing}
+        if a.rule_name:
+            entry["name"] = a.rule_name
+        rule = core_rules._parse_rule_entry(entry, str(ws.config_path), "rule add")
+        if rule.name is None:
+            rule = _replace(rule, name=core_rules._auto_name(rule, taken))
+        if rule.name in taken:
+            fail(f"rule name '{rule.name}' already exists in workspace '{ws.name}'")
+        core_rules.validate(existing + [rule], str(ws.config_path))
+        core_rules.append_rule(ws, rule)
+
+    render.OUT.rule_added(rule.name, ws.name, _rule_row(rule))
+
+
+def do_rule_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    from ..core import rules as core_rules
+
+    implicit = name is None
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    _confirm_destructive(ctx, ws, implicit, "remove rule from")
+    with ws.lock():
+        core_rules.remove_rule(ws, a.rule_name)
+    render.OUT.rule_removed(a.rule_name, ws.name)
+
+
+def do_rule_list(ctx: Ctx, name: str | None) -> None:
+    from ..core import rules as core_rules
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    # Hold the lock: materialize may write back generated names, so a concurrent
+    # add/remove must not race this read-modify-write.
+    with ws.lock():
+        rules = core_rules.materialize_rules(ws, notify=say)
+    render.OUT.rule_list(ws.name, [_rule_row(r) for r in rules])
+
+
+def do_rule_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    from urllib.parse import urlsplit
+
+    from ..core import rules as core_rules
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+
+    if getattr(a, "rule_live", False):
+        _do_rule_test_live(ctx, ws, a)
+        return
+
+    parts = urlsplit(a.url)
+    host = parts.hostname
+    if not host:
+        fail(f"'{a.url}' has no host (use a full URL, e.g. https://api.github.com/x)")
+    path = parts.path or "/"
+    # Hold the lock only for the materializing read-modify-write.
+    with ws.lock():
+        rules = core_rules.materialize_rules(ws, notify=say)
+    matches = core_rules.match_rules(rules, a.method, host, path)
+    # Enrich each match with the rule's action detail (status/script) for display.
+    by_name = {r.name: r for r in rules}
+    rows = []
+    for m in matches:
+        r = by_name[m.name]
+        rows.append({"name": m.name, "action": m.action, "visible": m.visible,
+                     "script": r.script, "status": r.status,
+                     "terminal": m.terminal, "may_terminate": m.may_terminate,
+                     "conditional": m.conditional})
+    render.OUT.rule_test(a.method.upper(), a.url, rows)
+
+
+def _do_rule_test_live(ctx: Ctx, ws: Workspace, a: argparse.Namespace) -> None:
+    """`rule test --live`: ask the RUNNING proxy for the authoritative answer
+    (exact per-script phase + intercept decision) against its LOADED config --
+    which may lag the edited TOML until `apply`/`start`."""
+    from ..core import proxy_http
+    from ..core.imageenv import ImageEnv
+
+    if core_docker.container_status(ws.proxy_container) != "running":
+        fail(f"workspace '{ws.name}' proxy is not running; `start` it, or omit "
+             f"--live for the offline (config-file) dry-run")
+    meta = ImageEnv.load()
+    host_port = core_docker.resolve_host_port(ws.proxy_container, meta.http_port)
+    result = proxy_http.rule_test_live(ws, host_port, a.method, a.url)
+    render.OUT.rule_test_live(a.method.upper(), a.url, result)
 
 
 # ---- mount commands ----------------------------------------------------------
@@ -906,15 +1152,19 @@ def do_dev_build(ctx: Ctx) -> None:
     core_docker.docker(["build", "-t", IMAGE_TAG, str(PROXY_DIR)], stream=True)
 
 
-def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False, proxy_only: bool = False) -> None:
+def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
+                proxy_only: bool = False, force_container: bool = False) -> None:
     """Run the test suite(s).
 
-    Default: run BOTH the host-side CLI tests (tests/cli/, via the host's
-    python3 -m pytest) and the proxy suite inside the image (tests/, via
-    docker run). Trailing args after `--` pass through to the proxy pytest.
+    Default: run BOTH the host-side CLI tests (tests/cli/) and the proxy suite
+    (tests/). The proxy suite runs ON-HOST when its runtime deps (mitmproxy,
+    aiohttp, starlark) import there -- near-instant -- else inside the image via
+    `docker run`. Trailing args after `--` pass through to the proxy pytest.
 
-    --cli:   host CLI tests only (no docker required).
-    --proxy: proxy in-container tests only.
+    --cli:       host CLI tests only (no docker required).
+    --proxy:     proxy suite only.
+    --container: force the proxy suite into the image even if the deps are
+                 importable on the host (the canonical, version-pinned env).
     """
     import importlib.util
     import subprocess
@@ -944,9 +1194,26 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False, proxy_onl
             if not run_proxy:
                 sys.exit(result.returncode)
 
-    # Proxy suite, in-container. tests/cli/ is host-only: it is excluded here
-    # both because it needs no docker and because its module names (e.g.
-    # test_config) collide with the proxy suite's under pytest's rootdir.
+    # Proxy suite. tests/cli/ is excluded (host-only; its module names collide
+    # with the proxy suite's under one rootdir). Prefer running it ON-HOST when
+    # the proxy's runtime deps import there -- it skips the ~container-startup
+    # tax that dominates the inner loop -- falling back to the image otherwise.
+    proxy_deps = ("mitmproxy", "aiohttp", "starlark")
+    missing = [m for m in proxy_deps if importlib.util.find_spec(m) is None]
+    if not force_container and not missing:
+        say("running proxy suite on-host (deps present; --container forces the image)...")
+        env = {**os.environ, "PYTHONPATH": str(PROXY_DIR)}
+        host_cmd = [sys.executable, "-m", "pytest", "-v", str(TESTS_DIR),
+                    "--ignore", str(TESTS_DIR / "cli")] + trailing
+        if cli_failed:
+            r = subprocess.run(host_cmd, check=False, env=env)
+            sys.exit(1 if r.returncode == 0 else r.returncode)
+        os.execvpe(sys.executable, host_cmd, env)  # replace proc; preserves TTY
+
+    if not force_container:
+        say(f"proxy deps not importable on host ({', '.join(missing)}); running the "
+            f"proxy suite in the image. Install them (see proxy/requirements.txt) "
+            f"for the faster on-host path.")
     meta = ImageEnv.load()
     cmd = [
         "docker", "run", "--rm",
@@ -1018,6 +1285,66 @@ def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     p.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
 
 
+def _rule_subparsers(parent: argparse._SubParsersAction) -> None:
+    add = parent.add_parser("add")
+    # The action is a SUBCOMMAND (`rule add block|respond|rewrite|script`), not a
+    # `--action` flag, so each action's parser owns exactly its own params and
+    # argparse rejects an out-of-action flag structurally -- no hand-rolled
+    # rejection table. The scoping flags common to every action live on a shared
+    # parent parser mixed into each via `parents=`.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--host", action="append", metavar="HOST|GLOB", dest="host",
+                        help="literal or glob (`*.amazonaws.com`); repeatable")
+    common.add_argument("--method", action="append", metavar="METHOD", dest="method",
+                        help="restrict to these methods (repeatable; default all)")
+    common.add_argument("--path", default=None, metavar="GLOB",
+                        help="path glob: * within a segment, ** across (e.g. /repos/**)")
+    common.add_argument("--name", dest="rule_name", default=None,
+                        help="rule name (auto-generated if omitted)")
+    common.add_argument("--visible", dest="rule_visible", action="store_true",
+                        default=None, help="force enumerated + attributed")
+    common.add_argument("--hidden", dest="rule_visible", action="store_false",
+                        default=None, help="force unenumerated + unattributed")
+    asub = add.add_subparsers(dest="rule_action", required=True,
+                              metavar="{block,respond,rewrite,script}")
+
+    pb = asub.add_parser("block", parents=[common])
+    pb.add_argument("--status", type=int, default=None, help="refuse status (default 403)")
+
+    pr = asub.add_parser("respond", parents=[common])
+    pr.add_argument("--status", type=int, default=None, help="response status (required)")
+    pr.add_argument("--body", default=None, help="response body")
+    pr.add_argument("--header", action="append", metavar="K=V", dest="header",
+                    help="a response header (repeatable)")
+
+    pw = asub.add_parser("rewrite", parents=[common])
+    pw.add_argument("--header", action="append", metavar="K=V", dest="header",
+                    help="set a request header (repeatable)")
+    pw.add_argument("--remove-header", action="append", metavar="NAME",
+                    dest="remove_header", help="remove a request header")
+    pw.add_argument("--resp-header", action="append", metavar="K=V",
+                    dest="resp_header", help="set a response header")
+    pw.add_argument("--resp-remove-header", action="append", metavar="NAME",
+                    dest="resp_remove_header", help="remove a response header")
+
+    ps = asub.add_parser("script", parents=[common])
+    ps.add_argument("--script", default=None, metavar="NAME",
+                    help="the .star rule script name")
+
+    p = parent.add_parser("remove")
+    p.add_argument("rule_name", metavar="NAME")
+
+    parent.add_parser("list")
+
+    p = parent.add_parser("test")
+    p.add_argument("method", metavar="METHOD")
+    p.add_argument("url", metavar="URL")
+    p.add_argument("--live", action="store_true", dest="rule_live",
+                   help="ask the RUNNING proxy for the authoritative answer "
+                        "(exact script phase) against its loaded config, instead "
+                        "of the offline config-file dry-run")
+
+
 def _mount_subparsers(parent: argparse._SubParsersAction) -> None:
     p = parent.add_parser("add")
     p.add_argument("--volume", dest="mount_volume", default=None, metavar="NAME")
@@ -1081,7 +1408,11 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     sub.add_parser("inspect")
     p_config = sub.add_parser("config")
     p_config.add_argument("--declared", action="store_true", dest="config_declared")
-    sub.add_parser("logs")
+    p_logs = sub.add_parser("logs")
+    # --audit filters the stream to the structured `[audit]` events (#24):
+    # credential-use and rule-hit records, pretty-printed (or raw JSON with
+    # --json). Without it, `logs` streams the full proxy log verbatim.
+    p_logs.add_argument("--audit", action="store_true", dest="logs_audit")
 
     p_bind = sub.add_parser("bind-dir")
     # Defaults to the current directory; --dir associates a different one.
@@ -1094,6 +1425,10 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     mount = sub.add_parser("mount")
     msub = mount.add_subparsers(dest="mountcmd", required=True)
     _mount_subparsers(msub)
+
+    rule = sub.add_parser("rule")
+    rsub = rule.add_subparsers(dest="rulecmd", required=True)
+    _rule_subparsers(rsub)
 
     return parser
 
@@ -1224,6 +1559,38 @@ _MOUNT_ADD_HELP = (
     "                  non-root user can write it -- needed when it mounts at a path\n"
     "                  the image doesn't populate (else root-owned). Requires a\n"
     "                  non-root `user`; not valid for the `home` sugar.\n"
+)
+
+_RULE_ADD_HELP = (
+    "credproxy workspace NAME rule add ACTION --host HOST [--host HOST...] ...\n"
+    "  Govern traffic on an intercepted host (no credential involved). ACTION is a\n"
+    "  SUBCOMMAND -- one of block|respond|rewrite|script (not a flag). Adding a rule\n"
+    "  to a passthrough host makes it TLS-intercepted (workspace must bootstrap CA).\n"
+    "\n"
+    "  Scoping (every action):\n"
+    "    --host HOST|GLOB   literal or glob (`*.amazonaws.com`); repeatable, required\n"
+    "    --method METHOD    restrict to these methods (repeatable; default all)\n"
+    "    --path GLOB        path glob: `*` within a segment, `**` across\n"
+    "                       (e.g. /repos/**); default all paths\n"
+    "    --name NAME        rule name (auto-generated if omitted)\n"
+    "    --visible/--hidden override the per-family enumeration+attribution default\n"
+    "                       (block/respond visible; rewrite/script hidden)\n"
+    "\n"
+    "  Per action (each owns exactly these flags):\n"
+    "    block    [--status N]                              refuse (default 403)\n"
+    "    respond  --status N [--body TEXT] [--header K=V...] stub a response\n"
+    "    rewrite  [--header K=V] [--remove-header NAME]      request headers\n"
+    "             [--resp-header K=V] [--resp-remove-header NAME]  response headers\n"
+    "    script   --script NAME                             a .star rule script\n"
+    "\n"
+    "  Examples:\n"
+    "    rule add block --host api.github.com --method DELETE --path '/repos/**'\n"
+    "    rule add respond --host api.openai.com --path /v1/models --status 200 --body '{}'\n"
+    "    rule add script --host api.github.com --path '/users/**' --script scrub-emails\n"
+    "\n"
+    "  A visible block self-identifies (X-Credproxy-Rule header + a credproxy JSON\n"
+    "  body); a hidden block is a bare status. Hidden rules are excluded from\n"
+    "  /setup but ALWAYS logged/audited for the operator. See docs/rules.md."
 )
 
 _CREATE_HELP = (
@@ -1371,6 +1738,14 @@ def _verb_help(verb_argv: list[str]) -> str:
             return _MOUNT_ADD_HELP
         return ("credproxy workspace NAME mount add ...\n"
                 "Run `mount add --help` for details.")
+    if verb == "rule":
+        sub = verb_argv[1] if len(verb_argv) > 1 and not verb_argv[1].startswith("-") else ""
+        if sub == "add":
+            return _RULE_ADD_HELP
+        return ("credproxy workspace NAME rule {add|remove|list|test} ...\n"
+                "Rules govern traffic on intercepted hosts (block/respond/rewrite/\n"
+                "script), credential-free. `rule test METHOD URL` dry-runs the\n"
+                "matcher. Run `rule add --help` for details.")
     if verb in _VERB_HELP:
         return _VERB_HELP[verb]
     return f"usage: credproxy workspace NAME {verb}"
@@ -1482,7 +1857,7 @@ def _run_ws_verb(
     elif verb == "config":
         do_config(ctx, name, a.config_declared)
     elif verb == "logs":
-        do_logs(ctx, name)
+        do_logs(ctx, name, getattr(a, "logs_audit", False))
     elif verb == "bind-dir":
         do_bind_dir(ctx, name, a.bind_directory)
     elif verb == "binding":
@@ -1498,6 +1873,16 @@ def _run_ws_verb(
     elif verb == "mount":
         if a.mountcmd == "add":
             do_mount_add(ctx, name, a)
+    elif verb == "rule":
+        rc = a.rulecmd
+        if rc == "add":
+            do_rule_add(ctx, name, a)
+        elif rc == "remove":
+            do_rule_remove(ctx, name, a)
+        elif rc == "list":
+            do_rule_list(ctx, name)
+        elif rc == "test":
+            do_rule_test(ctx, name, a)
 
 
 def _parse_create(argv: list[str]) -> argparse.Namespace:
@@ -1530,7 +1915,7 @@ def _create_dir(a: argparse.Namespace) -> str | None:
 
 _ALIAS_TO_WS_VERB = {
     "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
-    "config", "logs", "binding", "bind-dir", "mount",
+    "config", "logs", "binding", "bind-dir", "mount", "rule",
 }
 
 
@@ -1566,6 +1951,13 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
         # on the resolved default workspace; explicit names use the canonical
         # `workspace NAME mount` form.
         _run_ws_verb(ctx, None, ["mount", *rest], trailing)
+        return
+
+    if head == "rule":
+        # Same as `binding`/`mount`: the sub-noun's subcommand would be eaten as
+        # a NAME by the generic path. Always acts on the resolved default
+        # workspace; explicit names use `workspace NAME rule`.
+        _run_ws_verb(ctx, None, ["rule", *rest], trailing)
         return
 
     if head in _ALIAS_TO_WS_VERB:
@@ -1865,17 +2257,20 @@ def _dispatch_dev(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
         do_dev_build(ctx)
     elif sub == "test":
         test_args = rest[1:]  # selection flags (pytest args go after `--`)
-        unknown = [a for a in test_args if a not in ("--cli", "--proxy")]
+        _known = ("--cli", "--proxy", "--container", "--docker")
+        unknown = [a for a in test_args if a not in _known]
         if unknown:
             fail(f"dev test: unknown flag(s) {' '.join(unknown)} "
-                 f"(use --cli or --proxy; pytest args go after `--`)")
+                 f"(use --cli/--proxy/--container; pytest args go after `--`)")
         cli_only = "--cli" in test_args
         proxy_only = "--proxy" in test_args
+        force_container = "--container" in test_args or "--docker" in test_args
         if cli_only and proxy_only:
             # Both = "neither" under the old logic, yet the proxy path still ran.
             fail("dev test: --cli and --proxy are mutually exclusive "
                  "(omit both to run both suites)")
-        do_dev_test(ctx, trailing, cli_only=cli_only, proxy_only=proxy_only)
+        do_dev_test(ctx, trailing, cli_only=cli_only, proxy_only=proxy_only,
+                    force_container=force_container)
     elif sub == "reload":
         do_dev_reload(ctx, rest[1] if len(rest) > 1 else None)
     else:

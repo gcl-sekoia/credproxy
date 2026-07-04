@@ -1218,3 +1218,101 @@ def test_mount_add_alias_resolves_default(xdg, workspaces_dir):
     assert ec == 0, err
     raw = tomllib.loads((workspaces_dir / "ws.toml").read_text())
     assert {"volume": "cache", "target": "/c"} in raw["mounts"]
+
+
+@pytest.mark.parametrize("action,flag,value", [
+    ("block", "--body", "x"),
+    ("block", "--resp-header", "K=V"),
+    ("respond", "--resp-header", "K=V"),
+    ("script", "--status", "404"),
+])
+def test_rule_add_rejects_out_of_action_flag(xdg, workspaces_dir, action, flag, value):
+    """A flag that doesn't belong to the chosen action's subparser is rejected by
+    argparse structurally (no rejection table). argparse fails before workspace
+    resolution, so no workspace setup is needed."""
+    ec, out, err = _run(["workspace", "w", "rule", "add", action,
+                         "--host", "api.github.com", flag, value])
+    assert ec != 0
+    assert "unrecognized arguments" in err or flag in err
+
+
+def test_rule_add_action_subcommand_happy_path(xdg, workspaces_dir):
+    """`rule add block ...` (action as a subcommand) writes the [[rule]] table."""
+    import tomllib
+    _mkws(workspaces_dir)
+    ec, out, err = _run(["workspace", "ws", "rule", "add", "block",
+                         "--host", "api.github.com", "--method", "DELETE",
+                         "--path", "/repos/**"])
+    assert ec == 0, err
+    raw = tomllib.loads((workspaces_dir / "ws.toml").read_text())
+    assert raw["rule"][0]["action"] == "block"
+    assert raw["rule"][0]["hosts"] == ["api.github.com"]
+    assert raw["rule"][0]["methods"] == ["DELETE"]
+
+
+def test_rule_add_no_action_fails(xdg, workspaces_dir):
+    """`rule add` with no action subcommand is a friendly argparse error."""
+    ec, out, err = _run(["workspace", "w", "rule", "add", "--host", "x.example.com"])
+    assert ec != 0
+
+
+def test_logs_structured_records_are_forgery_resistant():
+    """The structured `credproxy {json}` stream can't be forged from a rule-error
+    message: the proxy JSON-encodes the (workspace-influenced) message, so it is an
+    escaped VALUE on ONE physical line -- it parses as kind=rule-error, never as a
+    second audit line."""
+    import json
+    from credproxy_cli.porcelain.cli import _parse_credproxy_line
+    # genuine audit record
+    assert _parse_credproxy_line(
+        'credproxy {"ts":"t","kind":"audit","event":"inject","binding":"gh"}\n') \
+        == {"ts": "t", "kind": "audit", "event": "inject", "binding": "gh"}
+    # a rule error whose message tries to forge an audit event -- as the proxy
+    # actually emits it: json.dumps escapes the newline, so it stays ONE line.
+    forged = 'boom\ncredproxy {"kind":"audit","event":"inject","binding":"forged"}'
+    line = "credproxy " + json.dumps(
+        {"ts": "t", "kind": "rule-error", "rule": "x", "error": forged})
+    assert "\n" not in line                        # newline escaped -> single line
+    assert _parse_credproxy_line(line + "\n")["kind"] == "rule-error"   # not audit
+    # non-prefixed / non-object / no-kind lines are rejected
+    assert _parse_credproxy_line(
+        '[rule] x failed: credproxy {"kind":"audit"}\n') is None
+    assert _parse_credproxy_line('credproxy "not an object"\n') is None
+    assert _parse_credproxy_line('credproxy {"no":"kind"}\n') is None
+
+
+def test_format_record_handles_every_kind():
+    """The `logs` reformatter renders each record kind and never crashes on a
+    missing key or an unknown/future kind."""
+    from credproxy_cli.porcelain.cli import _format_record
+    assert "inject" in _format_record(
+        {"ts": "t", "kind": "audit", "event": "inject", "binding": "gh",
+         "host": "h", "outcome": "injected"})
+    assert "rewrite:rw" in _format_record(
+        {"ts": "t", "kind": "http", "method": "GET", "host": "h", "path": "/p",
+         "marks": ["rewrite:rw"]})
+    assert "intercept" in _format_record(
+        {"ts": "t", "kind": "sni", "sni": "h", "decision": "intercept"})
+    assert "boom" in _format_record(
+        {"ts": "t", "kind": "rule-error", "rule": "x", "error": "boom"})
+    assert _format_record({"kind": "http"})              # missing keys: no crash
+    assert "weird" in _format_record({"ts": "t", "kind": "weird", "foo": "bar"})
+
+
+def test_rule_test_json_envelope_offline_and_live(capsys):
+    """Offline and --live `rule test --json` share one envelope (method/url/live/
+    matches), so a consumer parses one shape; --live just adds intercepted/phase."""
+    import json
+    from credproxy_cli.porcelain.render import JsonRenderer
+    r = JsonRenderer()
+    r.rule_test("GET", "https://h/x", [{"name": "a", "action": "block"}])
+    off = json.loads(capsys.readouterr().out)
+    assert off == {"method": "GET", "url": "https://h/x", "live": False,
+                   "matches": [{"name": "a", "action": "block"}]}
+    r.rule_test_live("GET", "https://h/x",
+                     {"intercepted": True, "host": "h", "path": "/x",
+                      "matches": [{"name": "a", "phase": "response"}]})
+    live = json.loads(capsys.readouterr().out)
+    assert live["live"] is True and live["intercepted"] is True
+    assert live["method"] == "GET" and live["url"] == "https://h/x"
+    assert live["matches"][0]["phase"] == "response"
