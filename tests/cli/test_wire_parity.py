@@ -164,3 +164,17 @@ def test_rule_sequencing_parity_declarative():
     proxy = [(m["name"], m["terminal"], m["conditional"])
              for m in creds.rule_set().dry_run("DELETE", "api.github.com", "/repos/a")]
     assert cli == proxy == [("rw", False, False), ("blk", True, False)]
+
+
+def test_rule_params_field_parity_cli_proxy():
+    """The `params` field must be allowed on the `script` action in BOTH deploy
+    units (and only there) -- else a params rule would pass one validator and be
+    rejected by the other (#35). This checks the field SETS directly, since a
+    full round-trip needs Starlark (image only)."""
+    from credproxy_cli.core.rules import _ACTION_FIELDS as cli_fields
+    proxy_fields = _proxy_config()._RULE_ACTION_FIELDS
+    assert "params" in cli_fields["script"]
+    assert "params" in proxy_fields["script"]
+    for act in ("block", "respond", "rewrite"):
+        assert "params" not in cli_fields[act]
+        assert "params" not in proxy_fields[act]

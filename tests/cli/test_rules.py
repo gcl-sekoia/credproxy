@@ -332,6 +332,65 @@ def test_parse_rule_entry_builds_and_validates():
                           "src", "rule")
 
 
+# ---- script rule params (#35) -----------------------------------------------
+
+
+def test_parse_rule_entry_accepts_script_params():
+    from credproxy_cli.core.rules import _parse_rule_entry
+    r = _parse_rule_entry(
+        {"action": "script", "hosts": ["api.x.com"], "script": "guard",
+         "params": {"allow_prefixes": ["/a", "/b"], "status": 418,
+                    "nested": {"k": True}}},
+        "src", "rule")
+    assert r.params == {"allow_prefixes": ["/a", "/b"], "status": 418,
+                        "nested": {"k": True}}
+
+
+def test_parse_rule_entry_params_only_on_script_action():
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.rules import _parse_rule_entry
+    # params is a script-only field: on block/respond/rewrite it's an extra field.
+    with pytest.raises(ConfigError, match="not valid for action 'block'"):
+        _parse_rule_entry({"action": "block", "hosts": ["h.x.com"],
+                           "params": {"x": 1}}, "src", "rule")
+
+
+def test_parse_rule_entry_rejects_non_json_clean_params():
+    """A TOML-only value JSON can't carry (a datetime) is rejected with its
+    path, so it fails at `rule add`/load, not silently at the wire POST."""
+    import datetime
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.rules import _parse_rule_entry
+    with pytest.raises(ConfigError, match="unsupported value type|JSON-clean"):
+        _parse_rule_entry(
+            {"action": "script", "hosts": ["api.x.com"], "script": "g",
+             "params": {"when": datetime.datetime(2026, 1, 1)}}, "src", "rule")
+
+
+def test_parse_rule_entry_rejects_non_table_params():
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.rules import _parse_rule_entry
+    with pytest.raises(ConfigError, match="params must be a table"):
+        _parse_rule_entry({"action": "script", "hosts": ["api.x.com"],
+                           "script": "g", "params": [1, 2]}, "src", "rule")
+
+
+def test_wire_entry_includes_script_params():
+    """params ride the wire next to script/api; a rule without params omits the
+    key (so zero-config rules keep a byte-identical wire entry)."""
+    from credproxy_cli.core.rules import Rule, rule_wire_entries
+    with_params = Rule(name="g", hosts=("api.github.com",), action="script",
+                       script="scrub-emails", params={"a": [1, 2]})
+    (e,) = rule_wire_entries([with_params])
+    assert e["params"] == {"a": [1, 2]}
+    assert e["script"] == "scrub-emails" and "script_source" in e
+
+    without = Rule(name="g2", hosts=("api.github.com",), action="script",
+                   script="scrub-emails")
+    (e2,) = rule_wire_entries([without])
+    assert "params" not in e2
+
+
 def test_remove_rule_with_child_table(xdg, workspaces_dir):
     # A hand-written `[rule.headers]` child sub-table must be removed WITH its
     # parent rule, not orphaned (which would corrupt the TOML).
@@ -360,6 +419,37 @@ def test_remove_rule_with_child_table(xdg, workspaces_dir):
     remove_rule(ws, "r1")
     assert [r.name for r in load_rules(ws)] == ["r2"]      # file still valid
     assert "[rule.headers]" not in ws.config_path.read_text()
+
+
+def test_remove_rule_with_params_child_table(xdg, workspaces_dir):
+    # A `[rule.params]` sub-table (the natural way to write a list/table param)
+    # must load and be removed WITH its parent, not orphaned (#35).
+    from credproxy_cli.core.rules import load_rules, remove_rule
+    ws = _write_ws(workspaces_dir, "w", """
+        image = "x"
+
+        [[rule]]
+        name = "guard"
+        hosts = ["api.github.com"]
+        action = "script"
+        script = "scrub-emails"
+
+        [rule.params]
+        allow_prefixes = ["/repos/scratch-", "/user/repos"]
+        message = "scratch repos only"
+
+        [[rule]]
+        name = "r2"
+        hosts = ["api.github.com"]
+        action = "block"
+    """)
+    rules = load_rules(ws)
+    assert [r.name for r in rules] == ["guard", "r2"]
+    assert rules[0].params == {"allow_prefixes": ["/repos/scratch-", "/user/repos"],
+                               "message": "scratch repos only"}
+    remove_rule(ws, "guard")
+    assert [r.name for r in load_rules(ws)] == ["r2"]      # file still valid
+    assert "[rule.params]" not in ws.config_path.read_text()
 
 
 def test_rewrite_empty_container_rejected(xdg, workspaces_dir):

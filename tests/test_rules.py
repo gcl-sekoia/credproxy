@@ -355,6 +355,105 @@ def test_script_rule_malformed_respond_fails_closed():
     assert b"rule 's' failed" in flow.response.content
 
 
+# ---- rule script params (#35) ----------------------------------------------
+
+# One SHARED script whose behavior is driven entirely by params: block unless the
+# path starts with an allowed prefix, with a param-supplied status.
+_PARAM_GUARD = (
+    "def on_request():\n"
+    "    for p in param('allow_prefixes', []):\n"
+    "        if req_path().startswith(p):\n"
+    "            return\n"
+    "    block(param('status', 403))\n"
+)
+
+
+def test_rule_param_drives_behavior():
+    """A rule with no `param()` config still runs (defaults in the script); a
+    matching prefix is allowed through, a non-matching one is blocked."""
+    creds = _creds([_script_rule(
+        "guard", _PARAM_GUARD, visible=True,
+        params={"allow_prefixes": ["/repos/allowed"], "status": 418})])
+    log = addon.HostnameLogger(_state(creds))
+
+    blocked = _flow(path="/repos/secret")
+    log.request(blocked)
+    assert blocked.response.status_code == 418      # param-supplied status
+
+    allowed = _flow(path="/repos/allowed/x")
+    log.request(allowed)
+    assert allowed.response is None                 # passed through, not blocked
+
+
+def test_two_rules_share_one_script_with_different_params():
+    """The headline: one compiled script, two rules, different params -> different
+    behavior. Rule A allows /a/*, rule B (different host) allows /b/*. Each sees
+    ONLY its own params (per-rule binding at eval time)."""
+    creds = _creds([
+        {"name": "ra", "hosts": ["a.example.com"], "action": "script",
+         "script": "guard", "script_source": _PARAM_GUARD, "visible": True,
+         "params": {"allow_prefixes": ["/a/"]}},
+        {"name": "rb", "hosts": ["b.example.com"], "action": "script",
+         "script": "guard", "script_source": _PARAM_GUARD, "visible": True,
+         "params": {"allow_prefixes": ["/b/"]}},
+    ])
+    log = addon.HostnameLogger(_state(creds))
+
+    # /a/ is allowed on host a but blocked on host b -- proving each rule uses its
+    # own params, not a shared/last-writer-wins value.
+    fa = _flow(host="a.example.com", path="/a/x")
+    log.request(fa)
+    assert fa.response is None
+    fb = _flow(host="b.example.com", path="/a/x")
+    log.request(fb)
+    assert fb.response is not None and fb.response.status_code == 403
+
+
+def test_rule_param_no_params_uses_script_defaults():
+    """Zero-config stays zero-config: a param rule with NO params table runs, and
+    param(k, default) yields the default (here: empty allowlist -> block 403)."""
+    creds = _creds([_script_rule("guard", _PARAM_GUARD, visible=True)])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow(path="/anything")
+    log.request(flow)
+    assert flow.response.status_code == 403
+
+
+def test_rule_param_mutation_does_not_leak_across_requests():
+    """A script mutating a param value must not affect later requests: starlark
+    copies at the boundary, so the underlying params dict is untouched. Measure
+    len BEFORE the append -> 401 every time if isolated; 401,402,403 if it leaks."""
+    script = ("def on_request():\n"
+              "    xs = param('xs', [])\n"
+              "    n = len(xs)\n"                # 1 every call if isolated
+              "    xs.append('mutated')\n"       # local mutation, must not persist
+              "    block(400 + n)\n")
+    creds = _creds([_script_rule("m", script, visible=True, params={"xs": ["a"]})])
+    log = addon.HostnameLogger(_state(creds))
+    for _ in range(3):
+        flow = _flow()
+        log.request(flow)
+        assert flow.response.status_code == 401   # n stays 1 -> constant, no leak
+
+
+def test_rule_params_rejects_non_object():
+    with pytest.raises(ConfigError, match="params must be an object"):
+        _creds([_script_rule("s", _PARAM_GUARD, params=["not", "an", "object"])])
+
+
+def test_rule_params_excluded_from_setup():
+    """Params are operator-visible everywhere but WORKSPACE-visible nowhere --
+    even a `visible = true` rule must not leak its params via /setup (they can
+    carry internal path lists / hostnames). inward_rules whitelists no internals."""
+    creds = _creds([_script_rule(
+        "guard", _PARAM_GUARD, visible=True,
+        params={"allow_prefixes": ["/internal/secret-path"]})])
+    inward = creds.rule_set().inward_rules()
+    assert inward and inward[0]["name"] == "guard"
+    assert "params" not in inward[0]
+    assert "secret-path" not in json.dumps(inward)
+
+
 def test_rule_script_cannot_use_secret_primitive():
     with pytest.raises(ConfigError, match="secret"):
         _creds([_script_rule("s", "def on_request():\n    x = secret()\n")])

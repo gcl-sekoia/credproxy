@@ -53,7 +53,7 @@ _ACTION_FIELDS = {
     "respond": frozenset({"status", "body", "headers"}),
     "rewrite": frozenset({"set_headers", "remove_headers",
                           "resp_set_headers", "resp_remove_headers"}),
-    "script": frozenset({"script", "api"}),
+    "script": frozenset({"script", "api", "params"}),
 }
 # Per-family default for the `visible` flag (mirrors proxy).
 _VISIBLE_DEFAULT = {"block": True, "respond": True, "rewrite": False,
@@ -91,6 +91,9 @@ class Rule:
     resp_remove_headers: tuple[str, ...] | None = None
     script: str | None = None
     api: int = 1
+    # script-only: operator-authored config the `.star` reads via param(k, default).
+    # Config, NOT secrets -- plaintext everywhere operator-side; excluded from /setup.
+    params: dict | None = None
 
     @property
     def effective_visible(self) -> bool:
@@ -115,6 +118,37 @@ def _as_str_list(value, source: str, where: str) -> tuple:
     if not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
         raise ConfigError(f"{source}: {where} must be an array of non-empty strings")
     return tuple(value)
+
+
+def _as_json_params(value, source: str, where: str) -> dict:
+    """A `script`-rule `params` table: a dict of JSON-clean values (string /
+    number / bool / array / nested table). It rides the /admin/config POST
+    verbatim, so it must be expressible in JSON -- this rejects TOML-only shapes
+    JSON can't carry (notably datetimes), with the failing path named."""
+    if not isinstance(value, dict):
+        raise ConfigError(f"{source}: {where} must be a table")
+    _check_json_clean(value, source, where)
+    return dict(value)
+
+
+def _check_json_clean(value, source: str, where: str) -> None:
+    """Recursively require `value` to be JSON-serializable: str/number/bool/None,
+    or a list/dict (string keys) of the same. Raises ConfigError naming the path."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise ConfigError(f"{source}: {where} keys must be strings")
+            _check_json_clean(v, source, f"{where}.{k}")
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _check_json_clean(v, source, f"{where}[{i}]")
+    elif value is None or isinstance(value, (str, bool, int, float)):
+        return  # bool is an int subclass; both are JSON-clean
+    else:
+        raise ConfigError(
+            f"{source}: {where} has an unsupported value type "
+            f"'{type(value).__name__}' (params must be JSON-clean: strings, "
+            f"numbers, booleans, arrays, tables)")
 
 
 def _parse_rule_entry(r: dict, source: str, where: str) -> Rule:
@@ -212,6 +246,9 @@ def _parse_rule_entry(r: dict, source: str, where: str) -> Rule:
         if not isinstance(api, int) or isinstance(api, bool):
             raise ConfigError(f"{source}: {where}.api must be an integer")
         kwargs["api"] = api
+        params = r.get("params")
+        if params is not None:
+            kwargs["params"] = _as_json_params(params, source, f"{where}.params")
 
     return Rule(name=name, hosts=tuple(hosts), action=action,
                 methods=method_tuple, path=path, visible=visible, **kwargs)
@@ -524,6 +561,8 @@ def rule_wire_entries(rules: list[Rule]) -> list[dict]:
             entry["script"] = r.script
             entry["script_source"] = find_script(r.script).source
             entry["api"] = r.api
+            if r.params is not None:
+                entry["params"] = r.params
         entries.append(entry)
     return entries
 

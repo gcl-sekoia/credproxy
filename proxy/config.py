@@ -349,7 +349,7 @@ _RULE_ACTION_FIELDS = {
     "respond": frozenset({"status", "body", "headers"}),
     "rewrite": frozenset({"set_headers", "remove_headers",
                           "resp_set_headers", "resp_remove_headers"}),
-    "script": frozenset({"script", "script_source", "api"}),
+    "script": frozenset({"script", "script_source", "api", "params"}),
 }
 # Per-family default for the `visible` flag when omitted: terminal actions are
 # diagnosable-by-default (attributed + enumerated); rewrite/script default hidden
@@ -543,6 +543,15 @@ def _load_rules(raw_rules, source: str) -> RuleSet:
                                       kwargs["remove_headers"], source, where)
         elif action == "script":
             scheme, script_name = _build_rule_scheme(entry, source, where)
+            # Operator-authored config the script reads via param(k, default). The
+            # wire is already JSON, so values are JSON-clean by construction; we
+            # only pin the top-level shape (an object). Config, not secrets --
+            # excluded from /setup (inward_rules whitelists no action internals).
+            rparams = entry.get("params")
+            if rparams is not None:
+                if not isinstance(rparams, dict):
+                    _fail(f"{source}: {where}.params must be an object")
+                kwargs["params"] = rparams
 
         compiled.append(Rule(
             name=name,
