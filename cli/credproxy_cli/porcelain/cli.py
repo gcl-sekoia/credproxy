@@ -676,11 +676,9 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     from ..core.injectors import find_injector
     from ..core.providers import find_provider
 
-    if (a.preset is None) == (a.injector is None):
-        fail("`binding add` needs exactly one of --preset or --injector")
-    if a.preset is not None:
-        _do_binding_preset(ctx, name, a)
-        return
+    if a.injector is None:
+        fail("`binding add` needs --injector (coordinated multi-binding sets and "
+             "guardrails live in `workspace NAME preset add PRESET`)")
 
     if not a.host:
         fail("`binding add --injector` needs at least one --host")
@@ -742,69 +740,111 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     })
 
 
-def _do_binding_preset(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
-    """Generate a coordinated binding set from a preset (e.g. github) and
-    append all of them, sharing one placeholder."""
+def _newly_intercepted(existing_hosts, new_hosts) -> list[str]:
+    """Hosts the preset newly flips to TLS-intercepted: `new_hosts` not already
+    covered by `existing_hosts` (a literal already named, or matched by an
+    existing glob). Adding a rule to a previously-passthrough host intercepts it
+    (the UNION intercept set), so `preset add` announces this rather than letting
+    the operator discover a fresh CA-cert error."""
+    from ..core import hostmatch
+    existing_lowered = {h.lower() for h in existing_hosts}
+    globs = [hostmatch.compile_pattern(h.lower())
+             for h in existing_hosts if hostmatch.is_pattern(h)]
+    out, seen = [], set()
+    for h in new_hosts:
+        hl = h.lower()
+        if hl in seen:
+            continue
+        seen.add(hl)
+        already = hl in existing_lowered or (
+            not hostmatch.is_pattern(h) and any(g.fullmatch(hl) for g in globs))
+        if not already:
+            out.append(h)
+    return out
+
+
+def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    """Apply a preset as a service setup pack: stamp its `[[binding]]` set AND its
+    `[[rule]]` guardrails into the workspace, all-or-nothing. A pure-rule preset
+    needs no provider/secret."""
     from ..core import bindings as core_bindings
-    from ..core.presets import build_preset, load_presets
+    from ..core import rules as core_rules
+    from ..core.presets import build_preset, get_preset
     from ..core.providers import find_provider
 
-    if a.binding_name or a.placeholder or a.env or a.host:
-        fail("--preset manages name/placeholder/env/host itself; drop those flags")
+    spec = get_preset(a.preset)               # CredproxyError -> clean fail on unknown
 
-    presets = load_presets()
-    spec = presets.get(a.preset)
-    if spec is None:
-        fail(f"unknown preset '{a.preset}'; known presets: "
-             f"{', '.join(sorted(presets)) or '(none)'}")
-
-    # Provider: the explicit flag, else the preset's default.
-    provider = a.provider or spec.default_provider
-    if provider is None:
-        fail("`binding add --preset` needs --provider "
-             "(this preset has no default provider)")
-
-    # Secret: the explicit flag, else the preset's default -- but that default
-    # ref is only meaningful for the provider it was written for (a ref is a gh
-    # hostname for gh-cli, an env-var name for env, an op:// path for op), so any
-    # other provider must still pass --secret.
-    secret = _parse_secret_args(a.secret)
-    if secret is None:
-        if provider == spec.default_provider and spec.default_secret is not None:
-            secret = spec.default_secret
-        else:
-            fail("`binding add --preset` needs --secret "
-                 "(its meaning depends on --provider)")
-    elif not isinstance(secret, str):
-        fail("`binding add --preset` needs a single --secret REF")
-    find_provider(provider)
+    provider = secret = None
+    if spec.needs_credential:
+        # Provider: the explicit flag, else the preset's default.
+        provider = a.provider or spec.default_provider
+        if provider is None:
+            fail("preset '%s' has bindings but no default provider -- pass "
+                 "--provider" % a.preset)
+        # Secret: explicit, else the preset default -- but that default ref is
+        # only meaningful for the provider it was written for (a ref is a gh
+        # hostname for gh-cli, an env-var name for env, an op:// path for op), so
+        # any other provider must still pass --secret.
+        secret = _parse_secret_args(a.secret)
+        if secret is None:
+            if provider == spec.default_provider and spec.default_secret is not None:
+                secret = spec.default_secret
+            else:
+                fail("`preset add` needs --secret (its meaning depends on --provider)")
+        elif not isinstance(secret, str):
+            fail("`preset add` needs a single --secret REF")
+        find_provider(provider)
+    elif a.provider or a.secret:
+        fail(f"preset '{a.preset}' is a pure-rule pack (no bindings) -- "
+             f"--provider/--secret don't apply")
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
 
-    with ws.lock():                          # atomic read-validate-write (see do_binding_add)
-        existing = core_bindings.load_bindings(ws)
-        taken = {b.name for b in existing}
-        new = build_preset(a.preset, provider, secret)
-        for b in new:
-            if b.name in taken:
-                fail(f"binding name '{b.name}' already exists in workspace '{ws.name}'")
-        core_bindings.validate(existing + new, str(ws.config_path))
-        core_bindings.append_bindings(ws, new)   # one atomic write
-    # A preset expands to several bindings; say so up front (stderr) so the
-    # human lines that follow aren't a surprise. Emit the result as ONE value
-    # (render.OUT.bindings_added) so --json yields a single JSON object, not one
-    # per binding (this is a one-shot command, not the JSON-lines `logs` stream).
-    say(f"preset '{a.preset}' expands to {len(new)} bindings:")
-    render.OUT.bindings_added(ws.name, [{
-        "name": b.name,
-        "injector": b.injector,
-        "provider": b.provider,
-        "secret": b.secret,
-        "hosts": list(b.hosts),
-        "placeholder": b.placeholder,
+    with ws.lock():                          # atomic read-validate-write
+        existing_b = core_bindings.load_bindings(ws)
+        existing_r = core_rules.load_rules(ws)
+        new_b, new_r = build_preset(a.preset, provider, secret)
+
+        # Collision: a generated <preset>-<suffix> clashing with an existing name
+        # fails the WHOLE add before any write (no partial stamp).
+        btaken = {b.name for b in existing_b}
+        rtaken = {r.name for r in existing_r}
+        for b in new_b:
+            if b.name in btaken:
+                fail(f"preset '{a.preset}' would create binding '{b.name}', which "
+                     f"already exists in workspace '{ws.name}' (no changes made)")
+        for r in new_r:
+            if r.name in rtaken:
+                fail(f"preset '{a.preset}' would create rule '{r.name}', which "
+                     f"already exists in workspace '{ws.name}' (no changes made)")
+
+        # Full semantic validation on the combined sets (cross-binding/rule
+        # collisions, script resolution) before writing.
+        if new_b:
+            core_bindings.validate(existing_b + new_b, str(ws.config_path))
+        if new_r:
+            core_rules.validate(existing_r + new_r, str(ws.config_path))
+
+        existing_hosts = [h for b in existing_b for h in b.hosts] \
+            + [h for r in existing_r for h in r.hosts]
+        new_hosts = [h for b in new_b for h in b.hosts] \
+            + [h for r in new_r for h in r.hosts]
+        newly = _newly_intercepted(existing_hosts, new_hosts)
+
+        if new_b:
+            core_bindings.append_bindings(ws, new_b)
+        if new_r:
+            core_rules.append_rules(ws, new_r)
+
+    render.OUT.preset_applied(ws.name, a.preset, [{
+        "name": b.name, "injector": b.injector, "provider": b.provider,
+        "secret": b.secret, "hosts": list(b.hosts), "placeholder": b.placeholder,
         "env": b.env,
-    } for b in new])
+    } for b in new_b], [{
+        "name": r.name, "hosts": list(r.hosts), "action": r.action,
+        "script": r.script, "visible": r.effective_visible,
+    } for r in new_r], newly)
 
 
 def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
@@ -1295,13 +1335,9 @@ def do_dev_reload(ctx: Ctx, name: str | None) -> None:
 
 def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     p = parent.add_parser("add")
-    # --preset generates a coordinated binding set (e.g. github); --injector is
-    # the single-binding path. Exactly one is required (checked in the handler,
-    # so the error is a friendly message rather than argparse usage spew).
-    p.add_argument("--preset", default=None)
+    # Single-binding path. Coordinated multi-binding sets + guardrails are the
+    # `preset` noun's job (`workspace NAME preset add PRESET`), not a flag here.
     p.add_argument("--injector", default=None)
-    # Optional at the parser level: required with --injector, but a preset may
-    # supply a default provider (e.g. github -> gh-cli). Enforced in the handler.
     p.add_argument("--provider", default=None)
     # Repeatable: a single bare REF is single-slot; one or more `slot=ref`
     # values form a multi-slot secret table.
@@ -1482,6 +1518,15 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     rsub = rule.add_subparsers(dest="rulecmd", required=True)
     _rule_subparsers(rsub)
 
+    preset = sub.add_parser("preset")
+    psub = preset.add_subparsers(dest="presetcmd", required=True)
+    pa = psub.add_parser("add")
+    pa.add_argument("preset", metavar="PRESET")
+    # Optional: a binding-bearing preset may carry a default provider/secret; a
+    # pure-rule preset needs neither. Enforced (conditionally) in the handler.
+    pa.add_argument("--provider", default=None)
+    pa.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
+
     return parser
 
 
@@ -1511,12 +1556,14 @@ _STRICT_HELP = (
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
     "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credproxy workspace NAME binding add|remove|list|test ...\n"
+    "  credproxy workspace NAME rule add|remove|list|test ...   (traffic guardrails)\n"
+    "  credproxy workspace NAME preset add PRESET   (service pack: bindings + rules)\n"
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
     "  credproxy injector scaffold NAME [--script] | list | check NAME | api\n"
     "  credproxy provider scaffold NAME | provider list | show NAME\n"
-    "  credproxy preset list               (coordinated multi-binding sets)\n"
+    "  credproxy preset list               (service setup packs: bindings + guardrails)\n"
     "Dev harness:\n"
     "  credproxy dev build|test|reload\n"
     "\n"
@@ -1541,12 +1588,14 @@ _LOOSE_HELP = (
     "  credp enter|edit|start|stop|recreate|delete|apply|inspect|logs [NAME]\n"
     "  credp mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
+    "  credp rule add|remove|list|test ...      (traffic guardrails)\n"
+    "  credp preset add PRESET                  (service pack: bindings + rules)\n"
     "  credp binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
     "  credp injector scaffold NAME [--script] | list | check NAME | api\n"
     "  credp provider scaffold NAME | provider list | show NAME\n"
-    "  credp preset list               (coordinated multi-binding sets)\n"
+    "  credp preset list               (service setup packs: bindings + guardrails)\n"
     "Dev harness:\n"
     "  credp dev build|test|reload\n"
     "\n"
@@ -1559,29 +1608,37 @@ _LOOSE_HELP = (
 # want raw argparse usage spew), so `--help` is honored by the hand-rolled
 # dispatch via these prose blocks instead.
 _BINDING_ADD_HELP = (
-    "credproxy workspace NAME binding add -- bind a credential into requests\n"
-    "for one or more hosts. Give exactly ONE of --injector or --preset.\n"
+    "credproxy workspace NAME binding add --injector INJ -- bind a credential\n"
+    "into requests for one or more hosts. (Coordinated multi-binding sets +\n"
+    "guardrails are the `preset` noun: `workspace NAME preset add PRESET`.)\n"
     "\n"
-    "  --injector INJ    single binding: how the credential is shaped into the\n"
-    "                    request (bearer, basic, body, sigv4, ...).\n"
-    "                    See `credproxy injector list`.\n"
-    "  --preset PRESET   a coordinated multi-binding set (e.g. github expands to\n"
-    "                    three bindings sharing one token). The preset owns\n"
-    "                    name/placeholder/env/host. See `credproxy preset list`.\n"
-    "                    `github` defaults provider->gh-cli, secret->github.com,\n"
-    "                    so `binding add --preset github` needs no other flags.\n"
-    "  --provider PROV   where the value comes from. Required, except a preset\n"
-    "                    may supply a default. See `credproxy provider list`.\n"
+    "  --injector INJ    how the credential is shaped into the request (bearer,\n"
+    "                    basic, body, sigv4, ...). See `credproxy injector list`.\n"
+    "  --provider PROV   where the value comes from. Required.\n"
+    "                    See `credproxy provider list`.\n"
     "  --secret REF      the reference the provider resolves. For the `env`\n"
     "                    provider REF is the host env var NAME (not the value).\n"
-    "                    Repeat as SLOT=REF for a multi-slot secret. May be\n"
-    "                    defaulted by a preset (only for its default provider).\n"
-    "  --host HOST       host this binding applies to; repeatable. Required\n"
-    "                    with --injector (the preset sets its own hosts).\n"
+    "                    Repeat as SLOT=REF for a multi-slot secret.\n"
+    "  --host HOST       host this binding applies to; repeatable. Required.\n"
     "  --name NAME       binding name (auto: <injector>-<provider>[-N]).\n"
     "  --placeholder PH  inert sentinel swapped for the real value at egress\n"
     "                    (auto-generated for substitute schemes).\n"
     "  --env VAR         env var name exposed to the workspace via /setup.\n"
+)
+
+_PRESET_ADD_HELP = (
+    "credproxy workspace NAME preset add PRESET -- apply a service setup pack:\n"
+    "stamp its coordinated `[[binding]]` set AND its `[[rule]]` guardrails into\n"
+    "the workspace, all-or-nothing. `credproxy preset list` shows every pack.\n"
+    "\n"
+    "  --provider PROV   where binding values come from (a binding-bearing preset\n"
+    "                    may supply a default; a pure-rule pack needs none).\n"
+    "  --secret REF      the reference the provider resolves (see `binding add`);\n"
+    "                    may be defaulted by a preset for its default provider.\n"
+    "\n"
+    "Expansion, not a link: it writes ordinary blocks (names `<preset>-<suffix>`);\n"
+    "edit/remove afterward is normal. A rule on a host with no binding flips that\n"
+    "host to TLS-intercepted -- `preset add` announces any such host.\n"
 )
 
 _BINDING_TEST_HELP = (
@@ -1815,6 +1872,8 @@ def _verb_help(verb_argv: list[str]) -> str:
                 "Rules govern traffic on intercepted hosts (block/respond/rewrite/\n"
                 "script), credential-free. `rule test METHOD URL` dry-runs the\n"
                 "matcher. Run `rule add --help` for details.")
+    if verb == "preset":
+        return _PRESET_ADD_HELP
     if verb in _VERB_HELP:
         return _VERB_HELP[verb]
     return f"usage: credproxy workspace NAME {verb}"
@@ -1955,6 +2014,9 @@ def _run_ws_verb(
             do_rule_list(ctx, name)
         elif rc == "test":
             do_rule_test(ctx, name, a)
+    elif verb == "preset":
+        if a.presetcmd == "add":
+            do_preset_add(ctx, name, a)
 
 
 def _parse_create(argv: list[str]) -> argparse.Namespace:
@@ -2341,12 +2403,22 @@ def _compile_script_in_image(source: str) -> str | None:
 
 
 def _dispatch_preset(ctx: Ctx, rest: list[str]) -> None:
-    # One subcommand (`list`); a bare `preset` or `--help` also lists, since the
-    # listing is the documentation. Anything else is a usage error.
+    # `preset` is dual-role: `list` is definitional (no workspace, both surfaces);
+    # `add` is workspace-scoped (it stamps into a workspace TOML). A bare `preset`
+    # or `--help` lists, since the listing IS the documentation.
     if not rest or _wants_help(rest) or rest[0] == "list":
         do_preset_list(ctx)
         return
-    fail(f"unknown preset command '{rest[0]}' (usage: credproxy preset list)")
+    if rest[0] == "add":
+        # Top-level `preset add` is the loose implicit-workspace form; strict
+        # requires the explicit `workspace NAME preset add`.
+        if not ctx.loose:
+            fail("`preset add` needs a workspace: "
+                 "`credproxy workspace NAME preset add PRESET`")
+        _run_ws_verb(ctx, None, ["preset", *rest], [])
+        return
+    fail(f"unknown preset command '{rest[0]}' (usage: credproxy preset list  |  "
+         f"credproxy workspace NAME preset add PRESET)")
 
 
 def _dispatch_dev(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:

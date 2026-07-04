@@ -489,15 +489,40 @@ class Renderer:
         if not rows:
             print("no presets")
             return
-        print("Coordinated multi-binding sets. Use with:")
-        print("  credproxy workspace NAME binding add --preset NAME "
-              "--provider P --secret REF")
+        print("Service setup packs (bindings + guardrails). Apply with:")
+        print("  credproxy workspace NAME preset add NAME [--provider P --secret REF]")
         for p in rows:
-            print(f"\n{p['name']}  ({len(p['bindings'])} bindings)")
+            counts = f"{len(p['bindings'])} bindings, {len(p.get('rules') or [])} rules"
+            cred = "" if p.get("needs_credential", True) else "  [pure-rule; no credential]"
+            print(f"\n{p['name']}  ({counts}){cred}")
             for b in p["bindings"]:
                 env = f"  env {b['env']}" if b.get("env") else ""
                 hosts = ", ".join(b["hosts"])
-                print(f"  {b['name']:<14} {b['injector']:<7} {hosts}{env}")
+                print(f"  binding {b['name']:<14} {b['injector']:<7} {hosts}{env}")
+            for r in p.get("rules") or []:
+                act = r["action"] + (f":{r['script']}" if r.get("script") else "")
+                vis = "" if r.get("visible", True) else "  [hidden]"
+                print(f"  rule    {r['name']:<14} {act:<7} {', '.join(r['hosts'])}{vis}")
+
+    def preset_applied(self, ws: str, preset: str, bindings: list[dict],
+                       rules: list[dict], newly_intercepted: list[str]) -> None:
+        nb, nr = len(bindings), len(rules)
+        print(f"applied preset '{preset}' to workspace '{ws}': "
+              f"{nb} binding(s), {nr} rule(s)")
+        for b in bindings:
+            print(f"  binding {b['name']:<16} {b['injector']:<7} "
+                  f"{', '.join(b['hosts'])}")
+        for r in rules:
+            act = r["action"] + (f":{r['script']}" if r.get("script") else "")
+            vis = "" if r.get("visible", True) else "  (hidden)"
+            print(f"  rule    {r['name']:<16} {act:<7} "
+                  f"{', '.join(r['hosts'])}{vis}")
+        if newly_intercepted:
+            say("newly intercepted (TLS-terminated) host(s): "
+                + ", ".join(newly_intercepted)
+                + " -- a workspace that hasn't bootstrapped the CA will see a "
+                  "cert error there until it does")
+        say(f"run `credproxy workspace {ws} start` (or `apply`) to push it to the proxy")
 
 
 class JsonRenderer(Renderer):
@@ -621,6 +646,11 @@ class JsonRenderer(Renderer):
 
     def preset_list(self, rows: list[dict]) -> None:
         self._emit(rows)
+
+    def preset_applied(self, ws: str, preset: str, bindings: list[dict],
+                       rules: list[dict], newly_intercepted: list[str]) -> None:
+        self._emit({"workspace": ws, "preset": preset, "bindings": bindings,
+                    "rules": rules, "newly_intercepted": newly_intercepted})
 
     def provider_show(self, info: dict) -> None:
         self._emit(info)

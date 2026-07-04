@@ -71,6 +71,7 @@ def test_overlay_preset_is_resolvable(xdg, profile_overlay):
     from credproxy_cli.core.presets import build_preset, load_presets
     assert "acme" in load_presets()
     assert "github" in load_presets()   # builtin still present
-    bindings = build_preset("acme", "env", "ACME_TOKEN")
+    bindings, rules = build_preset("acme", "env", "ACME_TOKEN")
     assert [b.name for b in bindings] == ["acme-api"]
     assert bindings[0].hosts == ("api.acme.example",)
+    assert rules == []                  # binding-only preset

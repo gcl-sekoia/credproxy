@@ -406,6 +406,24 @@ def materialize_rules(ws: Workspace, notify: Notify = _noop) -> list[Rule]:
     return resolved
 
 
+def _toml_value(v) -> str:
+    """Render a JSON-clean value (str/number/bool/list/nested table) as an inline
+    TOML value. Used for `[rule.params]` values, which may nest arbitrarily (a
+    nested table becomes an inline `{ ... }`); scalars stay round-trippable."""
+    if isinstance(v, bool):                       # before int: bool is an int subclass
+        return "true" if v else "false"
+    if isinstance(v, str):
+        return _toml_str(v)
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{ " + ", ".join(f"{_toml_key(k)} = {_toml_value(x)}"
+                                for k, x in v.items()) + " }"
+    raise ConfigError(f"cannot render param value of type {type(v).__name__}")
+
+
 def _render_rule_block(rule: Rule) -> str:
     """Render a fully-formed `[[rule]]` block (leading blank line), escaping
     every interpolated value so it round-trips as valid TOML."""
@@ -443,15 +461,33 @@ def _render_rule_block(rule: Rule) -> str:
         lines.append(f'script  = {_toml_str(rule.script)}')
     if rule.action == "script" and rule.api != 1:
         lines.append(f'api     = {rule.api}')
+    # `[rule.params]` LAST: once a sub-table opens, no more parent keys are legal.
+    # A child `[rule.params]` folds into this rule's block for `rule remove`
+    # (_RULE_CHILD_RE); nested params values render as inline tables.
+    if rule.params:
+        lines.append("")
+        lines.append("[rule.params]")
+        for k, v in rule.params.items():
+            lines.append(f"{_toml_key(k)} = {_toml_value(v)}")
     return "\n".join(lines) + "\n"
 
 
 def append_rule(ws: Workspace, rule: Rule) -> None:
     """Append a single `[[rule]]` block to the workspace TOML."""
+    append_rules(ws, [rule])
+
+
+def append_rules(ws: Workspace, rules: list[Rule]) -> None:
+    """Append one or more `[[rule]]` blocks in a SINGLE atomic write (so a
+    multi-rule preset stamps all-or-nothing). Order is preserved -- rules
+    evaluate in declaration order, so the caller's order is the runtime order."""
+    if not rules:
+        return
     text = ws.config_path.read_text()
     if text and not text.endswith("\n"):
         text += "\n"
-    _atomic_write_text(ws.config_path, text + _render_rule_block(rule))
+    _atomic_write_text(ws.config_path,
+                       text + "".join(_render_rule_block(r) for r in rules))
 
 
 def remove_rule(ws: Workspace, name: str) -> None:

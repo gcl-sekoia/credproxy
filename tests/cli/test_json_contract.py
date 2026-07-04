@@ -42,15 +42,16 @@ def test_json_confirm_prompt_goes_to_stderr_not_stdout(xdg, workspaces_dir):
 
 
 def test_json_preset_emits_single_object(xdg, workspaces_dir):
-    """`binding add --preset` expands to several bindings but is one command, so
+    """`preset add` expands to several bindings/rules but is one command, so
     --json must emit ONE object, not one per binding."""
     assert _run(["workspace", "create", "w"])[0] == 0
-    code, out, err = _run(["--json", "workspace", "w", "binding", "add",
-                           "--preset", "github"])
+    code, out, err = _run(["--json", "workspace", "w", "preset", "add", "github"])
     assert code == 0, out + err
     obj = json.loads(out)                            # parses as a SINGLE value
-    assert obj["workspace"] == "w"
+    assert obj["workspace"] == "w" and obj["preset"] == "github"
     assert len(obj["bindings"]) == 3                 # github preset -> 3 bindings
+    assert obj["rules"] == []                        # binding-only builtin preset
+    assert "newly_intercepted" in obj
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="logs needs docker")

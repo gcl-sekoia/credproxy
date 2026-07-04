@@ -51,7 +51,7 @@ RESERVED_NAMES = frozenset({
     "create", "use", "list", "enter", "exec", "edit", "start", "stop", "recreate",
     "delete", "apply", "inspect", "config", "logs", "bind-dir",
     # sub-nouns
-    "binding", "mount", "rule",
+    "binding", "mount", "rule", "preset",
     # top-level meta commands (no workspace argument)
     "current", "info", "doctor", "version",
 })
