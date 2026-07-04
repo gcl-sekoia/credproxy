@@ -126,6 +126,7 @@ class Rule:
     # action="script"
     scheme: object | None = None            # a ScriptedScheme (kind="rule")
     script_name: str | None = None          # for /admin/rule-test attribution
+    params: dict | None = None              # operator config the script reads via param()
 
     @property
     def affects_request(self) -> bool:
@@ -431,6 +432,11 @@ def _run_script(rule: Rule, hook: str, ctx) -> None:
     fn = getattr(scheme, hook, None)
     if fn is None:
         return
+    # Bind THIS rule's params onto the (per-flow, rule-shared) ctx just before the
+    # hook runs, so `param()` reads the right config -- two rules sharing one
+    # compiled script each see their own params. starlark-pyo3 copies values at
+    # the call boundary, so a script can't mutate them across requests or rules.
+    ctx.params = rule.params or {}
     try:
         fn(ctx)
     except Exception as e:

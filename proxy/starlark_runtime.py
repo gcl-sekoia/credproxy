@@ -498,6 +498,9 @@ _RULE_PRIMITIVE_NAMES = (
     # inert encoding + json + time + read-only jwt claims inspection
     "b64encode", "b64decode", "b64url_encode", "b64url_decode",
     "json_encode", "json_decode", "now", "now_ms", "jwt_decode_or_none",
+    # per-rule config: `param(key, default)` reads the rule's `params` table (the
+    # SAME primitive injector scripts have -- credential-free, so rule-safe).
+    "param",
 )
 
 RULE_PRIMITIVES = {

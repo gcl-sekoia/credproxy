@@ -941,7 +941,9 @@ def _parse_kv(values: list[str] | None, flag: str) -> dict | None:
 
 
 def _rule_row(rule) -> dict:
-    """Workspace-safe rule summary for rendering (no secret -- rules have none)."""
+    """Operator-facing rule summary for rendering (no secret -- rules have none;
+    params are operator-plaintext config, so they ride the row -- workspace-facing
+    disclosure is /setup, which excludes them)."""
     return {
         "name": rule.name,
         "hosts": list(rule.hosts),
@@ -951,6 +953,7 @@ def _rule_row(rule) -> dict:
         "visible": rule.effective_visible,
         "script": rule.script,
         "status": rule.status,
+        "params": rule.params,
     }
 
 

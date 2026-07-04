@@ -371,7 +371,8 @@ class Renderer:
                 r["name"], ",".join(r["hosts"]),
                 ",".join(r["methods"]) if r.get("methods") else "*",
                 r.get("path") or "*",
-                r["action"] + (f":{r['script']}" if r.get("script") else ""),
+                (r["action"] + (f":{r['script']}" if r.get("script") else "")
+                 + (" +params" if r.get("params") else "")),
                 "visible" if r["visible"] else "HIDDEN",
             ))
         widths = [max(len(row[i]) for row in table) for i in range(len(header))]

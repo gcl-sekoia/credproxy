@@ -114,7 +114,7 @@ script = "scrub-emails"       # resolved via the three-tier scripts registry
 | `block` | yes | `status` (default 403) |
 | `respond` | yes | `status` (required), `headers`, `body` |
 | `rewrite` | no | request: `set_headers`, `remove_headers`; response: `resp_set_headers`, `resp_remove_headers` |
-| `script` | either | `script` (registry name); terminal iff the script calls `block`/`respond` |
+| `script` | either | `script` (registry name), optional `params` (a config table the script reads via `param()` — see *Params* below); terminal iff the script calls `block`/`respond` |
 
 There is no query/body *matching* and no declarative body *rewrite* in v1 — the
 `script` action covers those rare cases.
@@ -271,6 +271,52 @@ def _scrub(obj):
 A request-phase script that calls `block()`/`respond()` is terminal (short-
 circuits injection); one that only mutates is non-terminal. A script that raises
 fails closed (`502 credproxy: rule 'NAME' failed`).
+
+### Params: configuring a shared script
+
+Scripts resolve through the three-tier registry, so they're meant to be **shared
+assets** — an org overlay ships one generic policy and every workspace reuses it.
+A `[rule.params]` table (script action only) passes per-rule config to that shared
+script, so a variation is a config edit, not a fork of the `.star`. The script
+reads it with `param(key, default)` — the **same** primitive scripted injectors
+have:
+
+```toml
+[[rule]]
+name   = "gh-readonly"
+hosts  = ["api.github.com"]
+action = "script"
+script = "readonly-guard"
+
+[rule.params]
+allow_prefixes = ["/repos/myorg/scratch-", "/user/repos"]
+message        = "agent may only create scratch repos"
+```
+
+```python
+def on_request():
+    if req_method() in param("write_methods", ["POST", "PUT", "PATCH", "DELETE"]):
+        for prefix in param("allow_prefixes", []):
+            if req_path().startswith(prefix):
+                return
+        block(403, param("message", "read-only"))
+```
+
+- **Defaults live in the script** (`param(key, default)`), so a rule with no
+  `params` at all still runs — zero-config stays zero-config.
+- **Two rules can share one script** with different `params` and get different
+  behavior; each sees only its own params, and a script can't mutate a param
+  value across requests or rules (values are copied at the Starlark boundary).
+- **Params are config, not secrets.** They appear in plaintext in the TOML, `rule
+  list`, `inspect`, and `applied-rules.json` — correct for the credential-free
+  layer — and are **excluded from `/setup`** even for a `visible = true` rule (a
+  workspace never sees them). **Don't paste tokens into params**; they have no
+  provider and no redaction (that's the injector/binding layer's job).
+- **TOML-first, no `--param` flag.** The interesting values are lists and nested
+  tables, which TOML expresses natively and a `K=V` flag can't — so `rule add
+  script …` then `edit` to add the `[rule.params]` table. Values must be
+  JSON-clean (strings, numbers, booleans, arrays, tables), since they ride the
+  `/admin/config` push.
 
 ## What the workspace sees
 
