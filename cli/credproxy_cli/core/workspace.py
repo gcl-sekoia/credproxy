@@ -53,7 +53,7 @@ RESERVED_NAMES = frozenset({
     # sub-nouns
     "binding", "mount", "rule",
     # top-level meta commands (no workspace argument)
-    "current", "info",
+    "current", "info", "doctor", "version",
 })
 
 

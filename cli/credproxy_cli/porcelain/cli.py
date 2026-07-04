@@ -60,7 +60,7 @@ _WS_NOUN_VERBS = {"create", "use", "list"}
 # Top-level meta commands: no workspace argument. Every token in the three
 # command sets above and here must be in core's RESERVED_NAMES (a workspace
 # can't take a colliding name) -- guarded by test_reserved_names_cover_all_cli_verbs.
-_META_COMMANDS = {"list", "current", "info"}
+_META_COMMANDS = {"list", "current", "info", "doctor"}
 
 
 # ---- a parsed invocation ----------------------------------------------------
@@ -1452,6 +1452,7 @@ _STRICT_HELP = (
     "  credproxy workspace create NAME\n"
     "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
     "  credproxy info                      (global config & state: paths, profile, registries)\n"
+    "  credproxy doctor [NAME] [--fetch]   (preflight: docker/image/config/bindings)\n"
     "  credproxy version                   (or: credproxy --version)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
@@ -2051,6 +2052,24 @@ def _dispatch_meta(ctx: Ctx, head: str, rest: list[str]) -> None:
         if rest:
             fail("usage: credproxy info (takes no arguments)")
         do_info(ctx)
+    elif head == "doctor":
+        fetch = "--fetch" in rest
+        positional = [a for a in rest if not a.startswith("-")]
+        unknown = [a for a in rest if a.startswith("-") and a != "--fetch"]
+        if unknown or len(positional) > 1:
+            fail("usage: credproxy doctor [NAME] [--fetch]")
+        do_doctor(ctx, positional[0] if positional else None, fetch)
+
+
+def do_doctor(ctx: Ctx, name: str | None, fetch: bool) -> None:
+    """Environment preflight + config validation. Reports ALL failures; exits
+    non-zero iff any check fails. NAME limits to one workspace (default: all)."""
+    from ..core import doctor
+    checks = doctor.run(name, fetch=fetch)
+    render.OUT.doctor([{"id": c.id, "ok": c.ok, "message": c.message,
+                        "hint": c.hint} for c in checks])
+    if any(not c.ok for c in checks):
+        sys.exit(1)
 
 
 def _dispatch_def(ctx: Ctx, kind: str, rest: list[str]) -> None:
