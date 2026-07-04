@@ -567,24 +567,43 @@ def _error_location(exc: Exception, fname: str) -> int | None:
     """The line number of a script runtime error, extracted SAFELY.
 
     starlark-pyo3's StarlarkError carries no structured location -- the line lives
-    only inside str(exc), which ALSO contains the (secret-bearing) error message.
-    But the location always renders as `<fname>:<line>`, and `fname` is
-    credproxy-chosen (never secret), so we match ONLY that against the structural
-    traceback markers (`--> <fname>:N` pointer, or `* <fname>:N, in <hook>`
-    frame). Every captured token is therefore `<known-file>:<digits>` -- a line
-    number, never message content -- so this adds authoring value (jump to the
-    failing line, rung 3 of #33) at zero secret risk. Returns None if no location
-    is parseable (e.g. a deadline abort, or a non-Starlark error). Defensive: any
-    failure here yields None rather than propagating."""
+    only inside str(exc), which ALSO contains the (secret-bearing) `error: <msg>`
+    line. We capture only `<line>` against the credproxy-chosen `fname`, so the
+    record can never carry message *content*: every captured token is
+    `<known-file>:<digits>`.
+
+    Decoy-resistance matters for INTEGRITY (a truthful jump target), not secrecy:
+    the rendering order is call-stack frames, then `error: <msg>`, then the
+    ` --> file:line` pointer. So we read the location from the FRAMES, which
+    render strictly BEFORE the message -- we split str(exc) at the first `error:`
+    line and scan only that head, line-anchored to the `  * file:N, in hook`
+    frame marker. A decoy planted in the message therefore can't win (it's after
+    the split, and would need a newline + exact frame prefix anyway). The `-->`
+    pointer is a fallback for the rare no-frame error, taking the LAST match
+    (it renders after the message) and line-anchored likewise.
+
+    Residual channel (accepted, per #33): a *deliberately* malicious script can
+    still choose WHICH line it fails at (branch on secret(), fail at a computed
+    line) -- at most ~log2(#lines) attacker-chosen bits per failed request, into
+    host-side `docker logs` the workspace can't read. The message -- the
+    arbitrary-content channel -- stays closed; this is not a meaningful exfil
+    path. Returns None if no location is parseable (deadline / non-Starlark);
+    defensive -- any failure here yields None rather than propagating."""
     try:
         s = str(exc)
         f = re.escape(fname)
-        m = re.search(rf"-->\s*{f}:(\d+)", s)          # precise error pointer
-        if m:
-            return int(m.group(1))
-        frames = re.findall(rf"{f}:(\d+), in\b", s)      # call-stack frames
+        # Frames render before the message; split there so a message-embedded
+        # decoy (after `error:`) is out of scope entirely.
+        head = re.split(r"(?m)^error:", s, maxsplit=1)[0]
+        frames = re.findall(rf"(?m)^\s*\*\s*{f}:(\d+), in\b", head)
         if frames:
-            return int(frames[-1])                       # innermost
+            return int(frames[-1])                       # innermost frame
+        # No frame: fall back to the `-->` pointer (renders after the message, so
+        # take the last), line-anchored so a mid-message decoy needs a crafted
+        # newline+prefix inside the secret.
+        ptrs = re.findall(rf"(?m)^\s*-->\s*{f}:(\d+)", s)
+        if ptrs:
+            return int(ptrs[-1])
     except Exception:
         return None
     return None

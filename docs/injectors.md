@@ -289,12 +289,15 @@ secret. See `proxy/starlark_runtime.py`.
 forward the request **unmodified**. The failure is logged by **exception type
 and the failing location (`source:line` + hook)** — e.g. `StarlarkError at
 ovh.star:23 in on_request` — but **never the error message**, so a script cannot
-do something like `fail(secret())` to leak the credential into a log (the line
-number is safe; the message is the exfiltration channel, so it's withheld). The
-location is extracted from the credproxy-chosen filename only, so even a secret
-whose value happens to contain a `file:line`-looking string can't influence it.
-A hook also signals its outcome by return value: return `True` if it acted,
-`False` to no-op (which also fails closed — the request is forwarded unmodified).
+do something like `fail(secret())` to leak the credential into a log. The message
+is the arbitrary-content exfiltration channel and stays closed: the location is
+read from the call-stack frame, keyed on the credproxy-chosen filename, so only a
+`file:line` number enters the log — never message content. (A *deliberately*
+malicious script could still encode a few bits by choosing which line to fail at,
+but that lands only in host-side `docker logs` the workspace can't read, and is
+not a meaningful exfiltration path.) A hook also signals its outcome by return
+value: return `True` if it acted, `False` to no-op (which also fails closed — the
+request is forwarded unmodified).
 
 > **Timeouts.** A runaway hook is aborted at a wall-clock deadline **only if** the
 > installed `starlark-pyo3` build exposes cancellation on the call path. If it

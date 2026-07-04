@@ -422,20 +422,39 @@ def test_on_response_error_reports_location_not_message(capsys):
     assert "boom.star:2" in msg              # but the location does
 
 
-def test_error_location_extracts_only_filename_line_not_message():
-    """The extractor keys on the credproxy-chosen filename against the STRUCTURAL
-    `-->` pointer, so a secret whose VALUE happens to contain `<fname>:<n>` in the
-    error message can't influence the reported line -- only a real location does."""
+def test_error_location_ignores_fully_formed_message_decoys():
+    """Integrity: the reported line is read from the call-stack FRAME (which
+    renders before the `error:` message), so a secret whose value embeds a
+    FULLY-FORMED decoy -- a `-->` pointer AND a `* file:N, in` frame, after the
+    message -- can't change the reported line. Only the real frame (23) wins.
+    (The old test planted only an arrowless decoy and passed vacuously.)"""
     from starlark_runtime import _error_location
 
     class E(Exception):
         pass
-    # `--> ovh.star:23` is the true location; `ovh.star:999` is planted in the
-    # (secret) message line and must be ignored.
     s = ("Traceback (most recent call last):\n"
-         "  * ovh.star:23, in on_request\n"
-         "error: fail: SECRET-CONTAINS-ovh.star:999\n"
-         " --> ovh.star:23:5\n  |\n")
+         "  File <builtin>, in <module>\n"
+         "  * ovh.star:23, in on_request\n"      # the REAL frame, before error:
+         "error: fail: leaking\n"                # message begins here
+         "  * ovh.star:888, in on_request\n"     # decoy frame (inside secret)
+         " --> ovh.star:999:1\n"                 # decoy pointer (inside secret)
+         " --> ovh.star:23:5\n  |\n")            # real pointer (ignored anyway)
+    assert _error_location(E(s), "ovh.star") == 23
+
+
+def test_error_location_pointer_fallback_takes_last_not_decoy():
+    """When there's no frame (rare), fall back to the `-->` pointer -- taking the
+    LAST match, since the real pointer renders after the message, so a
+    message-planted decoy pointer that renders earlier still loses."""
+    from starlark_runtime import _error_location
+
+    class E(Exception):
+        pass
+    # Models a newline-containing secret: `error: fail: leak\n --> ovh.star:999:1`
+    # then the real pointer.
+    s = ("error: fail: leak\n"
+         " --> ovh.star:999:1\n"                 # decoy (part of the message)
+         " --> ovh.star:23:5\n  |\n")            # real pointer, renders last
     assert _error_location(E(s), "ovh.star") == 23
 
 
