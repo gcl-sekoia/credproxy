@@ -47,3 +47,132 @@ def test_preset_placeholder_defaults_missing_fields(xdg):
     from credproxy_cli.core.presets import get_preset
     _write_preset("partial", '[placeholder]\nprefix = "x_"\n')   # no length/charset
     assert get_preset("partial").placeholder.prefix == "x_"
+
+
+# ---- service setup packs: bindings + rules (#37) ----------------------------
+
+
+def _write_raw_preset(name: str, toml: str):
+    from credproxy_cli.core.paths import config_dir
+    d = config_dir() / "presets"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.toml").write_text(toml)
+
+
+_MIXED = """
+[placeholder]
+prefix = "ghp_"
+length = 40
+charset = "alnumeric"
+
+[[part]]
+suffix = "api"
+injector = "bearer"
+hosts = ["api.github.com"]
+env = "GITHUB_TOKEN"
+
+[[rule]]
+suffix = "readonly"
+hosts = ["api.github.com"]
+action = "script"
+script = "readonly-guard"
+[rule.params]
+allow_prefixes = ["/repos/myorg/scratch-"]
+message = "scratch only"
+"""
+
+
+def test_preset_mixed_parses_bindings_and_rules(xdg):
+    from credproxy_cli.core.presets import build_preset, get_preset
+    _write_raw_preset("gh-guarded", _MIXED)
+    spec = get_preset("gh-guarded")
+    assert spec.needs_credential is True
+    bindings, rules = build_preset("gh-guarded", "env", "GITHUB_TOKEN")
+    assert [b.name for b in bindings] == ["gh-guarded-api"]
+    # suffix -> name; the params survive to the built Rule.
+    assert [r.name for r in rules] == ["gh-guarded-readonly"]
+    assert rules[0].action == "script" and rules[0].script == "readonly-guard"
+    assert rules[0].params == {"allow_prefixes": ["/repos/myorg/scratch-"],
+                               "message": "scratch only"}
+    # bindings and rules SHARE the freshly-generated placeholder shape.
+    assert bindings[0].placeholder.startswith("ghp_")
+
+
+_RULE_ONLY = """
+[[rule]]
+suffix = "guard"
+hosts = ["api.github.com"]
+action = "block"
+methods = ["DELETE"]
+"""
+
+
+def test_preset_pure_rule_needs_no_credential(xdg):
+    """A pure-rule pack: no [placeholder], no [[part]] -> no provider/secret."""
+    from credproxy_cli.core.presets import build_preset, get_preset
+    _write_raw_preset("policy", _RULE_ONLY)
+    spec = get_preset("policy")
+    assert spec.needs_credential is False and spec.placeholder is None
+    bindings, rules = build_preset("policy")           # zero flags
+    assert bindings == []
+    assert [r.name for r in rules] == ["policy-guard"] and rules[0].action == "block"
+
+
+def test_preset_binding_without_placeholder_rejected(xdg):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.presets import load_presets
+    _write_raw_preset("nop", '[[part]]\nsuffix="api"\ninjector="bearer"\n'
+                             'hosts=["h.example"]\n')
+    with pytest.raises(ConfigError, match="missing \\[placeholder\\]"):
+        load_presets()
+
+
+def test_preset_pure_rule_with_placeholder_rejected(xdg):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.presets import load_presets
+    _write_raw_preset("bad", '[placeholder]\nprefix="p_"\n' + _RULE_ONLY)
+    with pytest.raises(ConfigError, match="meaningless without"):
+        load_presets()
+
+
+def test_preset_empty_rejected(xdg):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.presets import load_presets
+    _write_raw_preset("empty", '[placeholder]\nprefix="p_"\n')  # no parts, no rules
+    with pytest.raises(ConfigError, match="at least one"):
+        load_presets()
+
+
+def test_preset_rule_literal_name_rejected(xdg):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.presets import load_presets
+    _write_raw_preset("bad", '[[rule]]\nname="x"\nsuffix="g"\n'
+                             'hosts=["h.example"]\naction="block"\n')
+    with pytest.raises(ConfigError, match="uses 'suffix'"):
+        load_presets()
+
+
+def test_preset_rule_field_error_surfaces_with_preset_path(xdg):
+    """A bad preset rule fails at preset LOAD via the shared _parse_rule_entry,
+    with the preset path in the message ONCE (not doubled -- review #38), not a
+    deferred crash at apply."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.presets import load_presets
+    _write_raw_preset("bad", '[[rule]]\nsuffix="g"\nhosts=["h.example"]\n'
+                             'action="nope"\n')
+    with pytest.raises(ConfigError, match="action must be one of") as ei:
+        load_presets()
+    msg = str(ei.value)
+    assert "preset 'bad'" in msg and "rule[0]" in msg
+    assert msg.count("preset 'bad'") == 1        # not doubled
+
+
+def test_describe_presets_includes_rules(xdg):
+    from credproxy_cli.core.presets import describe_presets
+    _write_raw_preset("gh-guarded", _MIXED)
+    row = next(p for p in describe_presets() if p["name"] == "gh-guarded")
+    assert row["needs_credential"] is True
+    assert len(row["bindings"]) == 1 and len(row["rules"]) == 1
+    assert row["rules"][0] == {"name": "gh-guarded-readonly",
+                               "hosts": ["api.github.com"], "action": "script",
+                               "script": "readonly-guard", "visible": False}

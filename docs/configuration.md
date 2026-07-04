@@ -354,12 +354,29 @@ rejected. The binding's secret slots must match the scheme's declared slots. The
 referenced injector and provider must resolve. Violations are reported as a
 config error naming the file and the offending field.
 
-**Presets.** Some credentials need several coordinated bindings — a GitHub PAT
-is `bearer` on `api.github.com` but HTTP `basic` on `github.com`/`ghcr.io`.
-`binding add --preset github --provider env --secret GITHUB_TOKEN` generates the
-whole set, all sharing one bare-token placeholder, so there is no hand-computed
-base64 and no fragile coupling. The result is ordinary `[[binding]]` blocks you
-can edit or remove individually.
+**Presets — service setup packs.** A *preset* is a one-command pack for a
+service: the coordinated bindings a credential needs across its hosts **and** the
+credential-free rule guardrails that should ride along. `credproxy workspace NAME
+preset add github` stamps both. Either half is optional:
+
+- **Binding-only** (the GitHub PAT case: `bearer` on `api.github.com`, HTTP
+  `basic` on `github.com`/`ghcr.io`, all sharing one bare-token placeholder — no
+  hand-computed base64, no fragile coupling). Needs `--provider`/`--secret`, or
+  the preset's defaults (`github` defaults `gh-cli`/`github.com`, so bare `preset
+  add github` works off an existing `gh` login).
+- **Pure-rule policy pack** (an org's `readonly-guard` wired to its hosts/params)
+  — no `[placeholder]`, no provider/secret; `preset add org-guardrails` with zero
+  flags.
+
+It's **expansion, not a link**: `preset add` writes ordinary `[[binding]]` /
+`[[rule]]` blocks (named `<preset>-<suffix>`), including `[rule.params]` — edit or
+remove them individually afterward; the proxy never sees a "preset". The add is
+atomic (a name collision fails the whole thing before any write) and announces
+any host it **newly TLS-intercepts** (a preset rule on a bindings-free host flips
+it — see [`rules.md`](rules.md#interception-is-a-union--a-rule-can-flip-a-host-to-intercepted)). `credproxy preset list`
+shows every pack's full expansion (bindings and rules) before you apply. Presets
+are data in the layered registry, so an org ships its own by dropping a TOML in
+its profile overlay — see [`forking.md`](forking.md).
 
 Injector definitions are a separate declarative file type (scheme, params,
 placeholder pattern, env hint) — see [`injectors.md`](injectors.md). Providers
@@ -374,7 +391,7 @@ file. You can always skip the command and edit the TOML directly.
 |---|---|
 | `credproxy workspace create NAME` | Scaffold `<name>.toml` (and the state dir + `auth.token`) from the workspace template. Does not start anything. To use a non-default image, edit the scaffolded `image`. |
 | `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E]` | Append a `[[binding]]` block, materializing `name`/`placeholder` immediately. Validates the whole set before writing, so a rejected binding never lands in the file. Repeat `--secret SLOT=REF` for a multi-slot secret; a single `--secret SLOT=REF` works too when `SLOT` is the scheme's slot name (e.g. `jwt-bearer`'s `private_key`). |
-| `credproxy workspace NAME binding add --preset PRESET --provider P --secret REF` | Generate a coordinated binding set from a preset (e.g. `github`), all sharing one placeholder. The preset manages name/placeholder/env/host. |
+| `credproxy workspace NAME preset add PRESET [--provider P --secret REF]` | Apply a **service setup pack**: stamp the preset's coordinated `[[binding]]` set (sharing one placeholder) **and** its `[[rule]]` guardrails, all-or-nothing. A binding-bearing preset takes provider/secret (or its defaults); a pure-rule pack takes none. Announces any newly-intercepted host. `preset list` shows the full expansion first. |
 | `credproxy workspace NAME binding remove BINDING_NAME` | Remove that binding's block (surgical text edit). Reversible in principle, but loses tuning — gated by confirmation when targeting the default workspace on the loose surface. |
 | `credproxy workspace NAME binding list` | Read and print the bindings (materializing any missing `name`/`placeholder` first). Shows name, injector, provider, secret-id, hosts, env, and placeholder. |
 | `credproxy workspace NAME binding test [BINDING_NAME]` | Dry-run: fetch each binding's secret through its provider and report success and **value length only** (never the value). Exit 1 if any fail. |

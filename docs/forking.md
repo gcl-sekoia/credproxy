@@ -51,8 +51,8 @@ The engine and builtin defaults you inherit; your overlay you own.
   workspace.template.toml      # the scaffold a fresh `create` produces
   injectors/<name>.toml        # request-shaping schemes
   providers/<name>             # secret-source executables
-  scripts/<name>.star          # sandboxed Starlark injector bodies
-  presets/<name>.toml          # coordinated multi-binding sets
+  scripts/<name>.star          # sandboxed Starlark injector / rule bodies
+  presets/<name>.toml          # service setup packs: bindings + rule guardrails
 ```
 
 > The proxy image tag and the `home` fallback are fixed engine constants (not
@@ -74,6 +74,21 @@ Drop a `<name>.toml` (or executable, or `.star`) in the matching subdir. Same
 name as a builtin one **replaces** it; a new name **adds** it. The shapes match
 the builtin examples — see [`injectors.md`](injectors.md),
 [`providers.md`](providers.md), and `cli/credproxy_cli/builtin/presets/github.toml`.
+
+**Shipping a policy as a pack.** A rule script (`scripts/readonly-guard.star`)
+and a **preset** that wires it (`presets/org-guardrails.toml`, an optional
+`[[rule]]` array; see [`rules.md`](rules.md#distributing-a-policy-script--preset))
+travel together in the overlay, so a workspace applies the whole policy with one
+`credproxy workspace NAME preset add org-guardrails`. A preset can carry bindings,
+rules, or both — a **pure-rule** pack (no `[placeholder]`/provider) is a
+credential-free policy bundle.
+
+**Template vs. preset — both exist on purpose.** Baking `[[binding]]`/`[[rule]]`
+blocks into `workspace.template.toml` applies them to **every** workspace at
+**create** time, all-or-nothing. A **preset** is the **per-service, composable,
+post-create** granularity: applied to the workspaces that need it, when they need
+it, and stacked with others. Use the template for "every box gets this"; use a
+preset for "this box also talks to service X."
 
 ## Shipping static files (profile mounts)
 

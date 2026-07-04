@@ -1,24 +1,29 @@
-"""Presets: CLI-side generators that emit a coordinated set of bindings.
+"""Presets: CLI-side generators that emit a coordinated *service setup pack* --
+the bindings a credential needs across a service's hosts AND the credential-free
+guardrails (rules) that should accompany them.
 
-A preset packages the multi-binding shape a single credential needs across a
-service's hosts and schemes -- e.g. a GitHub PAT is `bearer` on api.github.com
-but HTTP `basic` on github.com / ghcr.io. The generated bindings share ONE
-bare-token placeholder, so there is no hand-computed base64 and no fragile
-cross-binding coupling. A preset is pure host-side config
-generation: it produces ordinary `[[binding]]` blocks; the proxy never sees a
-"preset". Editing or removing the generated bindings afterwards is normal.
+The binding half packages the multi-binding shape a single credential needs --
+e.g. a GitHub PAT is `bearer` on api.github.com but HTTP `basic` on github.com /
+ghcr.io, sharing ONE bare-token placeholder. The rule half ships policy: an org
+overlay's `readonly-guard.star` wired to its hosts/params in one `preset add`.
+Either half may be empty: a credential-only preset (`[[part]]` only) or a
+pure-rule policy pack (`[[rule]]` only, no `[placeholder]`/provider/secret).
+
+A preset is pure host-side config **expansion, not a link**: it stamps ordinary
+`[[binding]]` + `[[rule]]` blocks; the proxy never sees a "preset", and
+editing/removing the stamped blocks afterwards is normal.
 
 Presets are *data*, loaded from the layered registry (user > profile overlay >
 builtin, paths.layered_dirs) -- a `<name>.toml` per preset, the name being the
-filename stem. So an org adds its own coordinated sets (an internal artifact
-registry, say) by dropping a TOML in its profile overlay, no code. See
-docs/forking.md and builtin/presets/github.toml for the shape.
+filename stem. So an org adds its own packs by dropping a TOML in its profile
+overlay, no code. See docs/forking.md and builtin/presets/github.toml.
 """
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from . import rules as core_rules
 from .bindings import Binding
 from .errors import ConfigError, CredproxyError, InjectorError
 from .injectors import Placeholder, validate_placeholder
@@ -34,10 +39,19 @@ class _Part:
 
 
 @dataclass(frozen=True)
+class _PresetRule:
+    suffix: str             # appended to the preset's base name (like _Part)
+    rule: "core_rules.Rule"  # a validated Rule with name=None (filled at build)
+
+
+@dataclass(frozen=True)
 class PresetSpec:
     name: str
-    placeholder: Placeholder  # the shared, service-shaped sentinel
+    # The shared, service-shaped sentinel -- None for a pure-rule preset (nothing
+    # to couple: rules carry no placeholder).
+    placeholder: Placeholder | None
     parts: tuple[_Part, ...]
+    rules: tuple[_PresetRule, ...] = ()
     # A canonical source so the common case needs no flags. `default_provider`
     # fills an omitted `--provider`. `default_secret` fills an omitted `--secret`
     # but ONLY when the resolved provider is `default_provider` -- a secret ref's
@@ -45,6 +59,12 @@ class PresetSpec:
     # op:// path), so it can't be defaulted for an arbitrary provider.
     default_provider: str | None = None
     default_secret: str | None = None
+
+    @property
+    def needs_credential(self) -> bool:
+        """A preset with bindings needs a provider/secret (and a placeholder);
+        a pure-rule pack needs none."""
+        return bool(self.parts)
 
 
 def _parse_preset(path, name: str) -> PresetSpec:
@@ -54,20 +74,35 @@ def _parse_preset(path, name: str) -> PresetSpec:
     except (OSError, tomllib.TOMLDecodeError) as e:
         raise ConfigError(f"{src}: unreadable ({e})")
 
-    ph = raw.get("placeholder")
-    if not isinstance(ph, dict):
-        raise ConfigError(f"{src}: missing [placeholder] table")
-    # Validate through the shared injector path so a bad charset or a
-    # length <= prefix (zero-entropy, non-unique placeholder) fails HERE, not as
-    # a KeyError in generate() or a silently-broken sentinel at build time.
-    try:
-        placeholder = validate_placeholder(ph, src)
-    except InjectorError as e:
-        raise ConfigError(str(e)) from e
+    parts_raw = raw.get("part") or []
+    rules_raw = raw.get("rule") or []
+    if not isinstance(parts_raw, list):
+        raise ConfigError(f"{src}: [[part]] must be an array of tables")
+    if not isinstance(rules_raw, list):
+        raise ConfigError(f"{src}: [[rule]] must be an array of tables")
+    if not parts_raw and not rules_raw:
+        raise ConfigError(f"{src}: needs at least one [[part]] or [[rule]]")
 
-    parts_raw = raw.get("part")
-    if not isinstance(parts_raw, list) or not parts_raw:
-        raise ConfigError(f"{src}: needs a non-empty [[part]] array")
+    # [placeholder] is the BINDING coupling mechanism, required only when the
+    # preset carries bindings; a pure-rule pack has nothing to couple.
+    ph = raw.get("placeholder")
+    if parts_raw:
+        if not isinstance(ph, dict):
+            raise ConfigError(f"{src}: missing [placeholder] table "
+                              f"(required when the preset has [[part]] bindings)")
+        # Validate through the shared injector path so a bad charset or a length
+        # <= prefix (zero-entropy, non-unique placeholder) fails HERE, not as a
+        # KeyError in generate() or a silently-broken sentinel at build time.
+        try:
+            placeholder = validate_placeholder(ph, src)
+        except InjectorError as e:
+            raise ConfigError(str(e)) from e
+    else:
+        if ph is not None:
+            raise ConfigError(f"{src}: [placeholder] is meaningless without "
+                              f"[[part]] bindings (rules carry no placeholder)")
+        placeholder = None
+
     parts = []
     for i, pr in enumerate(parts_raw):
         where = f"{src} part[{i}]"
@@ -88,13 +123,44 @@ def _parse_preset(path, name: str) -> PresetSpec:
         parts.append(_Part(suffix=suffix, injector=injector,
                            hosts=tuple(hosts), env=env))
 
+    rules = [_parse_preset_rule(r, i, src) for i, r in enumerate(rules_raw)]
+
     return PresetSpec(
         name=name,
         placeholder=placeholder,
         parts=tuple(parts),
+        rules=tuple(rules),
         default_provider=raw.get("default_provider"),
         default_secret=raw.get("default_secret"),
     )
+
+
+def _parse_preset_rule(entry, i: int, src: str) -> _PresetRule:
+    """One preset `[[rule]]` -> a _PresetRule. Like `[[part]]`, it carries a
+    `suffix` (expanding to `name = <preset>-<suffix>`), NOT a literal `name`;
+    the rest is a standard rule table validated through the SAME
+    `core.rules._parse_rule_entry` the load path and `rule add` use -- so a bad
+    preset rule fails at preset load with the same errors (and inherits the
+    CLI<->proxy validator mirror + #36's `[rule.params]` validation)."""
+    # `where` is the location fragment; `src` is passed separately as the message
+    # source (both to _parse_rule_entry and our own raises), so it must NOT be
+    # baked into `where` too -- else _parse_rule_entry's `f"{source}: {where}..."`
+    # would print the preset path twice.
+    where = f"rule[{i}]"
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{src}: {where} must be a table")
+    suffix = entry.get("suffix")
+    if not isinstance(suffix, str) or not suffix:
+        raise ConfigError(f"{src}: {where} 'suffix' must be a non-empty string")
+    if "name" in entry:
+        raise ConfigError(f"{src}: {where} a preset rule uses 'suffix' (-> "
+                          f"name '<preset>-<suffix>'), not a literal 'name'")
+    fields = {k: v for k, v in entry.items() if k != "suffix"}
+    try:
+        rule = core_rules._parse_rule_entry(fields, src, where)
+    except CredproxyError as e:
+        raise ConfigError(str(e)) from e
+    return _PresetRule(suffix=suffix, rule=rule)
 
 
 def load_presets() -> dict[str, PresetSpec]:
@@ -137,12 +203,13 @@ def get_preset(name: str) -> PresetSpec:
 
 
 def describe_presets() -> list[dict]:
-    """Structured description of every known preset, for `preset list`: each
-    preset's name and the bindings it expands to (suffix/injector/hosts/env).
-    No secret/provider -- those are supplied at `binding add` time."""
+    """Structured description of every known preset, for `preset list`: the
+    bindings AND rules it expands to, so an operator sees the full stamp before
+    applying. No secret/provider -- those are supplied at `preset add` time."""
     return [
         {
             "name": spec.name,
+            "needs_credential": spec.needs_credential,
             "bindings": [
                 {
                     "name": f"{spec.name}-{part.suffix}",
@@ -152,18 +219,30 @@ def describe_presets() -> list[dict]:
                 }
                 for part in spec.parts
             ],
+            "rules": [
+                {
+                    "name": f"{spec.name}-{pr.suffix}",
+                    "hosts": list(pr.rule.hosts),
+                    "action": pr.rule.action,
+                    "script": pr.rule.script,
+                    "visible": pr.rule.effective_visible,
+                }
+                for pr in spec.rules
+            ],
         }
         for spec in sorted(load_presets().values(), key=lambda s: s.name)
     ]
 
 
-def build_preset(preset: str, provider: str, secret: str) -> list[Binding]:
-    """Generate the binding set for `preset`, all sharing one freshly-generated
-    placeholder and resolving the same single-slot `secret` ref via `provider`.
-    Raises CredproxyError on an unknown preset name."""
+def build_preset(preset: str, provider: str | None = None,
+                 secret: str | None = None) -> tuple[list[Binding], list["core_rules.Rule"]]:
+    """Expand `preset` into its `(bindings, rules)`. All bindings share one
+    freshly-generated placeholder and resolve the same single-slot `secret` ref
+    via `provider` (both None for a pure-rule preset). Each rule's `name` is
+    filled to `<preset>-<suffix>`. Raises CredproxyError on an unknown preset."""
     spec = get_preset(preset)
-    placeholder = spec.placeholder.generate()
-    return [
+    placeholder = spec.placeholder.generate() if spec.placeholder else None
+    bindings = [
         Binding(
             name=f"{spec.name}-{part.suffix}",
             injector=part.injector,
@@ -175,3 +254,5 @@ def build_preset(preset: str, provider: str, secret: str) -> list[Binding]:
         )
         for part in spec.parts
     ]
+    rules = [replace(pr.rule, name=f"{spec.name}-{pr.suffix}") for pr in spec.rules]
+    return bindings, rules

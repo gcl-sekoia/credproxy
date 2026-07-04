@@ -492,3 +492,17 @@ def test_rewrite_empty_container_rejected(xdg, workspaces_dir):
     """)
     with pytest.raises(ConfigError, match="NON-EMPTY|at least one"):
         load_rules(ws)
+
+
+def test_render_rule_block_roundtrips_nested_params(xdg, workspaces_dir):
+    """A stamped `[rule.params]` (incl. nested tables + numbers/bools) reloads
+    byte-for-value identical -- _render_rule_block <-> _parse_rule_entry (#37)."""
+    from credproxy_cli.core.rules import Rule, append_rules, load_rules
+    ws = _write_ws(workspaces_dir, "w", 'image = "x"\n')
+    params = {"allow": ["/a", "/b"], "limit": 5, "strict": True,
+              "nested": {"k": "v", "n": 2}}
+    append_rules(ws, [Rule(name="g", hosts=("api.github.com",), action="script",
+                           script="scrub-emails", params=params)])
+    (r,) = load_rules(ws)
+    assert r.params == params
+    assert "[rule.params]" in ws.config_path.read_text()

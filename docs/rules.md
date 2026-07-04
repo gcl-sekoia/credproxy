@@ -318,6 +318,19 @@ def on_request():
   JSON-clean (strings, numbers, booleans, arrays, tables), since they ride the
   `/admin/config` push.
 
+### Distributing a policy: script + preset
+
+A shared script plus per-rule params is only half the story — the other half is
+*wiring it into a workspace in one command*. That's the **preset**: a preset's
+optional `[[rule]]` array ships the guardrails alongside (or instead of) a
+credential's bindings, so `credproxy workspace NAME preset add org-guardrails`
+stamps the whole policy — hosts, params, visibility — in one move. An org overlay
+ships the `.star` under `scripts/` and the pack under `presets/` in the same
+profile, and every workspace applies it identically. See the preset section in
+[`configuration.md`](configuration.md#bindings) and [`forking.md`](forking.md);
+a preset `[[rule]]` is a standard rule with a `suffix` (→ `name`
+`<preset>-<suffix>`) and full `[rule.params]` support.
+
 ## What the workspace sees
 
 - **`/setup` gains a `rules` array** — name, hosts, methods, path, action kind
