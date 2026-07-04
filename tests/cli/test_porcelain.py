@@ -647,6 +647,23 @@ def test_json_error_nonzero_exit(xdg):
     assert ec != 0
 
 
+def test_doctor_fetch_without_name_refused(xdg):
+    """`doctor --fetch` with no NAME resolves secrets across every workspace
+    (prompts/vault-unlocks) -- refuse it; require an explicit NAME (#30)."""
+    ec, out, err = _run(["doctor", "--fetch"])
+    assert ec == 1
+    assert "NAME" in err and "--fetch" in err
+
+
+def test_doctor_scan_all_without_fetch_is_allowed(xdg, workspaces_dir, monkeypatch):
+    """A bare read-only `doctor` (no NAME, no --fetch) is fine -- it must NOT hit
+    the requires-NAME guard (that's --fetch-only)."""
+    import credproxy_cli.core.doctor as doctor_mod
+    monkeypatch.setattr(doctor_mod, "run", lambda name=None, *, fetch=False: [])
+    ec, out, err = _run(["doctor"])
+    assert ec == 0  # no checks -> no failures; guard did not fire
+
+
 # ---- destructive gate: delete -----------------------------------------------
 
 

@@ -20,7 +20,7 @@ from . import hostmatch
 from .errors import CredproxyError
 from .imageenv import ImageEnv
 from .paths import IMAGE_TAG
-from .workspace import Workspace, list_names
+from .workspace import Workspace, for_name, list_names
 
 
 @dataclass
@@ -41,11 +41,16 @@ def _fail(id: str, message: str, hint: str | None = None) -> Check:
 
 def run(ws_name: str | None = None, *, fetch: bool = False) -> list[Check]:
     """All checks: the environment, then each target workspace (NAME, or every
-    workspace when NAME is None)."""
+    workspace when NAME is None).
+
+    An explicit NAME goes through `for_name`, the same charset/reserved-name/
+    traversal validation every other command uses -- so `doctor '../../etc/passwd'`
+    is a clean error, not a config read outside the workspaces dir. `list_names()`
+    only returns already-valid names, so the scan-all path needs no re-validation."""
     checks = _env_checks()
-    names = [ws_name] if ws_name else list_names()
-    for name in names:
-        checks += _workspace_checks(Workspace(name), fetch=fetch)
+    targets = [for_name(ws_name)] if ws_name else [Workspace(n) for n in list_names()]
+    for ws in targets:
+        checks += _workspace_checks(ws, fetch=fetch)
     return checks
 
 
@@ -91,14 +96,25 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
     except CredproxyError as e:
         out.append(_fail(f"ws:{ws.name}:config", f"[{ws.name}] config: {e}"))
     out += _binding_checks(ws, fetch=fetch)
+    out += _rule_checks(ws)
     return out
 
 
 def _binding_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
-    """Per-binding, INDEPENDENT checks (injector resolves, provider resolves, host
-    globs valid) so a run reports every problem, not just the first."""
-    from .injectors import find_injector
-    from .providers import find_provider
+    """Binding checks in two layers, so a run both reports EVERY problem and
+    upholds the "doctor passes => start passes" contract:
+
+    1. Independent per-binding probes (injector resolves, provider resolves, each
+       host glob valid) off the raw TOML -- report-all, so one broken binding
+       doesn't hide the next one's problems.
+    2. The real aggregate `load_bindings(ws)` -- the SAME parse+validate `start`
+       runs. This catches what the shallow probes structurally can't: missing
+       required fields, duplicate names, secret slots that don't match the scheme,
+       (host, wire-location) collisions, a scripted injector naming a missing
+       `.star`. First-error, but that's the action-time behavior we're mirroring.
+
+    `fetch` (opt-in) additionally resolves each secret via its provider; it reuses
+    the layer-2 parse, so it means only "also fetch", never a different verdict."""
     out: list[Check] = []
     try:
         raw = tomllib.loads(ws.config_path.read_text())
@@ -108,45 +124,78 @@ def _binding_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
     if not isinstance(bindings, list):
         return [_fail(f"ws:{ws.name}:bindings", f"[{ws.name}] `binding` must be an array")]
 
+    _probe_bindings_raw(ws, bindings, out)
+
+    # Layer 2: the authoritative parse+validate. Reuse its result for --fetch so a
+    # parse failure can't yield a different exit code with vs. without --fetch.
+    from .bindings import load_bindings, test_bindings
+    bs = None
+    try:
+        bs = load_bindings(ws)
+        out.append(_ok(f"ws:{ws.name}:bindings",
+                       f"[{ws.name}] {len(bs)} binding(s) pass static checks"))
+    except (CredproxyError, tomllib.TOMLDecodeError, OSError) as e:
+        # load_bindings does a raw tomllib.loads (TOMLDecodeError isn't a
+        # CredproxyError); the top-of-function probe already returns on a parse
+        # error, but stay defensive against a between-reads change.
+        out.append(_fail(f"ws:{ws.name}:bindings", f"[{ws.name}] bindings: {e}"))
+
+    if fetch and bs is not None:
+        for r in test_bindings(bs):
+            out.append(_ok(f"ws:{ws.name}:{r.name}:fetch",
+                           f"[{ws.name}] {r.name}: secret resolved ({r.value_len} chars)")
+                       if r.ok else
+                       _fail(f"ws:{ws.name}:{r.name}:fetch", f"[{ws.name}] {r.name}: {r.error}"))
+    return out
+
+
+def _probe_bindings_raw(ws: Workspace, bindings: list, out: list[Check]) -> None:
+    """Layer-1 report-all probes. Check ids are qualified by binding INDEX (not
+    the human name, which may be absent or duplicated) plus a host index, so no
+    two failures ever share an id -- a `--json` consumer keying by id can't
+    silently drop one. The human `name` still rides in the message."""
+    from .injectors import find_injector
+    from .providers import find_provider
     for i, b in enumerate(bindings):
+        bid = f"ws:{ws.name}:binding[{i}]"
         if not isinstance(b, dict):
-            out.append(_fail(f"ws:{ws.name}:binding[{i}]",
-                             f"[{ws.name}] binding[{i}] is not a table"))
+            out.append(_fail(bid, f"[{ws.name}] binding[{i}] is not a table"))
             continue
-        name = b.get("name") or f"binding[{i}]"
+        label = b.get("name") or f"binding[{i}]"
         inj = b.get("injector")
         if isinstance(inj, str) and inj:
             try:
                 find_injector(inj)
             except CredproxyError as e:
-                out.append(_fail(f"ws:{ws.name}:{name}:injector", f"[{ws.name}] {name}: {e}"))
+                out.append(_fail(f"{bid}:injector", f"[{ws.name}] {label}: {e}"))
         prov = b.get("provider")
         if isinstance(prov, str) and prov:
             try:
                 find_provider(prov)
             except CredproxyError as e:
-                out.append(_fail(f"ws:{ws.name}:{name}:provider", f"[{ws.name}] {name}: {e}"))
+                out.append(_fail(f"{bid}:provider", f"[{ws.name}] {label}: {e}"))
         hosts = b.get("hosts")
         if isinstance(hosts, list):
-            for h in hosts:
+            for j, h in enumerate(hosts):
                 if isinstance(h, str) and hostmatch.is_pattern(h):
                     err = hostmatch.validate_pattern(h)
                     if err:
-                        out.append(_fail(f"ws:{ws.name}:{name}:host", f"[{ws.name}] {name}: {err}"))
+                        out.append(_fail(f"{bid}:host[{j}]", f"[{ws.name}] {label}: {err}"))
 
-    if fetch:
-        from .bindings import load_bindings, test_bindings
-        try:
-            bs = load_bindings(ws)
-            for r in test_bindings(bs):
-                out.append(_ok(f"ws:{ws.name}:{r.name}:fetch",
-                               f"[{ws.name}] {r.name}: secret resolved ({r.value_len} chars)")
-                           if r.ok else
-                           _fail(f"ws:{ws.name}:{r.name}:fetch", f"[{ws.name}] {r.name}: {r.error}"))
-        except CredproxyError as e:
-            out.append(_fail(f"ws:{ws.name}:fetch", f"[{ws.name}] fetch: {e}"))
 
-    if not any(not c.ok for c in out):
-        out.append(_ok(f"ws:{ws.name}:bindings",
-                       f"[{ws.name}] {len(bindings)} binding(s) resolve"))
-    return out
+def _rule_checks(ws: Workspace) -> list[Check]:
+    """The credential-free `[[rule]]` layer runs its own parse+validate at `start`
+    (`materialize_rules -> rules.validate`: bad path glob, unknown script, duplicate
+    names, action-field errors). Mirror the layer-2 bindings check so a broken rule
+    is caught by doctor too, not one PR later at `start`."""
+    from .rules import load_rules
+    try:
+        rs = load_rules(ws)
+        return [_ok(f"ws:{ws.name}:rules", f"[{ws.name}] {len(rs)} rule(s) valid")]
+    except (CredproxyError, tomllib.TOMLDecodeError, OSError) as e:
+        # load_rules does a raw tomllib.loads, which raises TOMLDecodeError (not a
+        # CredproxyError) on a malformed file -- catch it so doctor reports the
+        # broken workspace instead of crashing on the command whose whole job is
+        # to report failures cleanly. (`:config`/`:toml` already flag the parse
+        # error; this keeps the sweep going.)
+        return [_fail(f"ws:{ws.name}:rules", f"[{ws.name}] rules: {e}")]

@@ -2065,6 +2065,13 @@ def do_doctor(ctx: Ctx, name: str | None, fetch: bool) -> None:
     """Environment preflight + config validation. Reports ALL failures; exits
     non-zero iff any check fails. NAME limits to one workspace (default: all)."""
     from ..core import doctor
+    # A bare read-only scan-all is fine (matches `list`), but `--fetch` resolves
+    # secrets -- which can prompt / unlock a vault -- so refuse to fan that out
+    # across every workspace from one nameless command; require an explicit NAME.
+    if fetch and name is None:
+        fail("`doctor --fetch` needs a workspace NAME (it resolves secrets, which "
+             "can prompt or unlock a vault -- refusing to fan that out across every "
+             "workspace); run `doctor` with no NAME for a read-only scan of all")
     checks = doctor.run(name, fetch=fetch)
     render.OUT.doctor([{"id": c.id, "ok": c.ok, "message": c.message,
                         "hint": c.hint} for c in checks])
