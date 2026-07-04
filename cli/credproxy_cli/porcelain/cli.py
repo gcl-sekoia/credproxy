@@ -39,7 +39,7 @@ from ..core import docker as core_docker
 from ..core import lifecycle
 from ..core import pointer
 from ..core import workspace as core_workspace
-from ..core.errors import CredproxyError
+from ..core.errors import CredproxyError, DependencyError
 from ..core.workspace import RESERVED_NAMES, Workspace, for_name
 from ..core.paths import (
     IMAGE_TAG,
@@ -538,9 +538,12 @@ def _logs_stream(ws: Workspace, as_json: bool, audit_only: bool) -> None:
     import json
     import subprocess
 
-    proc = subprocess.Popen(
-        ["docker", "logs", "-f", ws.proxy_container],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        proc = subprocess.Popen(
+            ["docker", "logs", "-f", ws.proxy_container],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except FileNotFoundError:
+        raise DependencyError(core_docker.DOCKER_MISSING_MSG)
     interrupted = False
     try:
         assert proc.stdout is not None
@@ -1229,12 +1232,16 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
         "-m", "pytest", "-v", "tests/", "--ignore=tests/cli",
     ]
     cmd += trailing
-    if cli_failed:
-        # Run via subprocess so the final exit reflects the combined result.
-        r = subprocess.run(cmd, check=False)
-        sys.exit(1 if r.returncode == 0 else r.returncode)
-    # Happy path or proxy-only: exec into docker (preserves TTY).
-    os.execvp("docker", cmd)
+    try:
+        if cli_failed:
+            # Run via subprocess so the final exit reflects the combined result.
+            r = subprocess.run(cmd, check=False)
+            sys.exit(1 if r.returncode == 0 else r.returncode)
+        # Happy path or proxy-only: exec into docker (preserves TTY).
+        os.execvp("docker", cmd)
+    except FileNotFoundError:
+        # subprocess.run / execvp both raise this if `docker` isn't on PATH.
+        raise DependencyError(core_docker.DOCKER_MISSING_MSG)
 
 
 def do_dev_reload(ctx: Ctx, name: str | None) -> None:

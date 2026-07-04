@@ -10,7 +10,8 @@ import json
 import subprocess
 from dataclasses import dataclass
 
-from .errors import ImageError
+from .docker import DOCKER_MISSING_MSG
+from .errors import DependencyError, ImageError
 from .paths import IMAGE_TAG
 
 
@@ -33,6 +34,10 @@ class ImageEnv:
             raise ImageError(
                 f"image {image} not found; run `credproxy dev build` first"
             )
+        except FileNotFoundError:
+            # First docker call on the `start` path -- the one a Docker-less new
+            # user hits first. One clean line instead of a traceback (#16).
+            raise DependencyError(DOCKER_MISSING_MSG)
         env_lines = json.loads(out)[0]["Config"].get("Env") or []
         env = dict(line.split("=", 1) for line in env_lines if "=" in line)
         try:

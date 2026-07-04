@@ -9,18 +9,48 @@ from __future__ import annotations
 
 import subprocess
 
-from .errors import DockerError
+from .errors import DependencyError, DockerError
+
+# One shared, actionable message for a missing `docker` binary. A brand-new user
+# without Docker would otherwise hit a raw FileNotFoundError traceback on their
+# first `start`; every checked docker call routes through _run/_popen so it
+# surfaces as one clean `[credproxy] ...` line instead (and serializes as a
+# DependencyError under --json). Reused by the odd-shaped call sites in porcelain
+# (imageenv.load, do_logs, dev test's execvp).
+DOCKER_MISSING_MSG = (
+    "docker not found on PATH — install Docker (or podman with a "
+    "docker-compatible shim) and make sure the daemon is running"
+)
+
+
+def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run(["docker", *args], ...)`, translating a missing binary
+    (FileNotFoundError) into a DependencyError. All CHECKED docker calls go
+    through here; best-effort ones (docker_quiet, logs_tail) swallow instead."""
+    try:
+        return subprocess.run(["docker", *args], **kwargs)
+    except FileNotFoundError:
+        raise DependencyError(DOCKER_MISSING_MSG)
+
+
+def _popen(args: list[str], **kwargs) -> subprocess.Popen:
+    """`subprocess.Popen(["docker", *args], ...)`, translating a missing binary
+    into a DependencyError (see _run)."""
+    try:
+        return subprocess.Popen(["docker", *args], **kwargs)
+    except FileNotFoundError:
+        raise DependencyError(DOCKER_MISSING_MSG)
 
 
 def docker(args: list[str], stream: bool = False) -> None:
     """Run `docker <args>`; raise DockerError on error. With stream=True,
     docker's output goes straight to the terminal."""
     if stream:
-        if subprocess.run(["docker", *args], check=False).returncode != 0:
+        if _run(args, check=False).returncode != 0:
             raise DockerError(f"docker {args[0]} failed")
         return
-    r = subprocess.run(
-        ["docker", *args],
+    r = _run(
+        args,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
@@ -31,19 +61,24 @@ def docker(args: list[str], stream: bool = False) -> None:
 
 
 def docker_quiet(args: list[str]) -> None:
-    """Run `docker <args>`, ignoring failures (best-effort cleanup)."""
-    subprocess.run(
-        ["docker", *args],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    """Run `docker <args>`, ignoring failures (best-effort cleanup) -- including
+    a missing docker binary, which must never mask the error being cleaned up
+    after."""
+    try:
+        subprocess.run(
+            ["docker", *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError:
+        pass
 
 
 def docker_output(args: list[str]) -> str:
     """Run `docker <args>` and return stdout; raise DockerError on error."""
-    r = subprocess.run(
-        ["docker", *args],
+    r = _run(
+        args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -56,8 +91,8 @@ def docker_output(args: list[str]) -> str:
 
 def inspect(ref: str, fmt: str) -> str | None:
     """`docker inspect -f <fmt> <ref>`; None if the object is absent."""
-    r = subprocess.run(
-        ["docker", "inspect", "-f", fmt, ref],
+    r = _run(
+        ["inspect", "-f", fmt, ref],
         capture_output=True,
         text=True,
         check=False,
@@ -73,13 +108,18 @@ def container_status(name: str) -> str | None:
 def logs_tail(name: str, n: int = 20) -> str:
     """Last `n` log lines of a container, stdout+stderr MERGED (tracebacks land
     on the container's stderr), best-effort -- '' if unavailable. Used to
-    surface a crashed proxy's reason inline rather than via a separate command."""
-    r = subprocess.run(
-        ["docker", "logs", "--tail", str(n), name],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    surface a crashed proxy's reason inline rather than via a separate command.
+    Best-effort: '' on any failure, including a missing docker binary (it must
+    never mask the crash it's trying to explain)."""
+    try:
+        r = subprocess.run(
+            ["docker", "logs", "--tail", str(n), name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return ""
     if r.returncode != 0:
         return ""
     return r.stdout + r.stderr
@@ -108,12 +148,12 @@ def seed_volume_from_container(
     Both pipe stages' exit codes are checked, so a partial/failed capture raises
     rather than silently leaving a half-seeded volume."""
     userns_flags = userns_flags or []
-    cp = subprocess.Popen(
-        ["docker", "cp", "-a", f"{container}:{src_path}/.", "-"],
+    cp = _popen(
+        ["cp", "-a", f"{container}:{src_path}/.", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    extract = subprocess.Popen(
-        ["docker", "run", "--rm", "-i", *userns_flags, "--user", "0",
+    extract = _popen(
+        ["run", "--rm", "-i", *userns_flags, "--user", "0",
          "-v", f"{volume}:/dst", helper_image, "tar", "-xpf", "-", "-C", "/dst"],
         stdin=cp.stdout, stderr=subprocess.PIPE,
     )
@@ -146,8 +186,8 @@ def resolve_host_port(container_name: str, container_port: int) -> int:
 
     Raises DockerError if the container is not running or the port is not
     published."""
-    r = subprocess.run(
-        ["docker", "port", container_name, f"{container_port}/tcp"],
+    r = _run(
+        ["port", container_name, f"{container_port}/tcp"],
         capture_output=True,
         text=True,
         check=False,

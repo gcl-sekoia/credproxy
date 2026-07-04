@@ -631,6 +631,29 @@ def test_json_list(xdg, workspaces_dir, monkeypatch):
     assert rows[0]["name"] == "j1"
 
 
+def test_missing_docker_is_clean_error_not_traceback(xdg, workspaces_dir, monkeypatch):
+    """End-to-end (#16): with `docker` absent from PATH, a command that touches
+    docker exits 1 with one `[credproxy] docker not found on PATH ...` line on
+    stderr -- no traceback -- and serializes as a DependencyError under --json."""
+    import subprocess
+    (workspaces_dir / "d1.toml").write_text('image = "x"\n')
+
+    def boom(argv, *a, **k):
+        raise FileNotFoundError(2, "No such file or directory", "docker")
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
+
+    ec, out, err = _run(["list"])  # list -> docker.container_status per workspace
+    assert ec == 1
+    assert "Traceback" not in err
+    assert err.strip() == "[credproxy] docker not found on PATH — install Docker" \
+        " (or podman with a docker-compatible shim) and make sure the daemon is running"
+
+    ec, out, _ = _run(["--json", "list"])
+    assert ec == 1
+    assert json.loads(out)["error"]["type"] == "DependencyError"
+
+
 def test_json_error_shape(xdg):
     """In --json mode, errors serialize as {"error": {"type": ..., "message": ...}}."""
     ec, out, err = _run(["--json", "workspace", "create", "delete"])
