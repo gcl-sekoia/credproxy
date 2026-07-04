@@ -1493,14 +1493,16 @@ def _maybe_auto_stop(ws: Workspace, our_pid: int, notify: Notify) -> None:
     """Stop the workspace if auto_stop is enabled and no other sessions live."""
     import tomllib
 
-    # Read config fresh -- auto_stop may have been edited mid-session.
+    # Read config fresh -- auto_stop may have been edited mid-session. Match
+    # load_config's strictness with `is True`: a non-bool (e.g. the string
+    # "false") must not enable auto-stop via a mid-session edit either.
     if not ws.config_path.exists():
         return
     try:
         raw = tomllib.loads(ws.config_path.read_text())
     except Exception:
         return
-    if not raw.get("auto_stop", False):
+    if raw.get("auto_stop") is not True:
         return
 
     # Decide-and-stop under the lifecycle lock so the "no other sessions -> stop"

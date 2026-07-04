@@ -113,7 +113,14 @@ hosts    = ["sts.amazonaws.com"]
 | `run_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the workspace `docker run`. credproxy's structural flags (`--name`, labels, `--network`, the home volume) are applied **after** these and win on conflict, so `run_flags` can't detach the netns or rename the container; additive flags (`--userns`, an extra `--mount`/`-v`, `--security-opt`) take effect. The main use is runtime-specific uid mapping (see *Non-root user & mount ownership* below). |
 | `map_host_user` | bool | `false` | Make the non-root `user` own your bind mounts without changing host ownership. credproxy picks the runtime-appropriate lever automatically (`--userns=keep-id` on rootless podman; a no-op on Docker, where the matching uid does it). **Requires `user`** (error otherwise). The managed alternative to a hand-written `--userns` in `run_flags` — and if you set both, the `run_flags` one wins (escape hatch overrides the knob). See *Non-root user & mount ownership* below. |
 | `user_uid` | int | host uid | The in-container uid of `user` — the uid `map_host_user`'s keep-id maps your host uid **onto** (rootless podman). Host uid and this need not be equal; keep-id maps across them. Defaults to your host uid (correct for a `setup`-provisioned user made as `$CREDPROXY_HOST_UID`); set it to a baked user's uid (the default image's `vscode` is `1000`, which the scaffold fills in). **Requires `user`** (error otherwise). Only consumed with `map_host_user` on rootless podman. |
-| `auto_stop` | bool | `false` | When `true`, the workspace stops once the last `enter` session exits. Read fresh at session end, so toggling it mid-session takes effect immediately. A stopped workspace is resumed automatically by the next `enter`. |
+| `auto_stop` | bool | `false` | When `true`, the workspace stops once the last `enter` session exits. Read fresh at session end, so toggling it mid-session takes effect immediately. A stopped workspace is resumed automatically by the next `enter`. Must be a real boolean — `auto_stop = "false"` (a string) is rejected, not silently truthy. |
+
+**Unknown keys are rejected.** Since the TOML is the single source of truth, a
+misspelled top-level key (`mount` for `mounts`, `setup_cmd`, `user_id`) would
+otherwise parse fine and silently do nothing. `load_config` fails with `unknown
+key(s): …` (with a did-you-mean) instead, so a typo is caught at `start`/`apply`
+rather than surfacing as mysteriously-wrong behavior. (`list` and cwd resolution
+stay tolerant of a broken peer config — one bad file never breaks the others.)
 
 Changing `image`, `home`, `mounts`, `env`, `setup`, `run_flags`, or
 `map_host_user` is **container-spec drift**: it requires recreating the

@@ -1052,3 +1052,92 @@ def test_write_added_mount_roundtrips_through_load_config(xdg, workspaces_dir):
     cfg = load_config(ws)
     assert {"kind": "volume", "name": "cache", "target": "/c",
             "readonly": True} in cfg["mounts"]
+
+
+# ---- unknown top-level keys (#17) --------------------------------------------
+
+
+def test_unknown_top_level_key_rejected(xdg, workspaces_dir):
+    """A typo'd key silently no-ops otherwise -- reject it, naming the key."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", 'image = "x"\nsetup_cmd = ["echo hi"]\n')
+    with pytest.raises(ConfigError) as ei:
+        load_config(Workspace("w"))
+    assert "unknown key(s)" in str(ei.value)
+    assert "setup_cmd" in str(ei.value)
+
+
+def test_unknown_key_suggests_close_match(xdg, workspaces_dir):
+    """`mount` -> did-you-mean `mounts` (the exact trap the issue names)."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", 'image = "x"\nmount = []\n')
+    with pytest.raises(ConfigError) as ei:
+        load_config(Workspace("w"))
+    assert "did you mean `mounts`?" in str(ei.value)
+
+
+def test_binding_and_rule_tables_still_load(xdg, workspaces_dir):
+    """`[[binding]]`/`[[rule]]` are parsed by their own modules; load_config must
+    treat both as known top-level keys, not reject them."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", """
+        image = "x"
+        [[binding]]
+        name = "b"
+        [[rule]]
+        name = "r"
+    """)
+    cfg = load_config(Workspace("w"))   # must not raise
+    assert cfg["image"] == "x"
+
+
+# ---- auto_stop (#17) ---------------------------------------------------------
+
+
+def test_auto_stop_string_false_rejected(xdg, workspaces_dir):
+    """`auto_stop = "false"` is a truthy STRING that would silently enable
+    auto-stop; a strict bool check rejects it."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", 'image = "x"\nauto_stop = "false"\n')
+    with pytest.raises(ConfigError) as ei:
+        load_config(Workspace("w"))
+    assert "auto_stop" in str(ei.value) and "boolean" in str(ei.value)
+
+
+def test_auto_stop_defaults_false_and_roundtrips(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", 'image = "x"\n')
+    assert load_config(Workspace("w"))["auto_stop"] is False
+
+    _write(workspaces_dir, "w2", 'image = "x"\nauto_stop = true\n')
+    assert load_config(Workspace("w2"))["auto_stop"] is True
+
+    # ...and it surfaces in `config --effective` (was absent from the dict before).
+    from credproxy_cli.core.lifecycle import effective_config
+    assert effective_config(load_config(Workspace("w2")))["auto_stop"] is True
+
+
+def test_auto_stop_not_in_spec_hash(xdg, workspaces_dir):
+    """auto_stop is host-side session behavior -- toggling it must NOT recreate
+    the container, so it can't enter the spec hash."""
+    from credproxy_cli.core.config import load_config, workspace_spec_hash
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "a", 'image = "x"\nauto_stop = true\n')
+    _write(workspaces_dir, "b", 'image = "x"\nauto_stop = false\n')
+    h_on = workspace_spec_hash(load_config(Workspace("a")), "proxy1")
+    h_off = workspace_spec_hash(load_config(Workspace("b")), "proxy1")
+    assert h_on == h_off

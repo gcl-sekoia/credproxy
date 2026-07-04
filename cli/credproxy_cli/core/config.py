@@ -29,6 +29,7 @@ not here -- load_config only handles the container-side settings.
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -44,6 +45,19 @@ import tomllib
 # A managed-volume name (the `volume`/`home` mount source). Docker-volume-name
 # safe; must start alnum.
 _VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+# Every top-level key a workspace TOML may carry: the container-side settings
+# load_config parses, `auto_stop` (host-side session behavior, read fresh by
+# lifecycle._maybe_auto_stop), and the two array-of-tables handled by their own
+# modules (`binding` -> core/bindings.py, `rule` -> core/rules.py). load_config
+# rejects anything else so a typo (`mount` for `mounts`, `setup_cmd`, `user_id`)
+# is a hard error, not a silent no-op -- the TOML is the single source of truth,
+# so a misspelled key that parses fine and does nothing is a real footgun.
+KNOWN_KEYS = frozenset({
+    "image", "home", "directory", "mounts", "env", "setup", "user", "workdir",
+    "enter_prelude", "shell", "exec_flags", "run_flags", "map_host_user",
+    "user_uid", "auto_stop", "binding", "rule",
+})
 
 
 def _bind_source(raw_src: str, where: str) -> str:
@@ -151,6 +165,17 @@ def load_config(ws: Workspace) -> dict:
 
     if not isinstance(raw, dict):
         raise ConfigError(f"{ws.config_path}: top level must be a table")
+
+    # Reject unknown top-level keys (a typo silently no-ops otherwise). Mirror the
+    # `_parse_mount` "unknown key(s)" precedent, with a cheap did-you-mean.
+    unknown = sorted(set(raw) - KNOWN_KEYS)
+    if unknown:
+        def _hint(k: str) -> str:
+            near = difflib.get_close_matches(k, KNOWN_KEYS, n=1)
+            return f"`{k}` (did you mean `{near[0]}`?)" if near else f"`{k}`"
+        raise ConfigError(
+            f"{ws.config_path}: unknown key(s): {', '.join(_hint(k) for k in unknown)}"
+        )
 
     # image (mandatory -- the scaffold writes a concrete one; there is no
     # built-in default image to fall back to).
@@ -307,6 +332,16 @@ def load_config(ws: Workspace) -> dict:
     if not isinstance(map_host_user, bool):
         raise ConfigError(f"{ws.config_path}: `map_host_user` must be a boolean")
 
+    # auto_stop: host-side session behavior (stop the workspace when the last
+    # `enter` session exits). Strict bool -- `auto_stop = "false"` is a truthy
+    # STRING that would silently ENABLE auto-stop, the exact trap this rejects.
+    # NOT part of the spec hash (host-side only, never touches the container).
+    # lifecycle._maybe_auto_stop re-reads it fresh (mid-session edits are
+    # intentional) but with the same `is True` strictness.
+    auto_stop = raw.get("auto_stop", False)
+    if not isinstance(auto_stop, bool):
+        raise ConfigError(f"{ws.config_path}: `auto_stop` must be a boolean")
+
     # user_uid: the in-container uid of `user`. map_host_user's keep-id maps
     # host-you onto THIS uid, so it's the side the host must land on for `user`
     # to own the bind mounts (host uid and this need not be equal). Defaults to
@@ -350,6 +385,7 @@ def load_config(ws: Workspace) -> dict:
         "run_flags": run_flags,
         "map_host_user": map_host_user,
         "user_uid": user_uid,
+        "auto_stop": auto_stop,
     }
 
 
