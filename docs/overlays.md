@@ -157,6 +157,81 @@ commands (`injector list`, `provider list`, `preset list`) annotate each row
 with the tiers it **shadows**, e.g. `bearer   overlay:team-ml   (shadows
 builtin)`.
 
+## Testing your overlay
+
+An overlay's `.star` scripts (scripted injectors and rule scripts) are real
+logic and deserve real tests. Two supported tools:
+
+### `credproxy script check [NAME]`
+
+Compiles every resolvable script (or one NAME) in the proxy runtime — on-host
+when the Starlark deps are importable, otherwise inside the proxy image — and
+reports which compile. It classifies each script the way the proxy would: a
+script named by a `scheme = "script"` injector manifest is compiled under the
+**injector** profile paired with that manifest (so a slot/family mistake surfaces
+too); an unreferenced script is tried under **both** the injector and rule
+profiles and passes if either compiles. Exit 0 iff all compile; `--json` emits
+`{name, origin, ok, error, profiles}` per script.
+
+```sh
+CREDPROXY_OVERLAY_PATH=/path/to/overlay credproxy script check
+```
+
+`credproxy doctor NAME` also compiles the scripts a workspace's bindings
+reference (when the runtime imports on-host; skipped-with-note otherwise).
+
+### The testkit — unit tests for scripts
+
+`proxy/testkit.py` is a small, supported harness that drives a script exactly the
+way the proxy runs it: it resolves the injector **manifest + `.star` together** and
+builds the scheme through the same path the push/wire loader uses, so a test can't
+pass against a manifest the proxy would reject (the drift a hand-built
+`ScriptedScheme(...)` hides). Drop a `test_*.py` in `<overlay>/tests/`:
+
+```python
+# my-overlay/tests/test_ovh.py
+import hashlib
+import testkit
+
+def test_ovh_signs():
+    kit = testkit.load_injector("ovh")                     # manifest + ovh.star
+    req = testkit.make_request("GET", "https://eu.api.ovh.com/1.0/me")
+    result = kit.run(req, {"app_key": "AK", "app_secret": "AS",
+                           "consumer_key": "CK"})
+    assert result.injected                                 # on_request returned True
+    # Independently recompute what the signature must be (this is why it's pytest,
+    # not a declarative DSL): assert on the exact bytes the script produced.
+    ts = req.headers["X-Ovh-Timestamp"]
+    base = "AS+CK+GET+https://eu.api.ovh.com/1.0/me++" + ts
+    assert req.headers["X-Ovh-Signature"] == "$1$" + hashlib.sha1(base.encode()).hexdigest()
+```
+
+Public API:
+
+- `load_injector(name)` → a harness with `.run(req, secrets, params=None,
+  placeholder=None)` → a result exposing `.injected` (the `on_request` bool); the
+  mutated request is observed via the `req` you hold. `secrets` keys must equal the
+  manifest's declared slots (the same check the proxy makes) — so manifest/script
+  slot drift fails the test. Works for built-in schemes too.
+- `make_request(method, url, headers=None, body=b"")` → a request with treq's
+  default headers stripped and `Host` set from the URL (the two footguns every
+  hand-rolled test open-codes). Pass a `Host` in `headers` to reproduce transparent
+  mode (destination IP, real hostname in the header).
+- `load_rule_script(name)` / `run_rule(script, req, params=None)` → the rule-side
+  sibling: compile under the `kind="rule"` profile and run the request phase,
+  returning an outcome with `.terminal` / `.blocked` / `.response` (a
+  `block()`/`respond()`) and any rewrites on `req`. A script error raises (rule
+  scripts fail closed toward the policy), so assert with `pytest.raises`.
+
+`credproxy dev test` **discovers** these: every configured overlay with a
+`tests/` dir runs as its own pytest invocation (separate from the repo suite,
+whose module basenames would collide), using the same on-host-or-image fallback
+as the proxy suite. The whole overlay chain is mounted and on the resolution path
+during the run, so an overlay test can resolve a definition another tier ships.
+
+> **No API versioning yet.** The testkit tracks the current script `api` (1);
+> that's revisited only when `api` first bumps.
+
 ## Precedence and testing
 
 A user's `$XDG_CONFIG_HOME/credproxy/` file still wins over the overlays, which

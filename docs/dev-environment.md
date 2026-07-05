@@ -57,6 +57,23 @@ env CREDPROXY_MITMPROXY_UID=31337 \
 python* (it checks imports in the running interpreter) and export the env vars
 above — but the two direct pytest commands are simpler and equivalent.
 
+## Script checking and overlay tests without Docker
+
+`credproxy script check [NAME]` compiles `.star` scripts in the proxy runtime.
+On-host it needs only the Starlark dep (in the venv), no daemon and no CREDPROXY_*
+env — the compile builds a `ScriptedScheme` (which imports `starlark`, not
+`constants`). So `~/.venv-credproxy/bin/credproxy script check` works here; only
+when Starlark is *not* importable does it fall back to `docker run`. `credproxy
+doctor NAME` reuses that on-host compile for a workspace's scripted injectors and
+**skips with a note** (never fails) when the runtime isn't importable, so doctor
+stays daemon-free.
+
+Overlay tests (`<overlay>/tests/`, discovered by `dev test`) run on-host the same
+way — via the testkit (`proxy/testkit.py`), which imports `starlark`/`mitmproxy`
+from the venv. Point `CREDPROXY_OVERLAY_PATH` at the overlay and run its
+`tests/` directly with the same `env … PYTHONPATH="$PWD/proxy"` prefix as the
+proxy suite.
+
 ## Known environmental failure (not a real bug)
 
 `tests/cli/test_providers.py::test_sh_provider_ref_with_space_not_split`
