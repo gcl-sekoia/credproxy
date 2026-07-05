@@ -127,27 +127,37 @@ class Renderer:
         print("paths")
         print(f"  config              {short(p['config'])}")
         print(f"  state               {short(p['state'])}")
-        if not p["profile_present"]:
-            prof = f"{short(p['profile'])}  (absent)"
-        elif d["profile_overrides"]:
-            n = d["profile_overrides"]
-            prof = f"{short(p['profile'])}  active · {n} override{'s' if n != 1 else ''}"
-        else:
-            prof = f"{short(p['profile'])}  (no overrides)"
-        print(f"  profile             {prof}")
         print(f"  builtin             {short(p['builtin'])}")
         print(f"  proxy image         {d['proxy_image']}")
         print()
 
-        print("registries            user · profile · builtin")
+        # Overlays: one row each, most specific first, absent ones flagged.
+        n = d["overlay_overrides"]
+        active = f"{n} override{'s' if n != 1 else ''} active" if n else "no overrides"
+        print(f"overlays  (most specific first · {active})")
+        if not d["overlays"]:
+            print("  (none configured)")
+        for o in d["overlays"]:
+            mark = "" if o["present"] else "  (absent)"
+            print(f"  {o['label']:<18}{short(o['path'])}{mark}")
+        print()
+
+        # Registries: effective per-tier counts, columns in resolution order.
+        regs = d["registries"]
+        labels = list(next(iter(regs.values())).keys()) if regs else []
+        totals = {label: sum(regs[k][label] for k in regs) for label in labels}
+        summary = "  →  ".join(f"{label} ({totals[label]})" for label in labels)
+        print("registries  (resolution order, effective counts)")
+        print(f"  {summary}")
         for kind in ("injectors", "providers", "scripts", "presets"):
-            t = d["registries"][kind]
-            print(f"  {kind:<18}{t['user']}  ·  {t['profile']}  ·  {t['builtin']}")
+            t = regs[kind]
+            detail = "   ".join(f"{label}={t[label]}" for label in labels)
+            print(f"  {kind:<18}{detail}")
         print()
 
         print("environment")
         for k, v in d["env"].items():
-            print(f"  {k:<22}{short(v) if v else '(default)'}")
+            print(f"  {k:<24}{short(v) if v else '(default)'}")
 
     # -- create / use / generic name ack --
     def created(self, name: str, path: str) -> None:
@@ -433,17 +443,26 @@ class Renderer:
         if not rows:
             print(f"no {kind}s")
             return
+
+        def shadow_note(r: dict) -> str:
+            # What this winning definition shadows in less-specific tiers.
+            sh = r.get("shadows") or []
+            return f"  (shadows {', '.join(sh)})" if sh else ""
+
         # Injectors carry a SCHEME column (so scripted injectors are visible as
-        # such); providers carry a DESCRIPTION. Lay out the columns present.
+        # such); providers carry a DESCRIPTION. Both append a shadow annotation
+        # to the SOURCE cell so the winning tier and what it hides read together.
         if any("scheme" in r for r in rows):
             cols = ("NAME", "SCHEME", "SOURCE")
-            table = [cols] + [(r["name"], r.get("scheme", ""), r["source"]) for r in rows]
+            table = [cols] + [(r["name"], r.get("scheme", ""),
+                               r["source"] + shadow_note(r)) for r in rows]
         elif any(r.get("description") for r in rows):
             cols = ("NAME", "SOURCE", "DESCRIPTION")
-            table = [cols] + [(r["name"], r["source"], r.get("description", "")) for r in rows]
+            table = [cols] + [(r["name"], r["source"] + shadow_note(r),
+                               r.get("description", "")) for r in rows]
         else:
             cols = ("NAME", "SOURCE")
-            table = [cols] + [(r["name"], r["source"]) for r in rows]
+            table = [cols] + [(r["name"], r["source"] + shadow_note(r)) for r in rows]
         widths = [max(len(row[i]) for row in table) for i in range(len(cols))]
         for row in table:
             print("  ".join(f"{row[i]:<{widths[i]}}" for i in range(len(cols))).rstrip())
@@ -494,7 +513,10 @@ class Renderer:
         for p in rows:
             counts = f"{len(p['bindings'])} bindings, {len(p.get('rules') or [])} rules"
             cred = "" if p.get("needs_credential", True) else "  [pure-rule; no credential]"
-            print(f"\n{p['name']}  ({counts}){cred}")
+            src = f"  [{p['source']}]" if p.get("source") else ""
+            sh = p.get("shadows") or []
+            shadow = f" (shadows {', '.join(sh)})" if sh else ""
+            print(f"\n{p['name']}  ({counts}){cred}{src}{shadow}")
             for b in p["bindings"]:
                 env = f"  env {b['env']}" if b.get("env") else ""
                 hosts = ", ".join(b["hosts"])
