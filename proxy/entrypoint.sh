@@ -8,6 +8,14 @@
 # the process environment); see proxy/Dockerfile for the full list.
 set -eu
 
+# ORDERING IS LOAD-BEARING: the iptables rules below MUST be installed before
+# the `exec ... python` at the bottom of this file. That ordering is the whole
+# reason `/health` (which observes only that the listeners accept) can imply
+# capture-readiness: a listener physically cannot come up before the rules that
+# redirect traffic to it, so `/health` green => capture active. Under `set -e`
+# any rule failure aborts before the exec. Do NOT move the python exec above the
+# iptables block, and do NOT install rules after starting python. A guard test
+# (tests/test_entrypoint.py) asserts the last `iptables` line precedes the exec.
 echo "[entrypoint] installing iptables rules"
 
 # Bind sentinel address; gives an implicit route via lo. Idempotent.
