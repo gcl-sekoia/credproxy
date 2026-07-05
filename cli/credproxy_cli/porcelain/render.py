@@ -207,6 +207,18 @@ class Renderer:
     def reloaded(self, name: str) -> None:
         print(f"reloaded proxy for workspace '{name}'")
 
+    def pushed(self, name: str | None, admin_url: str, *, attached=False,
+               stateless: bool = False, as_apply: bool = False) -> None:
+        if stateless:
+            print(f"pushed config to {admin_url}")
+            return
+        kind = "attached workspace" if attached else "workspace"
+        verb = "applied (pushed)" if as_apply else "pushed config for"
+        print(f"{verb} {kind} '{name}' to {admin_url}")
+
+    def resolved(self, name: str, out: str) -> None:
+        print(f"resolved config for workspace '{name}' -> {out} (mode 0600)")
+
     def scaffolded(self, kind: str, name: str, path: str) -> None:
         print(f"scaffolded {kind} '{name}' at {path}")
 
@@ -228,6 +240,9 @@ class Renderer:
         print(f"workspace   {data['name']}")
         print(f"config      {data['config_path']}")
         c = data["config"]
+        if data.get("attach") is not None:
+            self._inspect_attached(data)
+            return
         print(f"image       {c['image']}")
         print(f"home        {c['home']}")
         if c["mounts"]:
@@ -244,6 +259,20 @@ class Renderer:
         print(f"workspace   {data['ws_status'] or 'absent'}")
         if data["host_port"] is not None:
             print(f"host port   127.0.0.1:{data['host_port']}")
+        self._inspect_tail(data)
+
+    def _inspect_attached(self, data: dict) -> None:
+        """Inspect body for an ATTACHED workspace: the attach selector + the admin
+        URL it currently resolves to (best-effort), then bindings/rules/drift."""
+        attach = data["attach"]
+        (key, val), = attach.items()
+        print(f"attach      {key} = {val}")
+        target = data.get("attach_target")
+        target_txt = target or "(unresolved -- proxy not found / docker unavailable)"
+        print(f"target      {target_txt}")
+        self._inspect_tail(data)
+
+    def _inspect_tail(self, data: dict) -> None:
         if data["bindings"]:
             print(f"bindings    {len(data['bindings'])}")
             for b in data["bindings"]:
@@ -620,6 +649,17 @@ class JsonRenderer(Renderer):
 
     def reloaded(self, name: str) -> None:
         self._emit({"name": name, "reloaded": True})
+
+    def pushed(self, name: str | None, admin_url: str, *, attached=False,
+               stateless: bool = False, as_apply: bool = False) -> None:
+        if stateless:
+            self._emit({"pushed": True, "admin_url": admin_url})
+            return
+        self._emit({"workspace": name, "pushed": True, "admin_url": admin_url,
+                    "attached": bool(attached), "apply": as_apply})
+
+    def resolved(self, name: str, out: str) -> None:
+        self._emit({"workspace": name, "out": out})
 
     def scaffolded(self, kind: str, name: str, path: str) -> None:
         self._emit({"kind": kind, "name": name, "path": path})

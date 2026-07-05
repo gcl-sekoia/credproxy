@@ -54,6 +54,7 @@ from .render import fail, say
 _WS_VERBS = {
     "enter", "exec", "edit", "start", "stop", "recreate", "delete", "apply",
     "inspect", "config", "logs", "binding", "bind-dir", "mount", "rule",
+    "push", "resolve",
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
@@ -153,10 +154,22 @@ def _require_exists(ws: Workspace) -> None:
         fail(f"workspace '{ws.name}' not found")
 
 
+def _reject_if_attached(ws: Workspace, verb: str) -> None:
+    """Refuse a container-lifecycle verb on an ATTACHED workspace: its containers
+    are managed externally (Compose/devcontainers/CI), so credproxy only pushes
+    credentials -- point the operator at `push`."""
+    from ..core import config as core_config
+    if core_config.quick_attach(ws):
+        fail(f"workspace '{ws.name}' is attached: its containers are managed "
+             f"externally, so `{verb}` doesn't apply. credproxy manages only its "
+             f"credentials -- run `credproxy workspace {ws.name} push`.")
+
+
 # ---- workspace commands ------------------------------------------------------
 
 
-def do_create(ctx: Ctx, name: str | None, directory: str | None = None) -> None:
+def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
+              attach: str | None = None) -> None:
     # Loose-surface convenience: an omitted NAME is derived from the --here/--dir
     # directory basename. Strict always names explicitly; with no directory there
     # is nothing to derive from.
@@ -169,7 +182,14 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None) -> None:
         name = core_workspace.derive_workspace_name(directory)
         say(f"derived workspace name '{name}' from {directory}")
     ws = for_name(name)  # reserved-name / charset check happens here
-    lifecycle.create_workspace_files(ws)
+    if attach is not None:
+        # `--attach SELECTOR` scaffolds an ATTACHED workspace from the attach
+        # template (overlay-overridable). --here/--dir still make sense (cwd
+        # resolution applies to attached workspaces too), handled below.
+        selector = _attach_selector_from_flag(attach)
+        lifecycle.create_attached_workspace_files(ws, selector)
+    else:
+        lifecycle.create_workspace_files(ws)
     render.OUT.created(ws.name, str(ws.config_path))
     # Optional cwd-association (`--here`/`--dir`): record the directory this
     # workspace is "for" so `credp <verb>` resolves it from there (dirmatch).
@@ -352,6 +372,7 @@ def do_enter(ctx: Ctx, name: str | None, trailing: list[str],
     if ctx.json:
         fail("enter does not support --json (it execs an interactive shell)")
     ws = _resolve_ws(ctx, name)
+    _reject_if_attached(ws, "enter")
     # Empty trailing -> the core runs the config `shell` (default: a login
     # shell); an explicit `-- CMD` runs bare. Resolved in _enter_exec_cmd, which
     # has the loaded config.
@@ -385,6 +406,7 @@ def do_exec(ctx: Ctx, name: str | None, trailing: list[str], *,
              "apply (the exit code is the command's exit code)")
     mode = "login" if login else "raw" if raw else "shim"
     ws = _resolve_ws(ctx, name)
+    _reject_if_attached(ws, "exec")
     exit_code = lifecycle.exec_workspace(
         ws, trailing, notify=say, mode=mode, user_override=user, push=push)
     sys.exit(exit_code)
@@ -430,6 +452,7 @@ def do_edit(ctx: Ctx, name: str | None) -> None:
 
 def do_start(ctx: Ctx, name: str | None) -> None:
     ws = _resolve_ws(ctx, name)
+    _reject_if_attached(ws, "start")
     lifecycle.start_workspace(ws, notify=say)
     render.OUT.started(ws.name)
 
@@ -437,27 +460,92 @@ def do_start(ctx: Ctx, name: str | None) -> None:
 def do_stop(ctx: Ctx, name: str | None) -> None:
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
+    _reject_if_attached(ws, "stop")
     lifecycle.stop_workspace(ws)
     render.OUT.stopped(ws.name)
 
 
 def do_delete(ctx: Ctx, name: str | None, keep_volumes: bool) -> None:
+    from ..core import config as core_config
+
     implicit = name is None
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
     _confirm_destructive(ctx, ws, implicit, "delete")
     was_default = _is_default(ws)
-    lifecycle.delete_workspace(ws, keep_volumes=keep_volumes)
+    # An attached workspace owns no containers/volumes -- remove only its config
+    # file + state dir (its `attach` gate keeps the confirmation flow the same).
+    if core_config.quick_attach(ws):
+        lifecycle.delete_workspace(ws, keep_volumes=keep_volumes, containers=False)
+    else:
+        lifecycle.delete_workspace(ws, keep_volumes=keep_volumes)
     if was_default:
         pointer.clear_default()
     render.OUT.deleted(ws.name)
 
 
 def do_apply(ctx: Ctx, name: str | None) -> None:
+    from ..core import config as core_config
+
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
+    # An attached workspace has no container spec to reconcile -- `apply` IS a
+    # push (resolve secrets + POST the full wire config to its external proxy).
+    if core_config.quick_attach(ws):
+        admin_url = lifecycle.push_workspace(ws, notify=say)
+        render.OUT.pushed(ws.name, admin_url, attached=True, as_apply=True)
+        return
     result = lifecycle.apply_config(ws, notify=say)
     render.OUT.applied(ws.name, result)
+
+
+def do_push(ctx: Ctx, name: str | None, wait: bool, timeout: float) -> None:
+    """`push`: resolve secrets and POST the full wire config (bindings + rules) to
+    the workspace's proxy -- managed (its published port) or attached (the
+    `attach` target). `--wait` polls /health first."""
+    from ..core import config as core_config
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    attached = core_config.quick_attach(ws)
+    admin_url = lifecycle.push_workspace(ws, notify=say, wait=wait, timeout=timeout)
+    render.OUT.pushed(ws.name, admin_url, attached=attached)
+
+
+def do_resolve(ctx: Ctx, name: str | None, out: str | None) -> None:
+    """`resolve`: build the full wire config (with resolved secret VALUES) without
+    contacting any proxy. Exactly one of `--json` (blob to stdout) or `--out FILE`
+    (mode 0600)."""
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    if bool(ctx.json) == bool(out):
+        fail("`resolve` needs exactly one of --json (blob to stdout) or "
+             "--out FILE (writes mode 0600)")
+    wire = lifecycle.resolve_workspace_wire(ws, notify=say)
+    if out is not None:
+        _write_resolved(ws, wire, out)
+        render.OUT.resolved(ws.name, out)
+    else:
+        # --json: emit the wire blob (real secrets) to stdout.
+        import json as _json
+        print(_json.dumps(wire))
+
+
+def _write_resolved(ws: Workspace, wire: dict, out: str) -> None:
+    """Write the resolved wire config to `out`, mode 0600 (it carries real secret
+    values -- the one at-rest disclosure path). Warn if `out` is outside the
+    workspace state dir, where it could be committed to a repo."""
+    import json as _json
+    import os as _os
+
+    path = _os.path.abspath(_os.path.expanduser(out))
+    state = _os.path.abspath(str(ws.state_dir))
+    if not (path == state or path.startswith(state + _os.sep)):
+        say(f"warning: {out} is outside the workspace state dir -- it holds "
+            f"RESOLVED secret values (mode 0600); do not commit it to a repo")
+    fd = _os.open(path, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+    with _os.fdopen(fd, "w") as f:
+        f.write(_json.dumps(wire) + "\n")
 
 
 def do_recreate(ctx: Ctx, name: str | None, include_proxy: bool,
@@ -465,6 +553,7 @@ def do_recreate(ctx: Ctx, name: str | None, include_proxy: bool,
     implicit = name is None
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
+    _reject_if_attached(ws, "recreate")
     # Plain recreate keeps all persistent state, so it isn't gated. --reset-volume
     # wipes a volume's data (the one recreate mode that destroys data), so it is
     # gated like delete: confirm on an implicit default workspace (loose surface).
@@ -505,6 +594,8 @@ def do_inspect(ctx: Ctx, name: str | None) -> None:
         "ws_status": data.ws_status,
         "running": data.running,
         "host_port": data.host_port,
+        "attach": data.attach,
+        "attach_target": data.attach_target,
         "bindings": [
             {
                 "name": b.name,
@@ -549,6 +640,7 @@ def do_inspect(ctx: Ctx, name: str | None) -> None:
 
 def do_logs(ctx: Ctx, name: str | None, audit: bool = False) -> None:
     ws = _resolve_ws(ctx, name)
+    _reject_if_attached(ws, "logs")
     _logs_stream(ws, as_json=ctx.json, audit_only=audit)
 
 
@@ -1136,16 +1228,14 @@ def do_rule_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 def _do_rule_test_live(ctx: Ctx, ws: Workspace, a: argparse.Namespace) -> None:
     """`rule test --live`: ask the RUNNING proxy for the authoritative answer
     (exact per-script phase + intercept decision) against its LOADED config --
-    which may lag the edited TOML until `apply`/`start`."""
-    from ..core import proxy_http
-    from ..core.imageenv import ImageEnv
+    which may lag the edited TOML until `apply`/`start`/`push`. Routes through the
+    same target resolution as `push`, so it works for an attached workspace too
+    (its externally-run proxy, via the `attach` selector)."""
+    from ..core import push as core_push
+    from ..core.workspace import read_token
 
-    if core_docker.container_status(ws.proxy_container) != "running":
-        fail(f"workspace '{ws.name}' proxy is not running; `start` it, or omit "
-             f"--live for the offline (config-file) dry-run")
-    meta = ImageEnv.load()
-    host_port = core_docker.resolve_host_port(ws.proxy_container, meta.http_port)
-    result = proxy_http.rule_test_live(ws, host_port, a.method, a.url)
+    admin_url = lifecycle.resolve_admin_url(ws, notify=say)
+    result = core_push.rule_test(admin_url, read_token(ws), a.method, a.url)
     render.OUT.rule_test_live(a.method.upper(), a.url, result)
 
 
@@ -1164,6 +1254,7 @@ def do_mount_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
+    _reject_if_attached(ws, "mount add")
 
     # Gate only the disruptive path: --preserve restarts the container, killing
     # any live `enter` sessions. A plain add is a deferred config edit, like
@@ -1403,6 +1494,7 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
 
 def do_dev_reload(ctx: Ctx, name: str | None) -> None:
     ws = _resolve_ws(ctx, name)
+    _reject_if_attached(ws, "dev reload")
     lifecycle.reload_proxy(ws)
     render.OUT.reloaded(ws.name)
 
@@ -1574,6 +1666,15 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     p_delete.add_argument("--keep-volumes", dest="delete_keep_volumes",
                           action="store_true")
     sub.add_parser("apply")
+    p_push = sub.add_parser("push")
+    # --wait polls the proxy's /health (never /ready) until capture-ready before
+    # pushing -- for an attached proxy that Compose/CI just started.
+    p_push.add_argument("--wait", dest="push_wait", action="store_true")
+    p_push.add_argument("--timeout", dest="push_timeout", type=float, default=120.0,
+                        metavar="SECS")
+    p_resolve = sub.add_parser("resolve")
+    # Exactly one of --json (global, blob to stdout) or --out FILE (mode 0600).
+    p_resolve.add_argument("--out", dest="resolve_out", default=None, metavar="FILE")
     sub.add_parser("inspect")
     p_config = sub.add_parser("config")
     p_config.add_argument("--declared", action="store_true", dest="config_declared")
@@ -1633,6 +1734,10 @@ _STRICT_HELP = (
     "  credproxy doctor [NAME] [--fetch]   (preflight: docker/image/config/bindings)\n"
     "  credproxy version                   (or: credproxy --version)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
+    "  credproxy workspace NAME push [--wait]   (resolve + POST config to the proxy)\n"
+    "  credproxy workspace NAME resolve --json|--out FILE   (build wire config, no proxy)\n"
+    "  credproxy workspace create NAME --attach SELECTOR   (attached: externally-run containers)\n"
+    "  credproxy push --admin URL --config FILE --token FILE   (stateless push; no workspace)\n"
     "  credproxy workspace NAME exec [--login|--raw] -- CMD...   (one-shot; scriptable)\n"
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
     "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
@@ -1668,6 +1773,9 @@ _LOOSE_HELP = (
     "  credp list [FILTER]\n"
     "  credp info                      global config & state (paths, overlays, registries)\n"
     "  credp enter|edit|start|stop|recreate|delete|apply|inspect|logs [NAME]\n"
+    "  credp push [NAME] [--wait]      resolve + POST config to the workspace's proxy\n"
+    "  credp resolve [NAME] --json|--out FILE   build wire config (no proxy)\n"
+    "  credp create [NAME] --attach SELECTOR    attached workspace (externally-run containers)\n"
     "  credp mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
     "  credp rule add|remove|list|test ...      (traffic guardrails)\n"
@@ -1797,10 +1905,31 @@ _CREATE_HELP = (
     "  --here        associate the workspace with the current directory, so a\n"
     "                loose `credp <verb>` run from at/under it resolves here.\n"
     "  --dir PATH    associate with PATH instead of the current directory.\n"
+    "  --attach SEL  scaffold an ATTACHED workspace (containers managed externally;\n"
+    "                credproxy only pushes credentials). SEL is compose-project=P |\n"
+    "                container=X | admin-url=URL | discover=k=v[,k=v]. --here/--dir\n"
+    "                still apply. Use `push` (not start/enter) on it.\n"
     "\n"
     "On the loose surface (`credp`), NAME may be omitted with --here/--dir: it is\n"
     "derived from the directory's basename (sanitized to the name charset, and\n"
     "deduped with a numeric suffix). Strict `credproxy` always requires NAME.\n"
+)
+
+
+_PUSH_STATELESS_HELP = (
+    "credproxy push --admin URL --config FILE --token FILE [--wait] [--timeout SECS]\n"
+    "  Stateless escape hatch: push a config to an arbitrary proxy with no\n"
+    "  workspace and no state (for Compose/devcontainers/CI).\n"
+    "\n"
+    "  --admin URL    the proxy's admin base URL. MUST be loopback (127.0.0.0/8 or\n"
+    "                 localhost) -- the wire carries resolved secrets over plain HTTP.\n"
+    "  --config FILE  a workspace-TOML SUBSET: only [[binding]] + [[rule]] (any\n"
+    "                 container/attach key is rejected). Build one with `resolve`.\n"
+    "  --token FILE   file holding the proxy's bearer token.\n"
+    "  --wait         poll /health until capture-ready before pushing.\n"
+    "  --timeout SECS --wait timeout (default 120).\n"
+    "\n"
+    "To push a workspace instead, use `credproxy workspace NAME push`."
 )
 
 
@@ -1900,7 +2029,25 @@ _VERB_HELP = {
         "credproxy workspace NAME apply -- reconcile a running workspace with its\n"
         "config: binding changes are re-pushed live; container-spec changes\n"
         "(image/home/mounts/env/setup) are deferred with a `start` hint. Reports\n"
-        "what was applied vs deferred."
+        "what was applied vs deferred. On an ATTACHED workspace, `apply` == `push`."
+    ),
+    "push": (
+        "credproxy workspace NAME push [--wait] [--timeout SECS] -- resolve every\n"
+        "binding's secret and POST the full wire config (bindings + rules) to the\n"
+        "workspace's proxy. For a managed workspace this targets its running\n"
+        "proxy's published port (start it first); for an ATTACHED workspace it\n"
+        "resolves the `attach` selector (compose/container/discover/admin_url).\n"
+        "  --wait          poll the proxy's /health until capture-ready first\n"
+        "                  (never /ready -- that gates on this very push).\n"
+        "  --timeout SECS  --wait timeout (default 120)."
+    ),
+    "resolve": (
+        "credproxy workspace NAME resolve (--json | --out FILE) -- build the full\n"
+        "wire config (with RESOLVED secret values) WITHOUT contacting any proxy.\n"
+        "  --json      write the config blob to stdout.\n"
+        "  --out FILE  write it to FILE, mode 0600 (it holds real secrets; a path\n"
+        "              outside the workspace state dir warns). Exactly one required.\n"
+        "Feeds the stateless `credproxy push --config FILE`."
     ),
     "inspect": (
         "credproxy workspace NAME inspect -- show config, running state, host port,\n"
@@ -2007,7 +2154,7 @@ def _dispatch_workspace(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
             say(_CREATE_HELP)
             return
         a = _parse_create(rest[1:])
-        do_create(ctx, a.name, _create_dir(a))
+        do_create(ctx, a.name, _create_dir(a), a.attach)
         return
     if head == "use":
         # `use` mutates the loose default-workspace pointer, so it's loose-only
@@ -2064,6 +2211,10 @@ def _run_ws_verb(
         do_delete(ctx, name, a.delete_keep_volumes)
     elif verb == "apply":
         do_apply(ctx, name)
+    elif verb == "push":
+        do_push(ctx, name, a.push_wait, a.push_timeout)
+    elif verb == "resolve":
+        do_resolve(ctx, name, a.resolve_out)
     elif verb == "recreate":
         do_recreate(ctx, name, a.recreate_proxy, a.recreate_reset_volumes)
     elif verb == "inspect":
@@ -2111,7 +2262,37 @@ def _parse_create(argv: list[str]) -> argparse.Namespace:
     # from at/under it resolves here. --here uses the current directory.
     p.add_argument("--here", action="store_true")
     p.add_argument("--dir", dest="directory", default=None, metavar="PATH")
+    # Scaffold an ATTACHED workspace (containers managed externally). SELECTOR is
+    # compose-project=P | container=X | admin-url=U | discover=k=v[,k=v].
+    p.add_argument("--attach", dest="attach", default=None, metavar="SELECTOR")
     return p.parse_args(argv)
+
+
+# CLI attach selector (dashed) -> the TOML `attach` key (underscored).
+_ATTACH_FLAG_KEYS = {
+    "compose-project": "compose_project", "container": "container",
+    "admin-url": "admin_url", "discover": "discover",
+}
+
+
+def _attach_selector_from_flag(spec: str) -> dict:
+    """Parse a `--attach SELECTOR` value (`compose-project=P` | `container=X` |
+    `admin-url=U` | `discover=k=v[,k=v]`) into a normalized-shape `{key: value}`
+    selector, validated by the same config-side attach validator (loopback for
+    admin-url, discover syntax) so `create --attach` and `load_config` agree."""
+    from ..core import config as core_config
+
+    key, sep, val = spec.partition("=")
+    if not sep or not key or not val:
+        fail("--attach must be SELECTOR=VALUE, e.g. --attach compose-project=myproj "
+             "(or container=NAME, admin-url=URL, discover=label=value)")
+    mapped = _ATTACH_FLAG_KEYS.get(key)
+    if mapped is None:
+        fail(f"unknown attach selector '{key}' (one of "
+             f"{', '.join(sorted(_ATTACH_FLAG_KEYS))})")
+    selector = {mapped: val}
+    core_config._parse_attach(selector, "create --attach")   # validate (raises)
+    return selector
 
 
 def _create_dir(a: argparse.Namespace) -> str | None:
@@ -2133,6 +2314,7 @@ def _create_dir(a: argparse.Namespace) -> str | None:
 _ALIAS_TO_WS_VERB = {
     "enter", "exec", "edit", "start", "stop", "recreate", "delete", "apply",
     "inspect", "config", "logs", "binding", "bind-dir", "mount", "rule",
+    "resolve",
 }
 
 
@@ -2149,7 +2331,7 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
             say(_CREATE_HELP)
             return
         a = _parse_create(rest)
-        do_create(ctx, a.name, _create_dir(a))
+        do_create(ctx, a.name, _create_dir(a), a.attach)
         return
     if head == "list":
         do_list(ctx, rest[0] if rest else None)
@@ -2237,6 +2419,8 @@ def main(loose_default: bool = False) -> None:
             _dispatch_script(ctx, rest)
         elif head == "dev":
             _dispatch_dev(ctx, rest, trailing)
+        elif head == "push":
+            _dispatch_push(ctx, rest, trailing)
         elif loose:
             # Loose surface: top-level aliases.
             _dispatch_alias(ctx, head, rest, trailing)
@@ -2485,6 +2669,76 @@ def _compile_script_in_image(source: str) -> str | None:
         fail(f"proxy image '{IMAGE_TAG}' not found; build it with "
              f"`credproxy dev build`")
     return out or f"compile failed (exit {r.returncode})"
+
+
+def _dispatch_push(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
+    """The top-level `push`: two forms, distinguished by `--admin`.
+
+    - STATELESS escape hatch: `credproxy push --admin URL --config FILE --token
+      FILE [--wait] [--timeout SECS]` -- no workspace, no state (both surfaces).
+    - the loose workspace-push alias: `credp push [NAME]` -> the default/cwd
+      workspace's `push`. Strict has no bare `push NAME` form (it names workspaces
+      explicitly via `workspace NAME push`)."""
+    if "--admin" in rest or "--config" in rest or "--token" in rest:
+        if _wants_help(rest):
+            say(_PUSH_STATELESS_HELP)
+            return
+        do_push_stateless(ctx, rest)
+        return
+    if _wants_help(rest):
+        say("credproxy push -- push config to a proxy.\n"
+            "  credproxy workspace NAME push [--wait] [--timeout SECS]\n"
+            "  credproxy push --admin URL --config FILE --token FILE  (stateless)\n"
+            "  credp push [NAME]                                       (loose alias)")
+        return
+    if not ctx.loose:
+        fail("`credproxy push` is the stateless escape hatch and needs "
+             "--admin URL --config FILE --token FILE; to push a workspace use "
+             "`credproxy workspace NAME push`")
+    name = None
+    verb_args = list(rest)
+    if verb_args and not verb_args[0].startswith("-"):
+        name = verb_args.pop(0)
+    _run_ws_verb(ctx, name, ["push", *verb_args], trailing)
+
+
+def do_push_stateless(ctx: Ctx, rest: list[str]) -> None:
+    """Push a `[[binding]]+[[rule]]` config FILE to an arbitrary loopback proxy
+    admin URL, authed with a token FILE -- no workspace, no state. The CI/scripting
+    escape hatch."""
+    from ..core import push as core_push
+    from ..core.rules import combined_fingerprint
+
+    p = _LeafParser(prog="credproxy push", add_help=False)
+    p.add_argument("--admin", dest="admin", required=True, metavar="URL")
+    p.add_argument("--config", dest="config_file", required=True, metavar="FILE")
+    p.add_argument("--token", dest="token_file", required=True, metavar="FILE")
+    p.add_argument("--wait", action="store_true")
+    p.add_argument("--timeout", type=float, default=120.0, metavar="SECS")
+    a = p.parse_args(rest)
+
+    admin_url = core_push.normalize_admin_url(a.admin)
+    core_push.require_loopback(admin_url)                     # I8
+    bindings, rules = core_push.load_stateless_config(a.config_file)
+    token = _read_token_file(a.token_file)
+    if a.wait:
+        core_push.wait_for_health(admin_url, a.timeout, say)
+    fp = combined_fingerprint(bindings, rules)
+    with core_push.target_push_lock(admin_url):
+        say("pushing config...")
+        core_push.push_to_target(admin_url, token, bindings, rules, fp, notify=say)
+    render.OUT.pushed(None, admin_url, attached=None, stateless=True)
+
+
+def _read_token_file(path: str) -> str:
+    from pathlib import Path
+    p = Path(os.path.expanduser(path))
+    if not p.exists():
+        fail(f"--token file not found: {path}")
+    token = p.read_text().strip()
+    if not token:
+        fail(f"--token file is empty: {path}")
+    return token
 
 
 def do_script_check(ctx: Ctx, name: str | None, force_container: bool) -> None:
