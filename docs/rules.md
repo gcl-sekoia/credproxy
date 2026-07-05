@@ -222,8 +222,8 @@ rules-only update path is a possible follow-up.
 
 ## Authoring a rule script
 
-A rule script is a `.star` file (resolved by name through the three-tier scripts
-registry: user → profile → builtin) defining `on_request()` and/or
+A rule script is a `.star` file (resolved by name through the layered scripts
+registry: user → overlays → builtin) defining `on_request()` and/or
 `on_response()`. It uses the same flat primitive API as scripted injectors —
 `req_*` / `resp_*` reads and writes, `json_*`, `b64*`, `now` — **plus** two
 terminal sinks:
@@ -326,8 +326,8 @@ optional `[[rule]]` array ships the guardrails alongside (or instead of) a
 credential's bindings, so `credproxy workspace NAME preset add org-guardrails`
 stamps the whole policy — hosts, params, visibility — in one move. An org overlay
 ships the `.star` under `scripts/` and the pack under `presets/` in the same
-profile, and every workspace applies it identically. See the preset section in
-[`configuration.md`](configuration.md#bindings) and [`forking.md`](forking.md);
+overlay, and every workspace applies it identically. See the preset section in
+[`configuration.md`](configuration.md#bindings) and [`overlays.md`](overlays.md);
 a preset `[[rule]]` is a standard rule with a `suffix` (→ `name`
 `<preset>-<suffix>`) and full `[rule.params]` support.
 
