@@ -37,7 +37,7 @@ import re
 from pathlib import Path
 
 from .errors import ConfigError
-from .paths import atomic_write_text, profile_dir, resolve_singleton
+from .paths import atomic_write_text, overlay_dirs, resolve_singleton
 from .workspace import Workspace
 
 import tomllib
@@ -70,27 +70,36 @@ def _bind_source(raw_src: str, where: str) -> str:
     return str(src)
 
 
-def _profile_source(rel: str, where: str) -> str:
-    """Resolve a profile-relative bind source under the active profile dir,
-    confined within it (no `..` escape), and require it to exist."""
-    base = profile_dir().resolve()
-    resolved = (base / rel).resolve()
-    if resolved != base and base not in resolved.parents:
-        raise ConfigError(f"{where} profile path {rel!r} escapes the profile dir")
-    if not resolved.exists():
-        raise ConfigError(
-            f"{where} profile source does not exist: {resolved} (under {base})"
-        )
-    return str(resolved)
+def _overlay_source(rel: str, where: str) -> str:
+    """Resolve an overlay-relative bind source across the configured overlays,
+    searched in declared order (first overlay containing `rel` wins). Confined
+    within the winning overlay (no `..`/symlink escape) and required to exist.
+    The user tier and builtin do NOT participate -- mounts search the overlays
+    only. The not-found error names every overlay searched."""
+    searched: list[Path] = []
+    for _label, base in overlay_dirs():
+        base = base.resolve()
+        searched.append(base)
+        resolved = (base / rel).resolve()
+        # `..`-escape is a property of `rel`, not of a given overlay, so reject
+        # it outright rather than falling through to the next overlay.
+        if resolved != base and base not in resolved.parents:
+            raise ConfigError(f"{where} overlay path {rel!r} escapes the overlay dir")
+        if resolved.exists():
+            return str(resolved)
+    roots = ", ".join(str(b) for b in searched) or "(no overlays configured)"
+    raise ConfigError(
+        f"{where} overlay source {rel!r} not found (searched: {roots})"
+    )
 
 
 def _parse_mount(m, where: str) -> dict:
     """One `mounts` entry -> a typed record
-    `{kind: bind|volume|profile, source|name, target, readonly}`.
+    `{kind: bind|volume|overlay, source|name, target, readonly}`.
 
     String form is a host bind (`"SRC:DST[:ro]"`). Table form has exactly one of
-    `bind`/`volume`/`profile`, plus an absolute `target` and optional `readonly`
-    (profile mounts default to read-only -- they ship static assets)."""
+    `bind`/`volume`/`overlay`, plus an absolute `target` and optional `readonly`
+    (overlay mounts default to read-only -- they ship static assets)."""
     if isinstance(m, str):
         parts = m.split(":")
         if len(parts) < 2 or len(parts) > 3 or (len(parts) == 3 and parts[2] != "ro"):
@@ -104,13 +113,13 @@ def _parse_mount(m, where: str) -> dict:
     if not isinstance(m, dict):
         raise ConfigError(f'{where} must be a string ("SRC:DST[:ro]") or a table')
 
-    kinds = [k for k in ("bind", "volume", "profile") if k in m]
+    kinds = [k for k in ("bind", "volume", "overlay") if k in m]
     if len(kinds) != 1:
-        raise ConfigError(f"{where} must have exactly one of bind/volume/profile")
+        raise ConfigError(f"{where} must have exactly one of bind/volume/overlay")
     kind = kinds[0]
     # `user_owned` is a managed-volume-only flag (chown the volume to the
     # workspace user); it is meaningless on a host bind (the user's own dir,
-    # never chowned) or a read-only profile mount, so it isn't accepted there.
+    # never chowned) or a read-only overlay mount, so it isn't accepted there.
     allowed = {kind, "target", "readonly"}
     if kind == "volume":
         allowed.add("user_owned")
@@ -144,7 +153,7 @@ def _parse_mount(m, where: str) -> dict:
         if uo:
             out["user_owned"] = True
         return out
-    return {"kind": "profile", "source": _profile_source(val, where),
+    return {"kind": "overlay", "source": _overlay_source(val, where),
             "target": target, "readonly": True if ro is None else bool(ro)}
 
 
@@ -205,7 +214,7 @@ def load_config(ws: Workspace) -> dict:
         raise ConfigError(f"{ws.config_path}: `directory` must be an absolute path")
 
     # mounts: typed list. A string is a host bind ("SRC:DST[:ro]"); a table is a
-    # bind/volume/profile mount. The `home` sugar prepends the home volume so it
+    # bind/volume/overlay mount. The `home` sugar prepends the home volume so it
     # shares the uniqueness checks + emission path.
     raw_mounts = raw.get("mounts") or []
     if not isinstance(raw_mounts, list):
@@ -609,16 +618,18 @@ def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
 
 
 def render_template(name: str) -> str:
-    """Scaffold a workspace TOML from the resolved template (the profile overlay's
-    if present, else the builtin default). The template is a literal workspace
-    config -- its image, user, home, and setup are concrete values; only `{name}`
-    is substituted. To use a different image, edit the scaffolded file (the
-    template's comments show what to adjust), or override the template in a
-    profile overlay (see docs/forking.md)."""
+    """Scaffold a workspace TOML from the resolved template (a user copy if
+    present, else an overlay's, else the builtin default; resolve_singleton walks
+    the same tiers as the registries). The template is a LITERAL workspace config
+    -- every occurrence of the exact token `{name}` is replaced with the
+    workspace name, and nothing else (no `str.format`, so literal braces need no
+    doubling). To use a different image, edit the scaffolded file (the template's
+    comments show what to adjust), or override the template in an overlay (see
+    docs/overlays.md)."""
     path = resolve_singleton("workspace.template.toml")
     if path is None:
         raise ConfigError(
-            "no workspace.template.toml found (looked in the profile overlay "
-            "and builtin defaults)"
+            "no workspace.template.toml found (looked in the user config, the "
+            "overlays, and the builtin defaults)"
         )
-    return path.read_text().format(name=name)
+    return path.read_text().replace("{name}", name)

@@ -570,38 +570,79 @@ def test_info_default_workspace_is_loose_only(xdg, workspaces_dir):
     assert "default workspace" in loose_out and "backend" in loose_out
 
 
-def test_info_json_shape(xdg, workspaces_dir):
-    """`--json info` carries the full centralized state; loose adds the default
-    pointer, strict omits it."""
+def test_info_json_shape(xdg, workspaces_dir, monkeypatch):
+    """`--json info` carries the full centralized state: config/state/builtin
+    roots, an ordered `overlays` list, per-tier registry counters keyed by full
+    label, and (loose only) the default pointer. Pin one overlay so the tiers
+    are deterministic regardless of the repo's own overlay dir."""
+    ov = xdg["config"].parent / "ov"; (ov).mkdir()
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
+
     ec, out, _ = _run_loose(["--json", "info"])
     assert ec == 0
     d = json.loads(out)
     assert d["proxy_image"] == "credproxy:dev"
-    assert set(d["paths"]) >= {"config", "state", "profile", "builtin", "profile_present"}
+    assert set(d["paths"]) == {"config", "state", "builtin"}
+    assert d["overlays"] == [{"label": "overlay:ov", "path": str(ov),
+                              "present": True}]
     for kind in ("injectors", "providers", "scripts", "presets"):
-        assert set(d["registries"][kind]) == {"user", "profile", "builtin"}
+        assert set(d["registries"][kind]) == {"user", "overlay:ov", "builtin"}
+    assert "overlay_overrides" in d
     assert "default_workspace" in d           # loose
-    assert "XDG_CONFIG_HOME" in d["env"]
+    assert "CREDPROXY_OVERLAY_PATH" in d["env"]
 
     _, strict_out, _ = _run(["--json", "info"])
     assert "default_workspace" not in json.loads(strict_out)  # strict omits it
 
 
-def test_info_counts_profile_overrides(xdg, workspaces_dir, tmp_path, monkeypatch):
-    """A profile-overlay injector is counted in the `profile` tier and bumps the
-    profile override count -- the 'is my overlay active?' signal."""
-    profile = tmp_path / "prof"
-    (profile / "injectors").mkdir(parents=True)
-    (profile / "injectors" / "orgtok.toml").write_text(
-        'scheme = "bearer"\nlocation = "header"\n')
-    monkeypatch.setenv("CREDPROXY_PROFILE_DIR", str(profile))
+def test_info_counts_overlay_overrides(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """An overlay injector is counted in its `overlay:<base>` tier and bumps the
+    overlay override count -- the 'is my overlay active?' signal."""
+    overlay = tmp_path / "ovl"
+    (overlay / "injectors").mkdir(parents=True)
+    (overlay / "injectors" / "orgtok.toml").write_text('scheme = "bearer"\n')
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(overlay))
 
     ec, out, _ = _run_loose(["--json", "info"])
     assert ec == 0
     d = json.loads(out)
-    assert d["registries"]["injectors"]["profile"] >= 1
-    assert d["profile_overrides"] >= 1
-    assert d["paths"]["profile_present"] is True
+    assert d["registries"]["injectors"]["overlay:ovl"] >= 1
+    assert d["overlay_overrides"] >= 1
+    assert d["overlays"] == [{"label": "overlay:ovl", "path": str(overlay),
+                              "present": True}]
+
+
+def test_info_overlay_label_dedup_json(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """Two overlays with the same basename render distinct labels in --json."""
+    import os
+    a = tmp_path / "x" / "base"; a.mkdir(parents=True)
+    b = tmp_path / "y" / "base"; b.mkdir(parents=True)
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
+    ec, out, _ = _run_loose(["--json", "info"])
+    assert ec == 0
+    d = json.loads(out)
+    assert [o["label"] for o in d["overlays"]] == ["overlay:base", "overlay:base#2"]
+    assert set(d["registries"]["injectors"]) == {
+        "user", "overlay:base", "overlay:base#2", "builtin"}
+
+
+def test_injector_list_annotates_shadows(xdg, tmp_path, monkeypatch):
+    """`injector list` shows what a winning definition shadows -- text appends a
+    `(shadows ...)` note to the SOURCE cell; --json carries a `shadows` array."""
+    overlay = tmp_path / "ovl"
+    (overlay / "injectors").mkdir(parents=True)
+    (overlay / "injectors" / "bearer.toml").write_text('scheme = "basic"\n')
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(overlay))
+
+    ec, out, _ = _run(["injector", "list"])
+    assert ec == 0
+    line = next(l for l in out.splitlines() if l.startswith("bearer"))
+    assert "overlay:ovl" in line and "shadows builtin" in line
+
+    ec, out, _ = _run(["--json", "injector", "list"])
+    assert ec == 0
+    row = next(r for r in json.loads(out) if r["name"] == "bearer")
+    assert row["source"] == "overlay:ovl" and row["shadows"] == ["builtin"]
 
 
 def test_info_rejects_extra_args(xdg, workspaces_dir):

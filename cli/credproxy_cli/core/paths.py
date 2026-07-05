@@ -41,18 +41,65 @@ def config_dir() -> Path:
     return _xdg_config_home() / "credproxy"
 
 
-def profile_dir() -> Path:
-    """The distribution/org *profile* overlay: the middle tier between the
-    end-user's XDG config and the in-package `builtin` defaults. Holds an org's
-    customized scaffold, constants, and definitions (injectors/providers/
-    scripts/presets) -- see docs/forking.md.
+def _labeled(dirs: list[Path]) -> list[tuple[str, Path]]:
+    """Label each overlay dir by its basename, disambiguating duplicate
+    basenames with a deterministic numeric suffix (`base`, `base#2`, ...) in
+    declared order. Derived only from the dir list, so the same env var always
+    yields the same labels (they flow into --json output and doctor check ids)."""
+    seen: dict[str, int] = {}
+    out: list[tuple[str, Path]] = []
+    for d in dirs:
+        base = d.name
+        seen[base] = seen.get(base, 0) + 1
+        label = base if seen[base] == 1 else f"{base}#{seen[base]}"
+        out.append((label, d))
+    return out
 
-    Defaults to `<repo>/profile/` (a directory upstream ships empty, so a fork
-    only ever ADDS files there and never conflicts on merge). Override with
-    `CREDPROXY_PROFILE_DIR` to point at an external bundle -- the no-fork path,
-    and what tests use. Read at call time so the env var can change per test."""
-    env = os.environ.get("CREDPROXY_PROFILE_DIR")
-    return Path(env) if env else REPO_ROOT / "profile"
+
+def _discovered_overlays() -> list[Path]:
+    """The default (env-unset) overlays: every DIRECTORY under the
+    `<repo>/overlay/` container, lexical order by basename. Upstream ships the
+    container with only a README, so a fork activates an overlay by just
+    `mkdir overlay/<org>/` -- no env var, no engine edit. Files (the README) are
+    skipped; a missing or subdir-less container yields no overlays. Lexical
+    ordering makes multi-overlay precedence explicit (`10-base/`, `20-team/`)."""
+    container = REPO_ROOT / "overlay"
+    if not container.is_dir():
+        return []
+    return sorted((d for d in container.iterdir() if d.is_dir()),
+                  key=lambda d: d.name)
+
+
+def overlay_dirs() -> list[tuple[str, Path]]:
+    """The ordered org *overlays*, most specific first -- the middle tier(s)
+    between the end-user's XDG config and the in-package `builtin` defaults. Each
+    holds an org's customized scaffold and definitions (injectors/providers/
+    scripts/presets) -- see docs/overlays.md.
+
+    `CREDPROXY_OVERLAY_PATH` is an `os.pathsep`-separated list of dirs, searched
+    leftmost-first (PATH semantics); it REPLACES the default entirely. Unset
+    falls back to discovery: each subdirectory of the `<repo>/overlay/` container
+    is one overlay (lexical order; upstream ships the container empty except a
+    README, so a fork's whole diff is `overlay/<org>/...`). Set-but-empty (`""`)
+    means NO overlays (explicit opt-out); empty entries within the list (`a::b`)
+    are skipped. Labels are `overlay:<dir basename>`, deduped with a numeric
+    suffix. Read at call time so the env var can change per test. Missing
+    env-listed dirs are tolerated here (they contribute nothing) -- loud
+    reporting is doctor's job."""
+    env = os.environ.get("CREDPROXY_OVERLAY_PATH")
+    dirs = ([Path(p) for p in env.split(os.pathsep) if p]
+            if env is not None else _discovered_overlays())
+    return [(f"overlay:{label}", d) for label, d in _labeled(dirs)]
+
+
+def overlay_roots() -> list[tuple[str, Path]]:
+    """The whole resolution order, most specific first:
+
+        user (XDG)  ->  overlays (declared order)  ->  builtin (upstream)
+
+    The single seam every registry search and the singleton walk derive from, so
+    the tiers stay in sync across all assets."""
+    return [("user", config_dir()), *overlay_dirs(), ("builtin", BUILTIN_DIR)]
 
 
 def workspaces_config_dir() -> Path:
@@ -97,36 +144,36 @@ def builtin_presets_dir() -> Path:
     return BUILTIN_DIR / "presets"
 
 
-# Singleton distribution assets (one file; the profile overlay overrides it).
+# Singleton distribution assets (one file; a higher tier overrides it).
 def builtin_workspace_template_file() -> Path:
     """Built-in workspace scaffold frame."""
     return BUILTIN_DIR / "workspace.template.toml"
 
 
 def resolve_singleton(filename: str) -> Path | None:
-    """A singleton distribution file (profile.toml, workspace.template.toml):
-    the profile overlay's copy if present, else the builtin default, else None."""
-    cand = profile_dir() / filename
-    if cand.is_file():
-        return cand
-    cand = BUILTIN_DIR / filename
-    return cand if cand.is_file() else None
+    """A singleton distribution file (only `workspace.template.toml` today): the
+    first tier -- user, then each overlay, then builtin -- whose copy exists,
+    else None. Rides the same `overlay_roots()` walk as the registries, so a
+    user's personal `$XDG_CONFIG_HOME/credproxy/<filename>` shadows every
+    overlay's, which shadow the builtin default."""
+    for _, root in overlay_roots():
+        cand = root / filename
+        if cand.is_file():
+            return cand
+    return None
 
 
 def layered_dirs(kind: str) -> list[tuple[str, Path]]:
     """The ordered search path for a *registry* asset kind (`injectors`,
     `providers`, `scripts`, `presets`), most specific first:
 
-        user (XDG)  ->  profile (org overlay)  ->  builtin (upstream default)
+        user (XDG)  ->  overlays (declared order)  ->  builtin (upstream default)
 
-    First match wins, so the profile overlay shadows a builtin definition of
-    the same name and a user definition shadows both. The single seam every
-    `find_*`/`list_*` walks, so the three (now four) registries stay in sync."""
-    return [
-        ("user", config_dir() / kind),
-        ("profile", profile_dir() / kind),
-        ("builtin", BUILTIN_DIR / kind),
-    ]
+    First match wins, so an overlay shadows a builtin definition of the same
+    name and a user definition shadows both. Just `overlay_roots()` joined to
+    the kind subdir, so every `find_*`/`list_*` stays in sync (and treats the
+    tier label as opaque, so N overlays need no per-registry logic)."""
+    return [(label, root / kind) for label, root in overlay_roots()]
 
 
 def state_dir() -> Path:

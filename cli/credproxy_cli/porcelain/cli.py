@@ -282,18 +282,24 @@ def do_list(ctx: Ctx, filter_: str | None) -> None:
 
 def do_info(ctx: Ctx) -> None:
     """Inspect the *centralized* (non-workspace) config and state: the default
-    pointer, resolved roots (config/state/profile/builtin), the proxy image, the
-    three-tier registry breakdown, and the env overrides in effect. The default
-    workspace is a loose-only concept, so it appears only on the loose surface
-    (consistent with `list`/`current`); everything else is surface-agnostic."""
+    pointer, resolved roots (config/state/builtin), the ordered overlays, the
+    proxy image, the per-tier registry breakdown, and the env overrides in
+    effect. The default workspace is a loose-only concept, so it appears only on
+    the loose surface (consistent with `list`/`current`); everything else is
+    surface-agnostic."""
     from collections import Counter
     from ..core import paths, presets as core_presets
     from ..core.injectors import list_injectors
     from ..core.providers import list_providers
     from ..core.scripts import list_scripts
 
+    # Tier labels in resolution order (user > overlays > builtin), driving both
+    # the registry counters and the render columns.
+    roots = paths.overlay_roots()
+    labels = [label for label, _ in roots]
+
     def tiers(counter: Counter) -> dict:
-        return {t: counter.get(t, 0) for t in ("user", "profile", "builtin")}
+        return {label: counter.get(label, 0) for label in labels}
 
     registries = {
         "injectors": tiers(Counter(i.source for i in list_injectors())),
@@ -301,12 +307,20 @@ def do_info(ctx: Ctx) -> None:
         "scripts": tiers(Counter(s.source_origin for s in list_scripts())),
         "presets": tiers(Counter(core_presets.load_preset_sources().values())),
     }
-    profile = paths.profile_dir()
-    profile_present = profile.is_dir()
-    # "overrides" = registry definitions resolving from the profile tier, plus a
-    # profile-supplied workspace.template.toml -- what the overlay actually adds.
-    profile_overrides = sum(r["profile"] for r in registries.values()) + (
-        1 if (profile / "workspace.template.toml").is_file() else 0)
+
+    overlays = paths.overlay_dirs()
+    overlay_labels = {label for label, _ in overlays}
+    # "overlay_overrides" = registry entries resolving from any overlay tier plus
+    # 1 per overlay-supplied singleton. The EFFECTIVE view: an entry a user file
+    # shadows counts as `user`, so it is NOT counted here.
+    overlay_overrides = sum(
+        c for r in registries.values()
+        for label, c in r.items() if label in overlay_labels
+    )
+    tmpl = paths.resolve_singleton("workspace.template.toml")
+    if tmpl is not None and any(tmpl == d / "workspace.template.toml"
+                                for _, d in overlays):
+        overlay_overrides += 1
 
     data: dict = {}
     if ctx.loose:  # the default pointer is a loose-only concept
@@ -315,17 +329,19 @@ def do_info(ctx: Ctx) -> None:
     data["paths"] = {
         "config": str(paths.config_dir()),
         "state": str(paths.state_dir()),
-        "profile": str(profile),
-        "profile_present": profile_present,
         "builtin": str(paths.BUILTIN_DIR),
     }
+    data["overlays"] = [
+        {"label": label, "path": str(d), "present": d.is_dir()}
+        for label, d in overlays
+    ]
     data["proxy_image"] = paths.IMAGE_TAG
-    data["profile_overrides"] = profile_overrides
+    data["overlay_overrides"] = overlay_overrides
     data["registries"] = registries
     data["env"] = {
         "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME"),
         "XDG_STATE_HOME": os.environ.get("XDG_STATE_HOME"),
-        "CREDPROXY_PROFILE_DIR": os.environ.get("CREDPROXY_PROFILE_DIR"),
+        "CREDPROXY_OVERLAY_PATH": os.environ.get("CREDPROXY_OVERLAY_PATH"),
         "EDITOR": os.environ.get("VISUAL") or os.environ.get("EDITOR"),
     }
     render.OUT.info(data)
@@ -1190,13 +1206,15 @@ def do_def_list(ctx: Ctx, kind: str) -> None:
                 "scheme": d.scheme if d.scheme != "script"
                 else f"script:{d.spec.family}",
                 "source": d.source,
+                "shadows": list(d.shadows),
             }
             for d in list_injectors()
         ]
     else:
         from ..core.providers import list_providers
         rows = [
-            {"name": d.name, "source": d.source, "description": d.description or ""}
+            {"name": d.name, "source": d.source, "description": d.description or "",
+             "shadows": list(d.shadows)}
             for d in list_providers()
         ]
     render.OUT.def_list(kind, rows)
@@ -1244,11 +1262,18 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
     --proxy:     proxy suite only.
     --container: force the proxy suite into the image even if the deps are
                  importable on the host (the canonical, version-pinned env).
+
+    Overlay tests: each configured overlay (`CREDPROXY_OVERLAY_PATH`) with a
+    `tests/` subdir is run as its OWN pytest invocation (its `test_*.py` module
+    basenames would collide with the repo suite under one rootdir), using the
+    same on-host-or-image fallback as the proxy suite. The full overlay chain is
+    always mounted + on the resolution path so an overlay test can resolve
+    injectors/scripts from any tier.
     """
     import importlib.util
     import subprocess
     from ..core.imageenv import ImageEnv
-    from ..core.paths import TESTS_DIR, REPO_ROOT
+    from ..core.paths import TESTS_DIR, REPO_ROOT, overlay_dirs
 
     run_cli = not proxy_only
     run_proxy = not cli_only
@@ -1273,48 +1298,104 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
             if not run_proxy:
                 sys.exit(result.returncode)
 
+    # Every configured overlay, indexed (for container mount paths) + the subset
+    # that ships a tests/ suite. The full chain is mounted even when only one
+    # overlay's tests run, so resolution sees every tier (an overlay test may
+    # resolve a definition another overlay shadows).
+    all_overlays = list(enumerate(overlay_dirs()))                  # [(i, (label, dir))]
+    overlay_suites = [(i, label, d) for i, (label, d) in all_overlays
+                      if (d / "tests").is_dir()]
+
     # Proxy suite. tests/cli/ is excluded (host-only; its module names collide
     # with the proxy suite's under one rootdir). Prefer running it ON-HOST when
     # the proxy's runtime deps import there -- it skips the ~container-startup
     # tax that dominates the inner loop -- falling back to the image otherwise.
     proxy_deps = ("mitmproxy", "aiohttp", "starlark")
     missing = [m for m in proxy_deps if importlib.util.find_spec(m) is None]
+
     if not force_container and not missing:
         say("running proxy suite on-host (deps present; --container forces the image)...")
         env = {**os.environ, "PYTHONPATH": str(PROXY_DIR)}
         host_cmd = [sys.executable, "-m", "pytest", "-v", str(TESTS_DIR),
                     "--ignore", str(TESTS_DIR / "cli")] + trailing
-        if cli_failed:
-            r = subprocess.run(host_cmd, check=False, env=env)
-            sys.exit(1 if r.returncode == 0 else r.returncode)
-        os.execvpe(sys.executable, host_cmd, env)  # replace proc; preserves TTY
+        # Exec the proxy suite (preserves TTY) ONLY when it is the last thing to
+        # run -- nothing before it failed and no overlay suites follow. Otherwise
+        # run each suite as a subprocess and combine exit codes.
+        if not cli_failed and not overlay_suites:
+            os.execvpe(sys.executable, host_cmd, env)  # replace proc
+        combined = cli_failed
+        combined |= subprocess.run(host_cmd, check=False, env=env).returncode != 0
+        # Overlay tests import `testkit` (proxy dir) + resolve the CLI package;
+        # PYTHONPATH covers both. os.environ carries CREDPROXY_OVERLAY_PATH so
+        # resolution sees the same chain we discovered above.
+        ov_env = {**os.environ,
+                  "PYTHONPATH": os.pathsep.join([str(PROXY_DIR), str(REPO_ROOT / "cli")])}
+        for i, label, d in overlay_suites:
+            say(f"running overlay tests: {label} ({d / 'tests'})...")
+            ov_cmd = [sys.executable, "-m", "pytest", "-v", str(d / "tests")]
+            combined |= subprocess.run(ov_cmd, check=False, env=ov_env).returncode != 0
+        sys.exit(1 if combined else 0)
 
     if not force_container:
         say(f"proxy deps not importable on host ({', '.join(missing)}); running the "
             f"proxy suite in the image. Install them (see proxy/requirements.txt) "
             f"for the faster on-host path.")
     meta = ImageEnv.load()
-    cmd = [
-        "docker", "run", "--rm",
-        "-v", f"{PROXY_DIR}:{meta.source}",
-        "-v", f"{TESTS_DIR}:/opt/tests",
-        # Read-only so the proxy suite can validate the CLI's builtin scripts
-        # (the dogfood .star) against the Python built-ins -- single source of
-        # truth, even though the proxy never reads cli/ at runtime.
-        "-v", f"{REPO_ROOT / 'cli'}:/opt/cli:ro",
-        "-w", "/opt",
-        "--entrypoint", "python",
-        IMAGE_TAG,
-        "-m", "pytest", "-v", "tests/", "--ignore=tests/cli",
+
+    # Mounts + CREDPROXY_OVERLAY_PATH rewrite for the whole overlay chain: each
+    # host overlay dir is bind-mounted read-only at /opt/overlays/<i> and the env
+    # var is rewritten to those container paths (declared order preserved), so
+    # resolution INSIDE the image sees the overlays rather than absent host paths.
+    overlay_mounts: list[str] = []
+    container_overlay_paths: list[str] = []
+    for i, (label, d) in all_overlays:
+        cpath = f"/opt/overlays/{i}"
+        overlay_mounts += ["-v", f"{d}:{cpath}:ro"]
+        container_overlay_paths.append(cpath)
+    overlay_env = (["-e", "CREDPROXY_OVERLAY_PATH=" + ":".join(container_overlay_paths)]
+                   if container_overlay_paths else [])
+
+    def _docker_run(pytest_args: list[str], *, extra_env: list[str]) -> list[str]:
+        return [
+            "docker", "run", "--rm",
+            "-v", f"{PROXY_DIR}:{meta.source}",
+            "-v", f"{TESTS_DIR}:/opt/tests",
+            # Read-only so the proxy suite can validate the CLI's builtin scripts
+            # (the dogfood .star) against the Python built-ins -- single source of
+            # truth, even though the proxy never reads cli/ at runtime.
+            "-v", f"{REPO_ROOT / 'cli'}:/opt/cli:ro",
+            *overlay_mounts,
+            *extra_env,
+            "-w", "/opt",
+            "--entrypoint", "python",
+            IMAGE_TAG,
+            *pytest_args,
+        ]
+
+    proxy_cmd = _docker_run(
+        ["-m", "pytest", "-v", "tests/", "--ignore=tests/cli", *trailing],
+        extra_env=[],
+    )
+    # Overlay suites run under the rewritten CREDPROXY_OVERLAY_PATH; PYTHONPATH
+    # covers the proxy dir (for `import testkit`) + the CLI package (testkit also
+    # self-inserts /opt/cli, but be explicit since overlay tests carry no conftest).
+    ov_extra_env = overlay_env + ["-e", f"PYTHONPATH={meta.source}:/opt/cli"]
+    overlay_cmds = [
+        (label, _docker_run(["-m", "pytest", "-v", f"/opt/overlays/{i}/tests"],
+                            extra_env=ov_extra_env))
+        for i, label, d in overlay_suites
     ]
-    cmd += trailing
+
     try:
-        if cli_failed:
-            # Run via subprocess so the final exit reflects the combined result.
-            r = subprocess.run(cmd, check=False)
-            sys.exit(1 if r.returncode == 0 else r.returncode)
-        # Happy path or proxy-only: exec into docker (preserves TTY).
-        os.execvp("docker", cmd)
+        if not cli_failed and not overlay_cmds:
+            # Proxy suite is the only thing to run: exec (preserves TTY).
+            os.execvp("docker", proxy_cmd)
+        combined = cli_failed
+        combined |= subprocess.run(proxy_cmd, check=False).returncode != 0
+        for label, ocmd in overlay_cmds:
+            say(f"running overlay tests in image: {label}...")
+            combined |= subprocess.run(ocmd, check=False).returncode != 0
+        sys.exit(1 if combined else 0)
     except FileNotFoundError:
         # subprocess.run / execvp both raise this if `docker` isn't on PATH.
         raise DependencyError(core_docker.DOCKER_MISSING_MSG)
@@ -1484,7 +1565,7 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
                             action="store_true")
     # Also wipe the named managed volume(s) (re-seeded from the image), e.g.
     # `--reset-volume home`. Repeatable. Destroys data, so it's gated like
-    # delete; bind/profile (host-path) mounts are untouched.
+    # delete; bind/overlay (host-path) mounts are untouched.
     p_recreate.add_argument("--reset-volume", dest="recreate_reset_volumes",
                             action="append", metavar="NAME", default=[])
     p_delete = sub.add_parser("delete")
@@ -1548,7 +1629,7 @@ _STRICT_HELP = (
     "Workspaces:\n"
     "  credproxy workspace create NAME\n"
     "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
-    "  credproxy info                      (global config & state: paths, profile, registries)\n"
+    "  credproxy info                      (global config & state: paths, overlays, registries)\n"
     "  credproxy doctor [NAME] [--fetch]   (preflight: docker/image/config/bindings)\n"
     "  credproxy version                   (or: credproxy --version)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
@@ -1563,6 +1644,7 @@ _STRICT_HELP = (
     "Definitions:\n"
     "  credproxy injector scaffold NAME [--script] | list | check NAME | api\n"
     "  credproxy provider scaffold NAME | provider list | show NAME\n"
+    "  credproxy script check [NAME]       (compile .star scripts before push)\n"
     "  credproxy preset list               (service setup packs: bindings + guardrails)\n"
     "Dev harness:\n"
     "  credproxy dev build|test|reload\n"
@@ -1584,7 +1666,7 @@ _LOOSE_HELP = (
     "  credp create [NAME] [--here]    (NAME derived from the dir if omitted)\n"
     "  credp bind-dir [NAME] [--dir PATH]  associate a workspace with a directory\n"
     "  credp list [FILTER]\n"
-    "  credp info                      global config & state (paths, profile, registries)\n"
+    "  credp info                      global config & state (paths, overlays, registries)\n"
     "  credp enter|edit|start|stop|recreate|delete|apply|inspect|logs [NAME]\n"
     "  credp mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
@@ -1595,6 +1677,7 @@ _LOOSE_HELP = (
     "Definitions:\n"
     "  credp injector scaffold NAME [--script] | list | check NAME | api\n"
     "  credp provider scaffold NAME | provider list | show NAME\n"
+    "  credp script check [NAME]       (compile .star scripts before push)\n"
     "  credp preset list               (service setup packs: bindings + guardrails)\n"
     "Dev harness:\n"
     "  credp dev build|test|reload\n"
@@ -1709,7 +1792,7 @@ _CREATE_HELP = (
     "credproxy workspace create NAME -- scaffold a workspace config file and\n"
     "auth token (does not start anything). The scaffold sets a concrete image;\n"
     "edit the generated <name>.toml to change it (its comments show what to\n"
-    "adjust), or override the template in a profile overlay (see docs/forking.md).\n"
+    "adjust), or override the template in an overlay (see docs/overlays.md).\n"
     "\n"
     "  --here        associate the workspace with the current directory, so a\n"
     "                loose `credp <verb>` run from at/under it resolves here.\n"
@@ -1801,7 +1884,7 @@ _VERB_HELP = {
         "the container is replaced (unlike `delete`). `--proxy` (alias `--all`) also\n"
         "recreates the proxy container, regenerating its CA (full re-bootstrap).\n"
         "`--reset-volume NAME` (repeatable) ALSO wipes that managed volume,\n"
-        "re-seeded from the image (e.g. `--reset-volume home`) -- bind/profile\n"
+        "re-seeded from the image (e.g. `--reset-volume home`) -- bind/overlay\n"
         "host-path mounts are untouched, and config/token/state survive. It\n"
         "destroys data, so on the loose surface it prompts for an implicit default\n"
         "workspace (pass --yes to bypass)."
@@ -2150,6 +2233,8 @@ def main(loose_default: bool = False) -> None:
             _dispatch_def(ctx, head, rest)
         elif head == "preset":
             _dispatch_preset(ctx, rest)
+        elif head == "script":
+            _dispatch_script(ctx, rest)
         elif head == "dev":
             _dispatch_dev(ctx, rest, trailing)
         elif loose:
@@ -2400,6 +2485,47 @@ def _compile_script_in_image(source: str) -> str | None:
         fail(f"proxy image '{IMAGE_TAG}' not found; build it with "
              f"`credproxy dev build`")
     return out or f"compile failed (exit {r.returncode})"
+
+
+def do_script_check(ctx: Ctx, name: str | None, force_container: bool) -> None:
+    """Compile the named script (or every resolvable script) in the proxy runtime
+    and report per-script results. Exit 0 iff all pass."""
+    from ..core import scriptcheck
+
+    results = scriptcheck.run(name, force_container=force_container)
+    if not results:
+        say(f"no script '{name}' found" if name else "no scripts to check")
+    render.OUT.script_check([
+        {"name": r.name, "origin": r.origin, "ok": r.ok, "error": r.error,
+         "profiles": list(r.profiles)}
+        for r in results
+    ])
+    if any(not r.ok for r in results):
+        sys.exit(1)
+
+
+def _dispatch_script(ctx: Ctx, rest: list[str]) -> None:
+    """`script` definition commands. Today just `check [NAME]` -- compile scripts
+    before push (sibling of `injector list`/`provider list`/`preset list`)."""
+    usage = ("usage: credproxy script check [NAME] [--container]\n"
+             "Compile resolvable .star scripts in the proxy runtime (on-host when\n"
+             "the Starlark deps import, else in the image). A script referenced by\n"
+             "a scripted-injector manifest is compiled under the injector profile\n"
+             "paired with that manifest; an unreferenced script is tried under both\n"
+             "the injector and rule profiles. Exit 0 iff all compile.")
+    if not rest or _wants_help(rest):
+        say(usage)
+        return
+    if rest[0] != "check":
+        fail(f"unknown script command '{rest[0]}' ({usage})")
+    args = rest[1:]
+    names = [a for a in args if not a.startswith("-")]
+    flags = [a for a in args if a.startswith("-")]
+    force_container = "--container" in flags or "--docker" in flags
+    bad = [f for f in flags if f not in ("--container", "--docker")]
+    if bad or len(names) > 1:
+        fail(usage)
+    do_script_check(ctx, names[0] if names else None, force_container)
 
 
 def _dispatch_preset(ctx: Ctx, rest: list[str]) -> None:

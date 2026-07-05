@@ -13,10 +13,10 @@ credential resolves in a single exec -- an interactive provider prompts once,
 a vault provider can coalesce same-item refs. A single value is just a list of
 one; there is no single/batch duality on the wire.
 
-Discovery (first match wins, user shadows profile shadows builtin):
-  1. user     $XDG_CONFIG_HOME/credproxy/providers/<name>
-  2. profile  <$CREDPROXY_PROFILE_DIR or repo/profile>/providers/<name>
-  3. builtin  cli/credproxy_cli/builtin/providers/<name>
+Discovery (first match wins, user shadows overlays shadow builtin):
+  1. user      $XDG_CONFIG_HOME/credproxy/providers/<name>
+  2. overlays  <CREDPROXY_OVERLAY_PATH or repo/overlay/*>/providers/<name>
+  3. builtin   cli/credproxy_cli/builtin/providers/<name>
 Each location is either an executable file, or a directory holding an
 executable `run`.
 """
@@ -26,7 +26,7 @@ import contextlib
 import json
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .errors import ProviderError
@@ -92,8 +92,11 @@ class Provider:
 
     name: str
     exe: Path
-    source: str  # "user" or "builtin" -- for diagnostics / `list`
+    source: str  # tier label: "user", "overlay:<name>", "builtin" -- diagnostics / `list`
     description: str | None = None  # from the `describe` op, for `list`
+    # Tier labels this provider shadows (same name, less-specific tier),
+    # most-specific-loser first. Populated only by `list_providers`.
+    shadows: tuple[str, ...] = ()
 
 
 def _ask(exe: Path, op: str, field: str) -> str | None:
@@ -172,17 +175,23 @@ def find_provider(name: str) -> Provider:
 
 
 def list_providers() -> list[Provider]:
-    """All resolvable providers, user shadowing builtin, sorted by name."""
+    """All resolvable providers, user shadowing overlays shadowing builtin,
+    sorted by name. Each winner carries the tier labels it shadows (recorded as
+    the least-specific-first walk overwrites, so no extra filesystem walk)."""
     seen: dict[str, Provider] = {}
+    shadowed: dict[str, list[str]] = {}
     for source, base in reversed(layered_dirs("providers")):
         if not base.is_dir():
             continue
         for entry in base.iterdir():
             exe = _resolve_in(base, entry.name)
             if exe is not None:
+                if entry.name in seen:
+                    shadowed.setdefault(entry.name, []).append(seen[entry.name].source)
                 seen[entry.name] = Provider(
                     entry.name, exe, source, _describe(exe))
-    return [seen[n] for n in sorted(seen)]
+    return [replace(seen[n], shadows=tuple(reversed(shadowed.get(n, []))))
+            for n in sorted(seen)]
 
 
 def _tail(text: str, lines: int = 5) -> str:

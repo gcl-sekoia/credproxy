@@ -61,13 +61,13 @@ map_host_user = true
 exec_flags = ["--workdir", "/srv"]
 
 # Things mounted in. A string is a host bind ("SRC:DST[:ro]"); a table is a typed
-# mount — a managed `volume` (persistent, image-seeded, ownership-clean) or a
-# `profile` mount (a path relative to the profile overlay, for static files).
+# mount — a managed `volume` (persistent, image-seeded, ownership-clean) or an
+# `overlay` mount (a path relative to an overlay dir, for static files).
 mounts = [
   "~/code:/code",                                          # host bind
   "~/.gitconfig:/home/vscode/.gitconfig:ro",               # host bind, read-only
   { volume = "cache", target = "/home/vscode/.cache" },    # managed volume
-  { profile = "gitconfig", target = "/home/vscode/.gitconfig" },  # profile file
+  { overlay = "gitconfig", target = "/home/vscode/.gitconfig" },  # overlay file
 ]
 
 # Environment variables set in the workspace container.
@@ -107,7 +107,7 @@ hosts    = ["sts.amazonaws.com"]
 |---|---|---|---|
 | `image` | string | **required** | The workspace container image — your own image; never modified or privileged. `credproxy create` scaffolds this to a devcontainers base that ships a non-root sudo user (`vscode`, uid 1000) plus curl + ca-certificates (so the bootstrap and a non-root shell work with no setup), along with the matching `user`/`home`/`map_host_user`. To run a different image, edit `image` here (and `user`/`home` to match — the scaffold comments explain). There is no built-in default: `image` is mandatory, and omitting it is an error. |
 | `home` | string | _(none)_ | Sugar for a managed volume named `home` mounted at this (absolute) path — the persistent, image-seeded home. **Optional**: omit it for an ephemeral home (the image's, lost on recreate). The volume survives stop/start and recreate; wiped by `recreate --reset-volume home` or `delete`. Also the default `workdir`. |
-| `mounts` | list | `[]` | Things mounted into the workspace. A **string** is a host **bind** (`"SRC:DST[:ro]"`; `~` expanded on `SRC`, which must be an existing absolute path; `DST` absolute). A **table** is a typed mount with exactly one of: `{ bind = "SRC", target = "/dst", readonly = false }` (host bind), `{ volume = "NAME", target = "/dst" }` (a managed named volume — persistent, image-seeded, ownership-clean; namespaced per workspace; great for caches), or `{ profile = "REL", target = "/dst" }` (a path **relative to the profile overlay dir**, confined within it, read-only by default — for static files shipped with a fork; see [forking.md](forking.md)). No two mounts may share a `target`; no two volumes a name (`home` is reserved for the home sugar). Managed volumes can also be added with `credproxy workspace NAME mount add --volume VOL --target PATH [--ro] [--preserve]` (a surgical TOML edit; `--volume home` writes the home sugar) — see *Adding a volume, keeping existing data* below. |
+| `mounts` | list | `[]` | Things mounted into the workspace. A **string** is a host **bind** (`"SRC:DST[:ro]"`; `~` expanded on `SRC`, which must be an existing absolute path; `DST` absolute). A **table** is a typed mount with exactly one of: `{ bind = "SRC", target = "/dst", readonly = false }` (host bind), `{ volume = "NAME", target = "/dst" }` (a managed named volume — persistent, image-seeded, ownership-clean; namespaced per workspace; great for caches), or `{ overlay = "REL", target = "/dst" }` (a path **relative to an overlay dir**, searched in declared order and confined within the winning overlay, read-only by default — for static files shipped with a fork; see [overlays.md](overlays.md)). No two mounts may share a `target`; no two volumes a name (`home` is reserved for the home sugar). Managed volumes can also be added with `credproxy workspace NAME mount add --volume VOL --target PATH [--ro] [--preserve]` (a surgical TOML edit; `--volume home` writes the home sugar) — see *Adding a volume, keeping existing data* below. |
 | `env` | table (string → string) | `{}` | Passed to the container as `-e KEY=VALUE`. Both keys and values must be strings. |
 | `setup` | list of strings | `[]` | Shell commands run **once**, right after the container is (re)created, via `sh -lc`. A failing command stops `start` and leaves the container in place for debugging. Re-run only happens when the container is recreated (see drift below), not on every `start`. |
 | `run_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the workspace `docker run`. credproxy's structural flags (`--name`, labels, `--network`, the home volume) are applied **after** these and win on conflict, so `run_flags` can't detach the netns or rename the container; additive flags (`--userns`, an extra `--mount`/`-v`, `--security-opt`) take effect. The main use is runtime-specific uid mapping (see *Non-root user & mount ownership* below). |
@@ -376,7 +376,7 @@ any host it **newly TLS-intercepts** (a preset rule on a bindings-free host flip
 it — see [`rules.md`](rules.md#interception-is-a-union--a-rule-can-flip-a-host-to-intercepted)). `credproxy preset list`
 shows every pack's full expansion (bindings and rules) before you apply. Presets
 are data in the layered registry, so an org ships its own by dropping a TOML in
-its profile overlay — see [`forking.md`](forking.md).
+an overlay — see [`overlays.md`](overlays.md).
 
 Injector definitions are a separate declarative file type (scheme, params,
 placeholder pattern, env hint) — see [`injectors.md`](injectors.md). Providers
@@ -425,7 +425,7 @@ what you changed:
   start from a clean volume, `recreate --reset-volume NAME` (repeatable, e.g.
   `--reset-volume home`) wipes that managed volume — re-seeded from the image —
   while keeping the workspace defined (config, token, and state survive, and
-  bind/profile host-path mounts are untouched). It destroys data, so on the loose
+  bind/overlay host-path mounts are untouched). It destroys data, so on the loose
   surface it prompts for an implicit default (`--yes` bypasses).
 
 `apply` reports what it applied versus deferred; `inspect` shows the same drift

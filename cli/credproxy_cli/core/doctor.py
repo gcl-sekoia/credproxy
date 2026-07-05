@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from . import hostmatch
 from .errors import CredproxyError
 from .imageenv import ImageEnv
-from .paths import IMAGE_TAG
+from .paths import IMAGE_TAG, overlay_dirs
 from .workspace import Workspace, for_name, list_names
 
 
@@ -75,12 +75,21 @@ def _env_checks() -> list[Check]:
     except CredproxyError as e:
         out.append(_fail("image", str(e), "run `credproxy dev build`"))
 
-    prof = os.environ.get("CREDPROXY_PROFILE_DIR")
-    if prof:
-        out.append(_ok("profile", f"profile overlay {prof} exists")
-                   if os.path.isdir(prof) else
-                   _fail("profile", f"CREDPROXY_PROFILE_DIR {prof} does not exist",
-                         "unset it or create the directory"))
+    # One existence check per EXPLICITLY configured overlay entry (index-
+    # qualified so a --json consumer can't collide two). Only when
+    # CREDPROXY_OVERLAY_PATH is set: an env entry can be typo'd, while the
+    # default (discovered subdirs of the <repo>/overlay/ container) exists by
+    # construction -- so unset env means no overlay checks at all. Resolution
+    # stays tolerant of a missing entry elsewhere; flagging it loudly is
+    # doctor's job. `overlay_dirs()` labels are `overlay:<base>`; the check id
+    # carries the bare basename for readability.
+    if os.environ.get("CREDPROXY_OVERLAY_PATH") is not None:
+        for i, (label, d) in enumerate(overlay_dirs()):
+            base = label.split(":", 1)[1]
+            cid = f"overlay[{i}]:{base}:exists"
+            out.append(_ok(cid, f"overlay {d} exists") if d.is_dir() else
+                       _fail(cid, f"configured overlay {d} does not exist",
+                             "create the directory or drop it from CREDPROXY_OVERLAY_PATH"))
     return out
 
 
@@ -96,7 +105,58 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
     except CredproxyError as e:
         out.append(_fail(f"ws:{ws.name}:config", f"[{ws.name}] config: {e}"))
     out += _binding_checks(ws, fetch=fetch)
+    out += _script_compile_checks(ws)
     out += _rule_checks(ws)
+    return out
+
+
+def _script_compile_checks(ws: Workspace) -> list[Check]:
+    """Upgrade the binding-layer script-existence probe to a real COMPILE for each
+    binding whose injector is scripted -- but only when the proxy Starlark runtime
+    imports on-host (no docker, no venv required for doctor's other checks). When
+    it doesn't import, emit a single skip-with-note pointing at `script check`
+    rather than failing (doctor must degrade gracefully)."""
+    from . import scriptcheck
+    from .bindings import load_bindings
+    from .injectors import find_injector
+    from .scripts import find_script
+
+    try:
+        bindings = load_bindings(ws)
+    except (CredproxyError, tomllib.TOMLDecodeError, OSError):
+        return []  # the :bindings check already reported the parse/validate failure
+
+    # Distinct scripted injectors referenced by this workspace's bindings.
+    scripted: dict[str, object] = {}
+    for b in bindings:
+        try:
+            inj = find_injector(b.injector)
+        except CredproxyError:
+            continue  # :binding[i]:injector already flagged it
+        if inj.scheme == "script" and inj.script:
+            scripted.setdefault(inj.script, inj)
+    if not scripted:
+        return []
+
+    if not scriptcheck.starlark_importable():
+        return [Check(f"ws:{ws.name}:scripts", True,
+                      f"[{ws.name}] {len(scripted)} scripted injector(s) resolve; "
+                      f"compile skipped (Starlark runtime not importable on-host)",
+                      "run `credproxy script check` for a full compile "
+                      "(on-host with the proxy deps, or in the image)")]
+
+    out: list[Check] = []
+    for script_name, inj in scripted.items():
+        cid = f"ws:{ws.name}:script:{script_name}"
+        try:
+            source = find_script(inj.script).source
+        except CredproxyError as e:
+            out.append(_fail(cid, f"[{ws.name}] script '{script_name}': {e}"))
+            continue
+        err = scriptcheck.compile_injector_paired(inj, source)
+        out.append(_ok(cid, f"[{ws.name}] script '{script_name}' compiles")
+                   if err is None else
+                   _fail(cid, f"[{ws.name}] script '{script_name}' fails to compile: {err}"))
     return out
 
 

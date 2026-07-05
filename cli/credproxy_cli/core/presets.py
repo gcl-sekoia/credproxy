@@ -4,7 +4,7 @@ guardrails (rules) that should accompany them.
 
 The binding half packages the multi-binding shape a single credential needs --
 e.g. a GitHub PAT is `bearer` on api.github.com but HTTP `basic` on github.com /
-ghcr.io, sharing ONE bare-token placeholder. The rule half ships policy: an org
+ghcr.io, sharing ONE bare-token placeholder. The rule half ships policy: an
 overlay's `readonly-guard.star` wired to its hosts/params in one `preset add`.
 Either half may be empty: a credential-only preset (`[[part]]` only) or a
 pure-rule policy pack (`[[rule]]` only, no `[placeholder]`/provider/secret).
@@ -13,10 +13,10 @@ A preset is pure host-side config **expansion, not a link**: it stamps ordinary
 `[[binding]]` + `[[rule]]` blocks; the proxy never sees a "preset", and
 editing/removing the stamped blocks afterwards is normal.
 
-Presets are *data*, loaded from the layered registry (user > profile overlay >
+Presets are *data*, loaded from the layered registry (user > overlays >
 builtin, paths.layered_dirs) -- a `<name>.toml` per preset, the name being the
-filename stem. So an org adds its own packs by dropping a TOML in its profile
-overlay, no code. See docs/forking.md and builtin/presets/github.toml.
+filename stem. So an org adds its own packs by dropping a TOML in an overlay, no
+code. See docs/overlays.md and builtin/presets/github.toml.
 """
 from __future__ import annotations
 
@@ -164,7 +164,7 @@ def _parse_preset_rule(entry, i: int, src: str) -> _PresetRule:
 
 
 def load_presets() -> dict[str, PresetSpec]:
-    """All resolvable presets keyed by name, user shadowing profile shadowing
+    """All resolvable presets keyed by name, user shadowing overlays shadowing
     builtin (least-specific first so the most-specific overwrites)."""
     seen: dict[str, PresetSpec] = {}
     for _source, base in reversed(layered_dirs("presets")):
@@ -176,19 +176,27 @@ def load_presets() -> dict[str, PresetSpec]:
     return seen
 
 
-def load_preset_sources() -> dict[str, str]:
-    """Map each resolvable preset name to the tier it resolves from
-    ("user"/"profile"/"builtin"), mirroring load_presets' shadowing. Presets
-    don't carry source on the spec (unlike the other registries), so this is the
-    diagnostics seam (e.g. `info`'s per-tier counts)."""
+def _preset_provenance() -> tuple[dict[str, str], dict[str, list[str]]]:
+    """One reversed walk mapping each resolvable preset name to (its winning tier
+    label, the tier labels it shadows most-specific-first). Presets don't carry
+    source on the spec (unlike the other registries), so this is the diagnostics
+    seam (`info`'s per-tier counts, `preset list`'s shadow annotations)."""
     src: dict[str, str] = {}
+    shadowed: dict[str, list[str]] = {}
     for source, base in reversed(layered_dirs("presets")):
         if not base.is_dir():
             continue
         for path in sorted(base.iterdir()):
             if path.suffix == ".toml" and path.is_file():
+                if path.stem in src:
+                    shadowed.setdefault(path.stem, []).append(src[path.stem])
                 src[path.stem] = source
-    return src
+    return src, {n: list(reversed(losers)) for n, losers in shadowed.items()}
+
+
+def load_preset_sources() -> dict[str, str]:
+    """Map each resolvable preset name to the tier label it resolves from."""
+    return _preset_provenance()[0]
 
 
 def get_preset(name: str) -> PresetSpec:
@@ -205,10 +213,14 @@ def get_preset(name: str) -> PresetSpec:
 def describe_presets() -> list[dict]:
     """Structured description of every known preset, for `preset list`: the
     bindings AND rules it expands to, so an operator sees the full stamp before
-    applying. No secret/provider -- those are supplied at `preset add` time."""
+    applying. No secret/provider -- those are supplied at `preset add` time. Each
+    row carries its resolved tier label (`source`) and the tiers it `shadows`."""
+    sources, shadows = _preset_provenance()
     return [
         {
             "name": spec.name,
+            "source": sources.get(spec.name, ""),
+            "shadows": shadows.get(spec.name, []),
             "needs_credential": spec.needs_credential,
             "bindings": [
                 {

@@ -381,7 +381,7 @@ def create_ws_container(
     _ensure_managed_volumes(ws, cfg)
     # Mounts, by kind. A managed `volume` (incl. the `home` sugar) is a named
     # Docker volume, namespaced per workspace, image-seeded on first run. `bind`
-    # and `profile` (a profile-relative bind) are host binds.
+    # and `overlay` (an overlay-relative bind) are host binds.
     for m in cfg["mounts"]:
         if m["kind"] == "volume":
             opt = f"{ws.volume(m['name'])}:{m['target']}"
@@ -714,7 +714,7 @@ def recreate_workspace(ws: Workspace, notify: Notify = _noop,
 
     `reset_volumes` additionally drops the named managed volumes (e.g. `home`,
     `cache`), which `start_workspace` re-seeds from the image -- the one recreate
-    mode that destroys data, so callers gate it like `delete`. Bind/profile mounts
+    mode that destroys data, so callers gate it like `delete`. Bind/overlay mounts
     are host paths and are never touched; config/token/state survive, so the
     workspace stays defined.
 
