@@ -80,8 +80,8 @@ present, yet the call succeeds:
 
 ```console
 $ credp enter
-vscode@73fd8fd26e2e:~$ export GITHUB_TOKEN=$(curl -s http://proxy.local/setup | jq -r '.bindings[0].placeholder')
-vscode@73fd8fd26e2e:~$ curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user | jq .login
+vscode@myproject:~$ export GITHUB_TOKEN=$(curl -s http://proxy.local/setup | jq -r '.bindings[0].placeholder')
+vscode@myproject:~$ curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user | jq .login
 "your-github-username"
 ```
 
