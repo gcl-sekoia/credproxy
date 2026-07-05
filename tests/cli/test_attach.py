@@ -556,6 +556,46 @@ def test_create_attach_stamps_selector(xdg, workspaces_dir):
     assert Workspace("svc").token_path.exists()
 
 
+# ---- attach-aware follow-up hints (never name the gated `start`) --------------
+
+
+def test_create_attach_hints_push_not_start(xdg, workspaces_dir):
+    ec, out, err = _run(["workspace", "create", "svc",
+                         "--attach", "container=p"])
+    assert ec == 0
+    assert "credproxy workspace svc push" in err
+    assert "start" not in err            # `start` is gated on attached
+
+
+def test_binding_add_on_attached_hints_push(xdg, workspaces_dir):
+    _attach_ws(workspaces_dir, "svc", _ATTACH_TOML)
+    ec, out, err = _run(["workspace", "svc", "binding", "add",
+                         "--injector", "bearer", "--provider", "env",
+                         "--secret", "T", "--host", "api.github.com"])
+    assert ec == 0
+    assert "credproxy workspace svc push" in err
+    assert "start" not in err
+
+
+def test_rule_add_on_attached_hints_push(xdg, workspaces_dir):
+    _attach_ws(workspaces_dir, "svc", _ATTACH_TOML)
+    ec, out, err = _run(["workspace", "svc", "rule", "add", "block",
+                         "--host", "api.evil.com"])
+    assert ec == 0
+    assert "credproxy workspace svc push" in err
+    assert "start" not in err
+
+
+def test_rule_add_managed_still_hints_start(xdg, workspaces_dir):
+    """The managed hint is unchanged: rule add on a managed workspace keeps
+    pointing at `start` (or `apply`)."""
+    _managed_ws(workspaces_dir, "m")
+    ec, out, err = _run(["workspace", "m", "rule", "add", "block",
+                         "--host", "api.evil.com"])
+    assert ec == 0
+    assert "credproxy workspace m start" in err
+
+
 def test_create_attach_container_and_admin_url(xdg, workspaces_dir):
     _run(["workspace", "create", "c", "--attach", "container=pbox"])
     assert 'attach = { container = "pbox" }' in (workspaces_dir / "c.toml").read_text()

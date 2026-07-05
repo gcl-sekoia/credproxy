@@ -190,7 +190,7 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
         lifecycle.create_attached_workspace_files(ws, selector)
     else:
         lifecycle.create_workspace_files(ws)
-    render.OUT.created(ws.name, str(ws.config_path))
+    render.OUT.created(ws.name, str(ws.config_path), attached=attach is not None)
     # Optional cwd-association (`--here`/`--dir`): record the directory this
     # workspace is "for" so `credp <verb>` resolves it from there (dirmatch).
     if directory is not None:
@@ -438,16 +438,24 @@ def do_edit(ctx: Ctx, name: str | None) -> None:
     from ..core import bindings as core_bindings
     from ..core import config as core_config
     from ..core import rules as core_rules
+    # An attached workspace has no `start`; its follow-up verb is `push`
+    # (`apply` is its alias there).
+    attached = core_config.quick_attach(ws)
     try:
         core_config.load_config(ws)
         core_bindings.load_bindings(ws)
         core_rules.load_rules(ws)
     except CredproxyError as e:
         say(f"warning: config is invalid — {e}")
-        say("fix it before `start`/`apply`, or the workspace won't update cleanly.")
+        hint = "`push`/`apply`" if attached else "`start`/`apply`"
+        say(f"fix it before {hint}, or the workspace won't update cleanly.")
         return
-    say("edited. changes are not live yet: `apply` (bindings) or "
-        "`start` (image/home/mounts/env/setup).")
+    if attached:
+        say("edited. changes are not live yet: `push` (or `apply`) sends them "
+            "to the attached proxy.")
+    else:
+        say("edited. changes are not live yet: `apply` (bindings) or "
+            "`start` (image/home/mounts/env/setup).")
 
 
 def do_start(ctx: Ctx, name: str | None) -> None:
@@ -837,6 +845,7 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         core_bindings.validate(existing + [binding], str(ws.config_path))
         core_bindings.append_binding(ws, binding)
 
+    from ..core import config as core_config
     render.OUT.binding_added(bname, ws.name, {
         "name": bname,
         "injector": binding.injector,
@@ -845,7 +854,7 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         "hosts": list(binding.hosts),
         "placeholder": placeholder,
         "env": env,
-    })
+    }, attached=core_config.quick_attach(ws))
 
 
 def _newly_intercepted(existing_hosts, new_hosts) -> list[str]:
@@ -945,6 +954,7 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         if new_r:
             core_rules.append_rules(ws, new_r)
 
+    from ..core import config as core_config
     render.OUT.preset_applied(ws.name, a.preset, [{
         "name": b.name, "injector": b.injector, "provider": b.provider,
         "secret": b.secret, "hosts": list(b.hosts), "placeholder": b.placeholder,
@@ -952,7 +962,7 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     } for b in new_b], [{
         "name": r.name, "hosts": list(r.hosts), "action": r.action,
         "script": r.script, "visible": r.effective_visible,
-    } for r in new_r], newly)
+    } for r in new_r], newly, attached=core_config.quick_attach(ws))
 
 
 def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
@@ -1165,7 +1175,9 @@ def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         core_rules.validate(existing + [rule], str(ws.config_path))
         core_rules.append_rule(ws, rule)
 
-    render.OUT.rule_added(rule.name, ws.name, _rule_row(rule))
+    from ..core import config as core_config
+    render.OUT.rule_added(rule.name, ws.name, _rule_row(rule),
+                          attached=core_config.quick_attach(ws))
 
 
 def do_rule_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
