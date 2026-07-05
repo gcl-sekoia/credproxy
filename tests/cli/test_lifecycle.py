@@ -227,6 +227,90 @@ def test_map_host_user_noop_on_docker(xdg, ws_factory, monkeypatch):
     assert not any(a.startswith("--userns") for a in calls[-1])
 
 
+# ---- workspace hostname (prompt shows the workspace name) --------------------
+
+
+def _hostname_value(args):
+    """The value following --hostname in an argv, or None if absent."""
+    return args[args.index("--hostname") + 1] if "--hostname" in args else None
+
+
+def test_proxy_always_gets_hostname(xdg, ws_factory, monkeypatch):
+    """The proxy always carries --hostname <sanitized name> on both runtimes --
+    on Docker the workspace inherits it; on podman it names the proxy."""
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.workspace import hostname_for
+    from credproxy_cli.core.imageenv import ImageEnv
+    ws = ws_factory("My_Proj")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    meta = ImageEnv(http_port=39998, tmpfs="/run/secrets",
+                    token="/run/secrets-ro/auth.token", source="/opt/proxy",
+                    mitmproxy_uid=31337)
+    lifecycle.create_proxy(ws, meta)
+    args = calls[-1]
+    assert _hostname_value(args) == hostname_for("My_Proj") == "my-proj"
+
+
+def test_workspace_gets_hostname_on_podman(xdg, ws_factory, monkeypatch):
+    """On podman the workspace carries its own --hostname (UTS is independent on
+    a netns join, and podman accepts the flag on the joiner)."""
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.workspace import hostname_for
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman", lambda: True)
+    ws = ws_factory("My_Proj")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": []}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    assert _hostname_value(calls[-1]) == hostname_for("My_Proj") == "my-proj"
+
+
+def test_workspace_no_hostname_on_docker(xdg, ws_factory, monkeypatch):
+    """On Docker the workspace must NOT carry --hostname (Docker rejects it on a
+    netns joiner); it inherits the proxy's hostname instead."""
+    from credproxy_cli.core import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman", lambda: False)
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": []}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    assert "--hostname" not in calls[-1]
+
+
+def test_run_flags_hostname_suppresses_credproxy_flag(xdg, ws_factory, monkeypatch):
+    """A --hostname in run_flags (space form) wins: credproxy adds none of its
+    own, so only the user's value is present (run_flags is the escape hatch)."""
+    from credproxy_cli.core import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman", lambda: True)
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "run_flags": ["--hostname", "custom"]}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    # exactly one --hostname, and it's the user's
+    assert args.count("--hostname") == 1
+    assert _hostname_value(args) == "custom"
+
+
+def test_run_flags_hostname_equals_form_suppresses(xdg, ws_factory, monkeypatch):
+    """The `--hostname=custom` single-token form also suppresses credproxy's."""
+    from credproxy_cli.core import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman", lambda: True)
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "run_flags": ["--hostname=custom"]}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    assert "--hostname" not in args                  # credproxy added none
+    assert "--hostname=custom" in args               # only the user's single token
+
+
 def _nested_cfg(**over):
     # `mounts` override is a list of bind records (kind defaulted to "bind"); the
     # home volume (the chown anchor) is always prepended, matching the new model.

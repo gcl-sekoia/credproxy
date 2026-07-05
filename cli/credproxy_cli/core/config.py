@@ -702,11 +702,18 @@ def write_added_mount(ws: Workspace, name: str, target: str,
     atomic_write_text(ws.config_path, new)
 
 
-def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
+def workspace_spec_hash(cfg: dict, proxy_id: str | None, hostname: str | None = None) -> str:
     """Identity of the workspace container's launch spec. Changing the
     image, mounts (incl. the home volume), env, setup, run_flags, map_host_user,
-    user_uid, or the proxy container (netns peer) yields a new hash, which
-    `start` uses to decide whether to recreate."""
+    user_uid, the container hostname, or the proxy container (netns peer) yields a
+    new hash, which `start` uses to decide whether to recreate.
+
+    `hostname` is the name-derived container hostname (`hostname_for(ws.name)`),
+    passed alongside `proxy_id` rather than living in cfg -- it is name-derived,
+    not config- or environment-derived. Like `map_host_user`, it rides the hash
+    on every runtime even though the `--hostname` argv itself is only emitted on
+    podman: the hash carries the deterministic intent, not the runtime probe, so
+    switching runtimes doesn't recreate (mirroring `map_host_user`/keep-id)."""
     spec = json.dumps(
         {
             "image": cfg["image"],
@@ -716,6 +723,7 @@ def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
             "run_flags": cfg.get("run_flags") or [],
             "map_host_user": bool(cfg.get("map_host_user")),
             "user_uid": cfg.get("user_uid"),
+            "hostname": hostname,
             "proxy": proxy_id,
         },
         sort_keys=True,
