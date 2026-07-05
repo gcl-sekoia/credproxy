@@ -105,6 +105,30 @@ def make_request(method: str, url: str, headers: dict | None = None,
     return req
 
 
+def make_response(req, status: int = 200, body: bytes | str = b"",
+                  headers: dict | None = None):
+    """Build a mitmproxy flow carrying `req` plus a response, for a response-phase
+    rule (`run_rule_response`) or a re-seal injector (`InjectorHarness.run_response`)
+    under test.
+
+    Wraps `tutils.tresp` but hides the same footgun `make_request` does: tresp
+    seeds a default response header set (a `header-response` and a stale
+    `content-length: 7` over a `message` body) that every hand-rolled test has to
+    `.clear()`. This strips those defaults, sets `status`/`body`, and applies
+    `headers`, then returns the flow -- `.request` is the `req` you pass,
+    `.response` the response just built (what a `RuleResponseCtx`/`ResponseCtx`
+    wraps). `body` may be bytes or str."""
+    from mitmproxy.test import tflow, tutils
+
+    if isinstance(body, str):
+        body = body.encode()
+    resp = tutils.tresp(status_code=int(status), content=body)
+    resp.headers.clear()         # strip tresp's default headers + bogus content-length
+    for k, v in (headers or {}).items():
+        resp.headers[k] = v
+    return tflow.tflow(req=req, resp=resp)
+
+
 # --------------------------------------------------------------------------
 # Injectors
 # --------------------------------------------------------------------------
@@ -119,16 +143,84 @@ class InjectorResult:
     request: object
 
 
+@dataclass(frozen=True)
+class MintRecord:
+    """One `mint()` a re-seal injector's `on_response` performed, as captured by
+    the harness's recording minter. `value` is the runtime-derived secret (the
+    minted token), `ttl` its lifetime (None = never expires), `api_hosts` the
+    hosts the swap was registered on, `header` the API-host header the workspace
+    presents it in, and `placeholder` the deterministic sentinel the harness
+    handed back (which the script writes into the body in place of `value`)."""
+    value: str
+    ttl: float | None
+    api_hosts: tuple
+    header: str
+    placeholder: str
+
+
+class _RecordingMinter:
+    """A fake `config.RuntimeMinter` for `InjectorHarness.run_response`.
+
+    The real minter couples to `BindingCredentials`/config (registering a runtime
+    bearer swap per API host, emitting an audit event) -- engine internals with
+    their own upstream tests (`tests/test_reseal.py`). The harness's job is
+    narrower: let an overlay author assert what THEIR script minted (value, ttl,
+    hosts, header) and how it rewrote the body, without dragging config in. So this
+    only implements `mint(value, ttl, api_hosts, header)` -- the exact surface
+    `ResponseCtx.mint`/`mint_into_json` call -- returns a deterministic placeholder
+    (`minted-1`, `minted-2`, ...), and records a `MintRecord`. It does NOT enforce
+    the engine's non-empty-`api_hosts` / finite-TTL guards (those are
+    RuntimeMinter's, tested there), so a script can be driven through edge cases."""
+
+    def __init__(self):
+        self.records: list[MintRecord] = []
+
+    def mint(self, value: str, ttl, api_hosts, header: str = "Authorization") -> str:
+        placeholder = f"minted-{len(self.records) + 1}"
+        self.records.append(MintRecord(
+            value=value, ttl=ttl, api_hosts=tuple(api_hosts or ()),
+            header=header, placeholder=placeholder,
+        ))
+        return placeholder
+
+
+@dataclass(frozen=True)
+class InjectorResponseResult:
+    """The outcome of one `on_response`. `handled` is the scheme's boolean return
+    (True iff it acted on the response); `flow` is the flow whose response the
+    scheme mutated (body rewritten to carry the placeholder, etc.); `mints` is the
+    ordered list of `MintRecord`s the recording minter captured (empty if the
+    scheme minted nothing)."""
+    handled: bool
+    flow: object
+    mints: list
+
+
 class InjectorHarness:
     """A resolved injector ready to drive: the built scheme plus the merged
     manifest params. `run` constructs the exact `RequestCtx` the proxy would and
-    calls `on_request`."""
+    calls `on_request`; `run_response` the `ResponseCtx` (with a recording fake
+    minter) and calls `on_response`."""
 
     def __init__(self, name: str, scheme, params: dict, slots: tuple[str, ...]):
         self.name = name
         self.scheme = scheme
         self.params = params
         self.slots = slots
+
+    def _check_slots(self, secrets: dict) -> None:
+        """Enforce that `secrets`' keys equal the scheme's declared slots (the same
+        check `config.load_resolved` makes at push), so a manifest that declares
+        different slots than the script/test expects fails HERE rather than passing
+        a test the proxy would reject."""
+        want = set(self.slots)
+        got = set(secrets)
+        if got != want:
+            raise ValueError(
+                f"injector '{self.name}' declares secret slot(s) "
+                f"{{{', '.join(sorted(want))}}}, but the test provided "
+                f"{{{', '.join(sorted(got))}}} -- manifest/script slots disagree"
+            )
 
     def run(self, req, secrets: dict, params: dict | None = None,
             placeholder: str | None = None) -> InjectorResult:
@@ -138,17 +230,16 @@ class InjectorHarness:
         different slots than the script/test expects fails HERE rather than
         passing a test the proxy would reject. `params` defaults to the injector's
         merged manifest params; `placeholder` is the inert sentinel the workspace
-        would present (None for a sign-family default)."""
+        would present (None for a sign-family default).
+
+        The request phase is minter-less, mirroring the proxy: `mint()`/
+        `mint_into_json()` are response-phase-only, so a scripted injector that
+        calls them in `on_request` fails closed (`injected=False` -- the runtime
+        swallows request-phase hook errors, it does NOT raise); use `run_response`
+        for the mint path."""
         import schemes
 
-        want = set(self.slots)
-        got = set(secrets)
-        if got != want:
-            raise ValueError(
-                f"injector '{self.name}' declares secret slot(s) "
-                f"{{{', '.join(sorted(want))}}}, but the test provided "
-                f"{{{', '.join(sorted(got))}}} -- manifest/script slots disagree"
-            )
+        self._check_slots(secrets)
         ctx = schemes.RequestCtx(
             req, dict(secrets),
             self.params if params is None else params,
@@ -156,6 +247,32 @@ class InjectorHarness:
         )
         injected = self.scheme.on_request(ctx)
         return InjectorResult(injected=bool(injected), request=req)
+
+    def run_response(self, flow, secrets: dict, params: dict | None = None,
+                     placeholder: str | None = None) -> InjectorResponseResult:
+        """Run `on_response` against `flow` and return its outcome -- the runner
+        for the re-seal family's `mint` path.
+
+        Constructs the exact `ResponseCtx` the proxy would, but with a RECORDING
+        fake minter (`_RecordingMinter`) in place of the real `config.RuntimeMinter`
+        so the test asserts what the script minted (value/ttl/hosts/header, on
+        `result.mints`) and how it rewrote the body (on `flow.response`), without
+        dragging `BindingCredentials`/config in. `secrets` slot validation matches
+        `run` (a manifest/script slot disagreement fails here); `params` defaults to
+        the merged manifest params; `placeholder` is the request-time sentinel.
+        Build `flow` with `make_response`."""
+        import schemes
+
+        self._check_slots(secrets)
+        minter = _RecordingMinter()
+        ctx = schemes.ResponseCtx(
+            flow, dict(secrets),
+            self.params if params is None else params,
+            placeholder, minter=minter,
+        )
+        handled = self.scheme.on_response(ctx)
+        return InjectorResponseResult(handled=bool(handled), flow=flow,
+                                      mints=list(minter.records))
 
 
 def load_injector(name: str) -> InjectorHarness:
@@ -239,3 +356,38 @@ def run_rule(script, req, params: dict | None = None) -> RuleOutcome:
     ctx.params = dict(params or {})
     script.on_request(ctx)
     return RuleOutcome(request=req, response=ctx.pending)
+
+
+@dataclass(frozen=True)
+class RuleResponseOutcome:
+    """The outcome of running a rule script's RESPONSE phase. `response` is the
+    synthetic response a terminal `block()`/`respond()` set (None if the rule only
+    rewrote the response body/headers or did nothing); in-place response mutations
+    (a scrubbed body, a stripped header) are observed on `flow.response`."""
+    flow: object
+    response: object  # rules.SyntheticResponse | None
+
+    @property
+    def terminal(self) -> bool:
+        return self.response is not None
+
+    @property
+    def blocked(self) -> bool:
+        return self.response is not None and self.response.kind == "block"
+
+
+def run_rule_response(script, flow, params: dict | None = None) -> RuleResponseOutcome:
+    """Drive a rule script's RESPONSE phase against `flow` and return its outcome.
+
+    Builds the same `RuleResponseCtx` the addon uses (no secret, no minter, the
+    `block`/`respond` sinks), binds this rule's `params` (what `param()` reads),
+    runs `on_response`, and reports whether a terminal response was set. Body/header
+    rewrites land on `flow.response`. A script error raises (rule scripts fail
+    closed toward the policy, unsanitized) -- assert on that with `pytest.raises`.
+    Build `flow` with `make_response`."""
+    from rules import RuleResponseCtx
+
+    ctx = RuleResponseCtx(flow)
+    ctx.params = dict(params or {})
+    script.on_response(ctx)
+    return RuleResponseOutcome(flow=flow, response=ctx.pending)
