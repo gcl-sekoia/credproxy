@@ -33,9 +33,9 @@ A fake credential that is the right shape but carries no secret. It lives inside
 the workspace so tools have something to send. The proxy replaces it with the
 real credential on the way out.
 
-*Example:* your workspace holds `ghp_AOFWLTeyzi8jUF1YTApGxjlCpXn62z` (a
-correctly-shaped but inert GitHub token). The proxy swaps it for your real token
-when you call `api.github.com`.
+*Example:* your workspace holds `ghp_AOFWLTeyzi8jUF1YTApGxjlCpXn62zQ4KpX7` (a
+correctly-shaped but inert GitHub token — `ghp_` plus 36 characters). The proxy
+swaps it for your real token when you call `api.github.com`.
 
 ### Provider
 

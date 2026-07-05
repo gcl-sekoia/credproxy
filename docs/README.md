@@ -26,42 +26,40 @@ Read these in order the first time.
 - [04 · Your first credential](guide/04-first-credential.md) — the payoff: a
   GitHub token that works inside the container while the secret stays out.
 - [05 · Secret managers](guide/05-secret-managers.md) — beyond `env`: 1Password,
-  the macOS Keychain, Bitwarden, and the `gh` CLI as credential sources. *(Phase 2)*
-- [06 · Presets](guide/06-presets.md) — wire a whole service with one command. *(Phase 2)*
+  the macOS Keychain, Bitwarden, and the `gh` CLI as credential sources.
+- [06 · Presets](guide/06-presets.md) — wire a whole service with one command.
 - [07 · Rules](guide/07-rules.md) — block, stub, and rewrite traffic as
-  guardrails, no credential involved. *(Phase 2)*
-- [08 · Going further](guide/08-going-further.md) — mounts, attached workspaces,
-  and where to go next. *(Phase 2)*
+  guardrails, no credential involved.
+- [08 · Going further](guide/08-going-further.md) — many workspaces, mounts,
+  custom images, and where to go next.
 
 ## Reference
 
 - [Configuration](reference/configuration.md) — the workspace TOML file, field
-  by field, and the commands that edit it. *(Phase 2)*
+  by field, and the commands that edit it.
 - [Providers](reference/providers.md) — the built-in credential sources and how
-  to write your own. *(Phase 2)*
+  to write your own.
 - [Injectors](reference/injectors.md) — the credential-shaping schemes
-  (`bearer`, `basic`, `sigv4`, re-seal, scripts). *(Phase 2)*
-- [Rules](reference/rules.md) — the traffic-governance layer in full. *(Phase 2)*
+  (`bearer`, `basic`, `sigv4`, re-seal, scripts).
+- [Rules](reference/rules.md) — the traffic-governance layer in full.
+- [Workspace internals](reference/workspace.md) — the bring-your-own-image
+  contract: what joining the proxy's network imposes, and how users, mounts, and
+  SELinux behave.
 
 ## Understand and troubleshoot
 
 - [Security](security.md) — the threat model: what credproxy protects against,
-  and what it does not. *(Phase 2)*
+  and what it does not.
 - [Troubleshooting](troubleshooting.md) — common errors and how to read the
-  logs. *(Phase 2)*
+  logs.
 
 ## Advanced
 
 - [Overlays](advanced/overlays.md) — ship team defaults and custom definitions
-  without forking. *(Phase 2)*
+  without forking.
 - [Composability](advanced/composability.md) — attached workspaces, Docker
-  Compose, and CI. *(Phase 2)*
+  Compose, and CI.
 
 ## Contributing
 
 - [Development environment](dev-environment.md) — hacking on credproxy itself.
-  *(Phase 2)*
-
-> [!NOTE]
-> Pages marked *(Phase 2)* are being written in this same pull request. Links to
-> them may not resolve yet.
