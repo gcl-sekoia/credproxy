@@ -248,6 +248,45 @@ Public API:
   returning an outcome with `.terminal` / `.blocked` / `.response` (a
   `block()`/`respond()`) and any rewrites on `req`. A script error raises (rule
   scripts fail closed toward the policy), so assert with `pytest.raises`.
+- `make_response(req, status=200, body=b"", headers=None)` → a flow carrying `req`
+  plus a response, with `tresp`'s default headers stripped (the response-phase
+  twin of `make_request`). Feed it to the two response runners below.
+- `run_rule_response(script, flow, params=None)` → run a rule script's **response**
+  phase, returning the same `.terminal` / `.blocked` / `.response` outcome as
+  `run_rule`; in-place body/header rewrites land on `flow.response`. A script error
+  raises, same as the request side. (A rule that only defines `on_response` — a
+  body scrubber — has no request runner; this is it.)
+- `.run_response(flow, secrets, params=None, placeholder=None)` (on the
+  `load_injector` harness) → run a scripted injector's **response** phase — the
+  re-seal `mint` path — with the same slot validation as `.run`. A **recording fake
+  minter** stands in for the real `RuntimeMinter` (which couples to config), so the
+  result exposes `.handled` (the `on_response` bool), `.flow`, and `.mints` — a list
+  of `MintRecord(value, ttl, api_hosts, header, placeholder)` capturing exactly what
+  the script minted; the placeholders are deterministic (`minted-1`, `minted-2`, …)
+  and the body rewrite (placeholder swapped in for the token) is observed on
+  `flow.response`.
+
+```python
+# response-phase rule: a body scrubber
+def test_scrub():
+    script = testkit.load_rule_script("scrub-emails")
+    flow = testkit.make_response(
+        testkit.make_request("GET", "https://api.github.com/users/octocat"),
+        status=200, body='{"login":"octocat","email":"octo@example.com"}')
+    testkit.run_rule_response(script, flow)
+    assert '"email":null' in flow.response.text.replace(" ", "")
+
+# response-phase injector: re-seal mint
+def test_reseal_mints():
+    kit = testkit.load_injector("oauth-reseal")               # manifest + .star
+    flow = testkit.make_response(
+        testkit.make_request("POST", "https://oauth.example.com/token"),
+        status=200, body='{"access_token":"REAL","expires_in":1200}')
+    result = kit.run_response(flow, {"value": "CLIENT_SECRET"})
+    assert result.handled and result.mints[0].value == "REAL"
+    assert result.mints[0].ttl == 1200       # from expires_in
+    assert "REAL" not in flow.response.text  # body carries the placeholder now
+```
 
 `credproxy dev test` **discovers** these: every configured overlay with a
 `tests/` dir runs as its own pytest invocation (separate from the repo suite,
