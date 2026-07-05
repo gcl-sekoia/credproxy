@@ -1219,7 +1219,7 @@ def test_recreate_reset_unknown_volume_rejected(xdg, workspaces_dir, monkeypatch
 
 
 def test_create_emits_volume_and_bind(xdg, ws_factory, monkeypatch):
-    """A managed volume is emitted as `-v <namespaced>:tgt`; a bind/profile as
+    """A managed volume is emitted as `-v <namespaced>:tgt`; a bind/overlay as
     `--mount type=bind`."""
     from credproxy_cli.core import lifecycle
     ws = ws_factory("a")

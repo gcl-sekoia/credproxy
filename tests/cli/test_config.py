@@ -438,7 +438,7 @@ def test_load_config_mount_target_not_absolute(xdg, tmp_path, workspaces_dir):
         load_config(ws)
 
 
-# ---- typed mounts: volume / profile / tables --------------------------------
+# ---- typed mounts: volume / overlay / tables --------------------------------
 
 
 def _cfg(workspaces_dir, body):
@@ -462,31 +462,71 @@ def test_mount_bind_table_with_readonly(xdg, tmp_path, workspaces_dir):
                               "target": "/code", "readonly": True}]
 
 
-def test_mount_profile_resolves_and_defaults_readonly(xdg, workspaces_dir,
+def test_mount_overlay_resolves_and_defaults_readonly(xdg, workspaces_dir,
                                                       tmp_path, monkeypatch):
-    prof = tmp_path / "profile"; prof.mkdir()
-    (prof / "gitconfig").write_text("[user]\n")
-    monkeypatch.setenv("CREDPROXY_PROFILE_DIR", str(prof))
+    ov = tmp_path / "overlay"; ov.mkdir()
+    (ov / "gitconfig").write_text("[user]\n")
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
     cfg = _cfg(workspaces_dir,
-               'mounts = [{ profile = "gitconfig", target = "/g" }]')
-    assert cfg["mounts"] == [{"kind": "profile", "source": str(prof / "gitconfig"),
+               'mounts = [{ overlay = "gitconfig", target = "/g" }]')
+    assert cfg["mounts"] == [{"kind": "overlay", "source": str(ov / "gitconfig"),
                               "target": "/g", "readonly": True}]  # ro default
 
 
-def test_mount_profile_escape_rejected(xdg, workspaces_dir, tmp_path, monkeypatch):
-    from credproxy_cli.core.errors import ConfigError
-    prof = tmp_path / "profile"; prof.mkdir()
-    monkeypatch.setenv("CREDPROXY_PROFILE_DIR", str(prof))
-    with pytest.raises(ConfigError, match="escapes the profile dir"):
-        _cfg(workspaces_dir, 'mounts = [{ profile = "../secret", target = "/x" }]')
+def test_mount_overlay_resolves_from_second_overlay(xdg, workspaces_dir,
+                                                    tmp_path, monkeypatch):
+    """The overlay path is searched in declared order; a file absent from the
+    first overlay resolves from the second."""
+    import os
+    a = tmp_path / "a"; a.mkdir()
+    b = tmp_path / "b"; b.mkdir()
+    (b / "gitconfig").write_text("[user]\n")
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
+    cfg = _cfg(workspaces_dir,
+               'mounts = [{ overlay = "gitconfig", target = "/g" }]')
+    assert cfg["mounts"][0]["source"] == str(b / "gitconfig")
 
 
-def test_mount_profile_missing_source(xdg, workspaces_dir, tmp_path, monkeypatch):
+def test_mount_overlay_reorder_changes_source(xdg, workspaces_dir,
+                                             tmp_path, monkeypatch):
+    """Reordering the overlays flips which absolute path wins for a same-named
+    file, and that path enters the spec hash -- a recreate is the intended
+    consequence, so the resolved source must change."""
+    import os
+    from credproxy_cli.core.config import workspace_spec_hash
+    a = tmp_path / "a"; a.mkdir(); (a / "gitconfig").write_text("A\n")
+    b = tmp_path / "b"; b.mkdir(); (b / "gitconfig").write_text("B\n")
+    body = 'mounts = [{ overlay = "gitconfig", target = "/g" }]'
+
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
+    cfg_ab = _cfg(workspaces_dir, body)
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(b), str(a)]))
+    cfg_ba = _cfg(workspaces_dir, body)
+
+    assert cfg_ab["mounts"][0]["source"] == str(a / "gitconfig")
+    assert cfg_ba["mounts"][0]["source"] == str(b / "gitconfig")
+    assert workspace_spec_hash(cfg_ab, None) != workspace_spec_hash(cfg_ba, None)
+
+
+def test_mount_overlay_escape_rejected(xdg, workspaces_dir, tmp_path, monkeypatch):
     from credproxy_cli.core.errors import ConfigError
-    prof = tmp_path / "profile"; prof.mkdir()
-    monkeypatch.setenv("CREDPROXY_PROFILE_DIR", str(prof))
-    with pytest.raises(ConfigError, match="does not exist"):
-        _cfg(workspaces_dir, 'mounts = [{ profile = "nope", target = "/x" }]')
+    ov = tmp_path / "overlay"; ov.mkdir()
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
+    with pytest.raises(ConfigError, match="escapes the overlay dir"):
+        _cfg(workspaces_dir, 'mounts = [{ overlay = "../secret", target = "/x" }]')
+
+
+def test_mount_overlay_missing_source_names_all_roots(xdg, workspaces_dir,
+                                                     tmp_path, monkeypatch):
+    """The not-found error lists every overlay searched."""
+    import os
+    from credproxy_cli.core.errors import ConfigError
+    a = tmp_path / "a"; a.mkdir()
+    b = tmp_path / "b"; b.mkdir()
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
+    with pytest.raises(ConfigError, match="not found") as ei:
+        _cfg(workspaces_dir, 'mounts = [{ overlay = "nope", target = "/x" }]')
+    assert str(a) in str(ei.value) and str(b) in str(ei.value)
 
 
 def test_mount_volume_bad_name(xdg, workspaces_dir):
@@ -497,7 +537,7 @@ def test_mount_volume_bad_name(xdg, workspaces_dir):
 
 def test_mount_table_needs_exactly_one_kind(xdg, workspaces_dir):
     from credproxy_cli.core.errors import ConfigError
-    with pytest.raises(ConfigError, match="exactly one of bind/volume/profile"):
+    with pytest.raises(ConfigError, match="exactly one of bind/volume/overlay"):
         _cfg(workspaces_dir, 'mounts = [{ target = "/x" }]')
 
 
