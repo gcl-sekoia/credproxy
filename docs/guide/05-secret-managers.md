@@ -128,7 +128,7 @@ re-signs each request rather than swapping a token. The
 > [!TIP]
 > Notice `--host '*.amazonaws.com'`: a host can be a glob, so one binding covers
 > every AWS regional endpoint. The full pattern rules are in the
-> [configuration reference](../reference/configuration.md#bindings).
+> [configuration reference](../reference/configuration.md#host-patterns).
 > Otherwise, continue.
 
 ---

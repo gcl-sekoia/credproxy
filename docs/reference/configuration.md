@@ -334,7 +334,9 @@ surgical edit that preserves your comments and ordering. After that the values
 are static — the file stays the single source of truth, with nothing held only
 in memory.
 
-**Host patterns.** A `hosts` entry without `*` is matched exactly (the common
+#### Host patterns
+
+A `hosts` entry without `*` is matched exactly (the common
 case, and the fast path). An entry containing `*` is a **glob**, where `*` spans
 any characters including dots — so one binding can cover a family of endpoints:
 
