@@ -13,6 +13,7 @@ Use the XDG env vars to override (works for tests too).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -192,6 +193,46 @@ def workspaces_state_dir() -> Path:
 # only hardcoded distribution constant left is the proxy image tag.
 IMAGE_TAG = "credproxy:dev"          # the proxy image the CLI builds/runs
 DEFAULT_WORKSPACE = "default"
+
+# The image label `dev build` stamps with the proxy source digest, so `start`/
+# `doctor` can detect a checkout that has drifted from the built image (e.g. a
+# `git pull` that touched proxy/) without any git dependency.
+SRC_DIGEST_LABEL = "credproxy.src_digest"
+
+
+def proxy_src_digest() -> str | None:
+    """A deterministic sha256 over the `proxy/` source tree: sorted relative
+    paths + file contents, no git dependency. `dev build` stamps it on the image
+    (label SRC_DIGEST_LABEL); `start`/`doctor` recompute it to flag a stale image.
+
+    Ignores only obvious non-inputs -- `__pycache__` dirs and `*.pyc` (build/run
+    artifacts, not source). Returns None when there is no repo checkout (an
+    installed CLI without `proxy/`), so the staleness check skips silently."""
+    if not PROXY_DIR.is_dir():
+        return None
+    files: list[tuple[str, Path]] = []
+    for p in PROXY_DIR.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(PROXY_DIR)
+        if "__pycache__" in rel.parts or p.suffix == ".pyc":
+            continue
+        files.append((rel.as_posix(), p))
+    h = hashlib.sha256()
+    for rel, p in sorted(files):
+        h.update(rel.encode())
+        h.update(b"\0")
+        h.update(p.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def image_label_digest(inspect_value: str | None) -> str | None:
+    """Normalize a `docker inspect`ed SRC_DIGEST_LABEL value to the stamped digest,
+    or None. `docker inspect -f '{{index .Config.Labels "..."}}'` prints the
+    literal `<no value>` for an absent label (an image built before this change);
+    both that and an empty string mean 'no stamped digest'."""
+    return inspect_value if inspect_value and inspect_value != "<no value>" else None
 
 
 def atomic_write_text(path: Path, text: str) -> None:

@@ -166,6 +166,46 @@ def test_doctor_missing_docker_reported(xdg, monkeypatch):
     assert "not found" in checks[0].message and checks[0].hint
 
 
+def test_doctor_image_staleness_hint_on_mismatch(monkeypatch):
+    """A checkout that has drifted from the built image is a PASSING check with a
+    rebuild hint -- the old image still works, so it's never a failure (#43)."""
+    from credproxy_cli.core import doctor
+    from credproxy_cli.core import docker as core_docker
+    monkeypatch.setattr(doctor, "proxy_src_digest", lambda: "NEW")
+    monkeypatch.setattr(core_docker, "inspect", lambda ref, fmt: "OLD")
+    checks = doctor._image_staleness_check()
+    assert len(checks) == 1
+    c = checks[0]
+    assert c.id == "image:fresh" and c.ok and c.hint
+    assert "changed" in c.message
+
+
+def test_doctor_image_staleness_ok_no_hint_on_match(monkeypatch):
+    from credproxy_cli.core import doctor
+    from credproxy_cli.core import docker as core_docker
+    monkeypatch.setattr(doctor, "proxy_src_digest", lambda: "SAME")
+    monkeypatch.setattr(core_docker, "inspect", lambda ref, fmt: "SAME")
+    (c,) = doctor._image_staleness_check()
+    assert c.ok and c.hint is None
+
+
+def test_doctor_image_staleness_unknown_label(monkeypatch):
+    """An image built before this change has no label ('<no value>') -> a passing
+    check with a hint, distinct from a real mismatch."""
+    from credproxy_cli.core import doctor
+    from credproxy_cli.core import docker as core_docker
+    monkeypatch.setattr(doctor, "proxy_src_digest", lambda: "NEW")
+    monkeypatch.setattr(core_docker, "inspect", lambda ref, fmt: "<no value>")
+    (c,) = doctor._image_staleness_check()
+    assert c.ok and c.hint and "predates" in c.message
+
+
+def test_doctor_image_staleness_skipped_without_checkout(monkeypatch):
+    from credproxy_cli.core import doctor
+    monkeypatch.setattr(doctor, "proxy_src_digest", lambda: None)
+    assert doctor._image_staleness_check() == []
+
+
 def _overlay_scripted(tmp_path, monkeypatch, script_body):
     """Set up an overlay with a scripted injector `sig` + its script, and return
     nothing (the overlay is on CREDPROXY_OVERLAY_PATH)."""

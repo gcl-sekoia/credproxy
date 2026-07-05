@@ -1003,13 +1003,17 @@ def test_loose_help_via_help_flag(xdg):
 
 def _stub_recreate(monkeypatch):
     """Replace lifecycle.recreate_workspace with a recorder of
-    (include_proxy, reset_volumes)."""
+    (include_proxy, reset_volumes). Also neutralize the proxy-image gate
+    (`ensure_proxy_image`, which would otherwise hit docker): these tests cover
+    recreate's argument plumbing, not the image check (that has its own suite)."""
     calls: list = []
     monkeypatch.setattr(
         "credproxy_cli.porcelain.cli.lifecycle.recreate_workspace",
         lambda ws, notify=None, include_proxy=False, reset_volumes=None:
             calls.append((include_proxy, reset_volumes or [])),
     )
+    monkeypatch.setattr("credproxy_cli.porcelain.cli.ensure_proxy_image",
+                        lambda ctx: None)
     return calls
 
 
