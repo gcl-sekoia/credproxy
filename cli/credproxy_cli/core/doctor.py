@@ -10,7 +10,6 @@ layer renders and sets the exit code.
 """
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import tomllib
@@ -19,7 +18,7 @@ from dataclasses import dataclass
 from . import hostmatch
 from .errors import CredproxyError
 from .imageenv import ImageEnv
-from .paths import IMAGE_TAG
+from .paths import IMAGE_TAG, overlay_dirs
 from .workspace import Workspace, for_name, list_names
 
 
@@ -75,12 +74,18 @@ def _env_checks() -> list[Check]:
     except CredproxyError as e:
         out.append(_fail("image", str(e), "run `credproxy dev build`"))
 
-    prof = os.environ.get("CREDPROXY_PROFILE_DIR")
-    if prof:
-        out.append(_ok("profile", f"profile overlay {prof} exists")
-                   if os.path.isdir(prof) else
-                   _fail("profile", f"CREDPROXY_PROFILE_DIR {prof} does not exist",
-                         "unset it or create the directory"))
+    # One existence check per CONFIGURED overlay entry (index-qualified so a
+    # --json consumer can't collide two). Resolution stays tolerant of a missing
+    # overlay elsewhere -- flagging it loudly is doctor's job. The default
+    # `<repo>/overlay/` counts as configured (upstream ships it), so it too must
+    # exist. `overlay_dirs()` labels are `overlay:<base>`; the check id carries
+    # the bare basename for readability.
+    for i, (label, d) in enumerate(overlay_dirs()):
+        base = label.split(":", 1)[1]
+        cid = f"overlay[{i}]:{base}:exists"
+        out.append(_ok(cid, f"overlay {d} exists") if d.is_dir() else
+                   _fail(cid, f"configured overlay {d} does not exist",
+                         "create the directory or drop it from CREDPROXY_OVERLAY_PATH"))
     return out
 
 

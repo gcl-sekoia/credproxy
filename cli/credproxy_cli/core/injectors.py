@@ -5,10 +5,10 @@ which typed scheme the proxy runs, the scheme's params, and the shape of the
 inert placeholder the workspace holds. Unlike providers (executables),
 injectors are declarative TOML files -- passive, reusable, drop-in.
 
-Discovery (first match wins, user shadows profile shadows builtin):
-  1. user     $XDG_CONFIG_HOME/credproxy/injectors/<name>.toml
-  2. profile  <$CREDPROXY_PROFILE_DIR or repo/profile>/injectors/<name>.toml
-  3. builtin  cli/credproxy_cli/builtin/injectors/<name>.toml
+Discovery (first match wins, user shadows overlays shadow builtin):
+  1. user      $XDG_CONFIG_HOME/credproxy/injectors/<name>.toml
+  2. overlays  <CREDPROXY_OVERLAY_PATH or repo/overlay>/injectors/<name>.toml
+  3. builtin   cli/credproxy_cli/builtin/injectors/<name>.toml
 
 Schema:
     scheme = "bearer"             # required: a scheme in core/schemes.CATALOG
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import secrets
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .errors import InjectorError
@@ -83,11 +83,15 @@ class Injector:
     params: dict
     env: str | None
     placeholder: Placeholder
-    source: str  # "user" or "builtin"
+    source: str  # tier label it resolved from: "user", "overlay:<name>", "builtin"
     script: str | None = None
     # Primitive-API version a scripted injector targets (declared in the
     # manifest, pushed on the wire, validated by the proxy). 1 for built-ins.
     api: int = 1
+    # Tier labels this definition shadows (same name in a less-specific tier),
+    # most-specific-loser first. Only populated by `list_injectors` (for
+    # provenance reporting); `find_injector` returns the winner alone.
+    shadows: tuple[str, ...] = ()
 
 
 def validate_placeholder(p: dict | None, label: str) -> Placeholder:
@@ -202,7 +206,7 @@ def _parse(path: Path, name: str, source: str) -> Injector:
 
 def find_injector(name: str) -> Injector:
     """Resolve an injector by name across the layered registry: user shadows the
-    profile overlay, which shadows builtin (paths.layered_dirs). First wins."""
+    overlays, which shadow builtin (paths.layered_dirs). First wins."""
     searched = layered_dirs("injectors")
     for source, base in searched:
         path = base / f"{name}.toml"
@@ -215,14 +219,19 @@ def find_injector(name: str) -> Injector:
 
 
 def list_injectors() -> list[Injector]:
-    """All resolvable injectors, user shadowing profile shadowing builtin,
-    sorted by name."""
+    """All resolvable injectors, user shadowing overlays shadowing builtin,
+    sorted by name. Each winner carries the tier labels it shadows (recorded as
+    the least-specific-first walk overwrites, so no extra filesystem walk)."""
     seen: dict[str, Injector] = {}
+    shadowed: dict[str, list[str]] = {}
     for source, base in reversed(layered_dirs("injectors")):
         if not base.is_dir():
             continue
         for path in base.iterdir():
             if path.suffix == ".toml" and path.is_file():
                 name = path.stem
+                if name in seen:
+                    shadowed.setdefault(name, []).append(seen[name].source)
                 seen[name] = _parse(path, name, source)
-    return [seen[n] for n in sorted(seen)]
+    return [replace(seen[n], shadows=tuple(reversed(shadowed.get(n, []))))
+            for n in sorted(seen)]

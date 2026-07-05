@@ -71,17 +71,17 @@ user_uid = 1000
 # Things mounted into the workspace. A string entry is a host bind mount
 # ("SRC:DST" or "SRC:DST:ro"; ~ is expanded on SRC). A table entry is a typed
 # mount: a managed `volume` (a named Docker volume, persistent + image-seeded +
-# ownership-clean -- great for caches), or a `profile` mount (a path relative to
-# the profile overlay dir, for static files shipped with a fork; read-only by
+# ownership-clean -- great for caches), or an `overlay` mount (a path relative
+# to an overlay dir, for static files shipped with a fork; read-only by
 # default). The `home` setting above is itself sugar for a managed volume.
 # mounts = [
 #   "~/code:/code",                                            # host bind
-#   {{ volume = "cache", target = "/home/vscode/.cache" }},    # managed volume
-#   {{ profile = "gitconfig", target = "/home/vscode/.gitconfig" }},  # profile file
+#   { volume = "cache", target = "/home/vscode/.cache" },      # managed volume
+#   { overlay = "gitconfig", target = "/home/vscode/.gitconfig" },  # overlay file
 # ]
 
 # Extra environment variables injected into the workspace container.
-# env = {{ GH_DEBUG = "1" }}
+# env = { GH_DEBUG = "1" }
 
 # Commands run as root on each (re)created container; make them idempotent. The
 # default installs the proxy CA so HTTPS interception works immediately; add
