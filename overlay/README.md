@@ -1,40 +1,57 @@
-# Overlay (org / fork customization)
+# Overlays (org / fork customization)
 
-This directory is the default **overlay**: the middle tier of credproxy's
+This directory is the default **overlay container**: every *subdirectory* you
+create here is one overlay — a named bundle of customizations in credproxy's
 resolution chain, between an end user's personal config and the in-package
 upstream defaults:
 
 ```
-user ($XDG_CONFIG_HOME/credproxy)  →  overlays (this dir)  →  builtin (upstream)
+user ($XDG_CONFIG_HOME/credproxy)  →  overlays (subdirs here)  →  builtin (upstream)
 ```
 
 It's how an **org or fork customizes credproxy without touching engine code**.
-Everything here is data; upstream ships this directory empty (just this README),
-so a fork only ever *adds* files and never conflicts on `git merge upstream`.
-Your entire diff against upstream lives here.
+Everything here is data; upstream ships this container empty (just this README),
+so a fork only ever *adds* directories and never conflicts on
+`git merge upstream`. Your entire diff against upstream lives here:
 
-You don't have to fork at all: set **`CREDPROXY_OVERLAY_PATH`** to point at any
-directory — or an `os.pathsep`-separated list of directories, searched
-leftmost-first — with this same layout (a deb/rpm payload, a git submodule,
-`/etc/credproxy/overlay`). The variable replaces this default entirely; unset
-falls back to this `<repo>/overlay/`, and a set-but-empty value (`""`) means no
-overlays at all.
+```sh
+mkdir overlay/acme-corp        # active immediately, labeled overlay:acme-corp
+```
 
-## What you can put here
+## Layout — inside your named overlay
 
-| File / dir | Overrides | Effect |
-|---|---|---|
-| `workspace.template.toml` | the builtin scaffold (or a less-specific overlay's) | the `<name>.toml` a fresh `credproxy create` produces — your canonical default workspace (image, user, setup, even default `[[binding]]` blocks). |
-| `injectors/<name>.toml` | a same-named injector below (or new) | a request-shaping scheme. |
-| `providers/<name>` | a same-named provider below | a secret source executable. |
-| `scripts/<name>.star` | a same-named script below | a sandboxed Starlark injector / rule body. |
-| `presets/<name>.toml` | a same-named preset below | a service setup pack (bindings + rule guardrails). |
+The registry subdirs and the scaffold template go **inside** the named overlay,
+not at this container's top level:
 
-A same-named file **shadows** the one below it; a new name **adds** to the set.
-Among multiple overlays, the leftmost on `CREDPROXY_OVERLAY_PATH` wins.
+```
+overlay/acme-corp/
+  workspace.template.toml      # the scaffold a fresh `credproxy create` produces
+  injectors/<name>.toml        # request-shaping schemes
+  providers/<name>             # secret-source executables
+  scripts/<name>.star          # sandboxed Starlark injector / rule bodies
+  presets/<name>.toml          # service setup packs: bindings + rule guardrails
+  tests/test_*.py              # optional; run by `credproxy dev test` (testkit)
+```
 
-See the builtin defaults under `cli/credproxy_cli/builtin/` for complete worked
-copies. Full guide: [`docs/overlays.md`](../docs/overlays.md).
+A same-named file **shadows** the tier below it; a new name **adds** to the set.
+A user file under `$XDG_CONFIG_HOME/credproxy/` shadows every overlay — for
+**every** asset, including `workspace.template.toml` (the singleton rides the
+same walk as the registries), so an individual can always override an org
+default locally.
+
+## Ordering and activation
+
+- Multiple subdirectories are all active, searched in **lexical order by
+  basename** — the earliest wins a name conflict. When order matters, make it
+  explicit with numeric prefixes: `10-base/`, `20-team/` (then `10-base`
+  shadows `20-team`).
+- **Any subdirectory here activates as an overlay** — don't park scratch or
+  backup directories in this container; they'd be picked up (and shown by
+  `credproxy info`).
+- The `CREDPROXY_OVERLAY_PATH` env var still **overrides and replaces** this
+  discovery entirely, for external bundles (a deb/rpm payload, a git submodule,
+  `/etc/credproxy/…`): an `os.pathsep`-separated list searched leftmost-first;
+  set-but-empty (`""`) means no overlays at all.
 
 ## `workspace.template.toml` note
 
@@ -47,9 +64,5 @@ line here, and the proxy image tag (`IMAGE_TAG`) is fixed in the engine. To run 
 different workspace image, edit `image` (and `user`/`home` to match) in your
 template — or, per workspace, in the generated `<name>.toml`.
 
-## Precedence
-
-A user file under `$XDG_CONFIG_HOME/credproxy/` shadows every overlay — for
-**every** asset, including `workspace.template.toml` (the singleton rides the
-same walk as the registries). So an individual can always override an org
-default locally, with no carve-out.
+See the builtin defaults under `cli/credproxy_cli/builtin/` for complete worked
+copies. Full guide: [`docs/overlays.md`](../docs/overlays.md).

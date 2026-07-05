@@ -15,7 +15,7 @@ one; there is no single/batch duality on the wire.
 
 Discovery (first match wins, user shadows overlays shadow builtin):
   1. user      $XDG_CONFIG_HOME/credproxy/providers/<name>
-  2. overlays  <CREDPROXY_OVERLAY_PATH or repo/overlay>/providers/<name>
+  2. overlays  <CREDPROXY_OVERLAY_PATH or repo/overlay/*>/providers/<name>
   3. builtin   cli/credproxy_cli/builtin/providers/<name>
 Each location is either an executable file, or a directory holding an
 executable `run`.

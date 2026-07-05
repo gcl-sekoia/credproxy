@@ -125,7 +125,7 @@ def test_doctor_invalid_name_rejected(xdg):
 
 
 def test_doctor_missing_overlay_is_failing_check(xdg, tmp_path, monkeypatch):
-    """Each configured overlay gets one index-qualified existence check; a
+    """Each env-listed overlay gets one index-qualified existence check; a
     configured-but-missing entry FAILS (resolution stays tolerant elsewhere)."""
     import os
     from credproxy_cli.core import doctor
@@ -143,6 +143,18 @@ def test_doctor_no_overlays_no_overlay_checks(xdg, monkeypatch):
     """An explicit opt-out (set-empty) configures zero overlays -> no checks."""
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", "")
     from credproxy_cli.core import doctor
+    assert not any(c.id.startswith("overlay[") for c in doctor._env_checks())
+
+
+def test_doctor_unset_env_no_overlay_checks(xdg, tmp_path, monkeypatch):
+    """With CREDPROXY_OVERLAY_PATH unset, discovered container subdirs exist by
+    construction -- doctor emits no overlay existence checks (only env-listed
+    entries can be typo'd)."""
+    monkeypatch.delenv("CREDPROXY_OVERLAY_PATH", raising=False)
+    from credproxy_cli.core import doctor, paths
+    container = tmp_path / "overlay"
+    (container / "acme").mkdir(parents=True)   # a discovered overlay
+    monkeypatch.setattr(paths, "REPO_ROOT", tmp_path)
     assert not any(c.id.startswith("overlay[") for c in doctor._env_checks())
 
 

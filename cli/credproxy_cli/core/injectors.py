@@ -7,7 +7,7 @@ injectors are declarative TOML files -- passive, reusable, drop-in.
 
 Discovery (first match wins, user shadows overlays shadow builtin):
   1. user      $XDG_CONFIG_HOME/credproxy/injectors/<name>.toml
-  2. overlays  <CREDPROXY_OVERLAY_PATH or repo/overlay>/injectors/<name>.toml
+  2. overlays  <CREDPROXY_OVERLAY_PATH or repo/overlay/*>/injectors/<name>.toml
   3. builtin   cli/credproxy_cli/builtin/injectors/<name>.toml
 
 Schema:

@@ -214,15 +214,35 @@ def test_overlay_shadows_overlay_preset(xdg, tmp_path, monkeypatch):
 # ---- CREDPROXY_OVERLAY_PATH semantics ----------------------------------------
 
 
-def test_overlay_path_unset_is_repo_default(xdg, monkeypatch):
-    """Unset -> the single <repo>/overlay/ default."""
+def test_overlay_path_unset_discovers_container_subdirs(xdg, tmp_path, monkeypatch):
+    """Unset -> discovery: each SUBDIR of the <repo>/overlay/ container is one
+    overlay, lexical order by basename; files (the README) are skipped."""
     monkeypatch.delenv("CREDPROXY_OVERLAY_PATH", raising=False)
     from credproxy_cli.core import paths
-    dirs = paths.overlay_dirs()
-    assert len(dirs) == 1
-    label, d = dirs[0]
-    assert label == "overlay:overlay"
-    assert d == paths.REPO_ROOT / "overlay"
+    container = tmp_path / "overlay"
+    container.mkdir()
+    (container / "20-team").mkdir()
+    (container / "10-base").mkdir()
+    (container / "README.md").write_text("not an overlay\n")   # stray file skipped
+    monkeypatch.setattr(paths, "REPO_ROOT", tmp_path)
+    assert paths.overlay_dirs() == [
+        ("overlay:10-base", container / "10-base"),
+        ("overlay:20-team", container / "20-team"),
+    ]
+
+
+def test_overlay_container_empty_or_absent_means_no_overlays(xdg, tmp_path,
+                                                             monkeypatch):
+    """A subdir-less container (upstream ships just the README) or a missing one
+    discovers nothing -- no phantom overlay tier, no doctor failure."""
+    monkeypatch.delenv("CREDPROXY_OVERLAY_PATH", raising=False)
+    from credproxy_cli.core import paths
+    monkeypatch.setattr(paths, "REPO_ROOT", tmp_path)
+    assert paths.overlay_dirs() == []          # absent container
+    container = tmp_path / "overlay"
+    container.mkdir()
+    (container / "README.md").write_text("x\n")
+    assert paths.overlay_dirs() == []          # container with only a file
 
 
 def test_overlay_path_set_empty_means_no_overlays(xdg, monkeypatch):

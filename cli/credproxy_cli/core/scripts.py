@@ -9,7 +9,7 @@ execution; see `proxy/starlark_runtime.py`.
 
 Discovery (first match wins, user shadows overlays shadow builtin):
   1. user      $XDG_CONFIG_HOME/credproxy/scripts/<name>.star
-  2. overlays  <CREDPROXY_OVERLAY_PATH or repo/overlay>/scripts/<name>.star
+  2. overlays  <CREDPROXY_OVERLAY_PATH or repo/overlay/*>/scripts/<name>.star
   3. builtin   cli/credproxy_cli/builtin/scripts/<name>.star
 """
 from __future__ import annotations

@@ -56,6 +56,20 @@ def _labeled(dirs: list[Path]) -> list[tuple[str, Path]]:
     return out
 
 
+def _discovered_overlays() -> list[Path]:
+    """The default (env-unset) overlays: every DIRECTORY under the
+    `<repo>/overlay/` container, lexical order by basename. Upstream ships the
+    container with only a README, so a fork activates an overlay by just
+    `mkdir overlay/<org>/` -- no env var, no engine edit. Files (the README) are
+    skipped; a missing or subdir-less container yields no overlays. Lexical
+    ordering makes multi-overlay precedence explicit (`10-base/`, `20-team/`)."""
+    container = REPO_ROOT / "overlay"
+    if not container.is_dir():
+        return []
+    return sorted((d for d in container.iterdir() if d.is_dir()),
+                  key=lambda d: d.name)
+
+
 def overlay_dirs() -> list[tuple[str, Path]]:
     """The ordered org *overlays*, most specific first -- the middle tier(s)
     between the end-user's XDG config and the in-package `builtin` defaults. Each
@@ -64,16 +78,17 @@ def overlay_dirs() -> list[tuple[str, Path]]:
 
     `CREDPROXY_OVERLAY_PATH` is an `os.pathsep`-separated list of dirs, searched
     leftmost-first (PATH semantics); it REPLACES the default entirely. Unset
-    falls back to the single `<repo>/overlay/` (upstream ships it empty, so a
-    fork only ever ADDS files there and never conflicts on merge). Set-but-empty
-    (`""`) means NO overlays (explicit opt-out); empty entries within the list
-    (`a::b`) are skipped. Labels are `overlay:<dir basename>`, deduped with a
-    numeric suffix. Read at call time so the env var can change per test. Missing
-    dirs are tolerated here (they contribute nothing) -- loud reporting is
-    doctor's job."""
+    falls back to discovery: each subdirectory of the `<repo>/overlay/` container
+    is one overlay (lexical order; upstream ships the container empty except a
+    README, so a fork's whole diff is `overlay/<org>/...`). Set-but-empty (`""`)
+    means NO overlays (explicit opt-out); empty entries within the list (`a::b`)
+    are skipped. Labels are `overlay:<dir basename>`, deduped with a numeric
+    suffix. Read at call time so the env var can change per test. Missing
+    env-listed dirs are tolerated here (they contribute nothing) -- loud
+    reporting is doctor's job."""
     env = os.environ.get("CREDPROXY_OVERLAY_PATH")
     dirs = ([Path(p) for p in env.split(os.pathsep) if p]
-            if env is not None else [REPO_ROOT / "overlay"])
+            if env is not None else _discovered_overlays())
     return [(f"overlay:{label}", d) for label, d in _labeled(dirs)]
 
 

@@ -13,7 +13,7 @@ first:
 ```
 user            $XDG_CONFIG_HOME/credproxy/   per-machine, the end user
   ↓ shadows
-overlays         CREDPROXY_OVERLAY_PATH (declared order) or <repo>/overlay/
+overlays         CREDPROXY_OVERLAY_PATH (declared order) or <repo>/overlay/*/
   ↓ shadows
 builtin          cli/credproxy_cli/builtin/   upstream defaults (in-package)
 ```
@@ -35,7 +35,8 @@ export CREDPROXY_OVERLAY_PATH=/etc/credproxy/team-ml:/etc/credproxy/org-base
 
 Rules for the variable:
 
-- **Unset** falls back to the single `<repo>/overlay/` (the default).
+- **Unset** falls back to **discovery**: every *subdirectory* of the
+  `<repo>/overlay/` container is one overlay (see below).
 - **Set-but-empty** (`CREDPROXY_OVERLAY_PATH=""`) means **no overlays** — an
   explicit opt-out, distinct from unset.
 - Empty entries within the list (`a::b`, a trailing `:`) are skipped.
@@ -45,9 +46,25 @@ Rules for the variable:
   `overlay:base#2`) in declared order. These labels show up in `credproxy info`,
   the registry `list` commands, and `doctor` check ids.
 
-A missing overlay dir is tolerated during resolution (it simply contributes
-nothing) — `credproxy doctor` is what flags a configured-but-missing overlay
-loudly (one existence check per entry).
+A missing env-listed overlay dir is tolerated during resolution (it simply
+contributes nothing) — `credproxy doctor` is what flags a configured-but-missing
+entry loudly (one existence check per entry, only when the env var is set;
+discovered overlays exist by construction, so unset means no overlay checks).
+
+### The default: `<repo>/overlay/` is a container of named overlays
+
+With the env var unset, credproxy scans `<repo>/overlay/` for
+**subdirectories** — each one is an overlay, labeled `overlay:<basename>`.
+Upstream ships the container with only a README, so out of the box there are no
+overlays at all.
+
+- Ordering is **lexical by basename** — the earliest wins a name conflict. When
+  stacking overlays, make the order explicit with numeric prefixes
+  (`10-base/`, `20-team/`; `10-base` shadows `20-team`).
+- **Any subdirectory activates** — don't park scratch or backup directories in
+  the container; `credproxy info` shows what got picked up.
+- Files at the container's top level (the README) are ignored; the registry
+  subdirs and `workspace.template.toml` go **inside** the named overlay.
 
 ## Two ways to customize
 
@@ -66,12 +83,18 @@ track upstream credproxy unmodified.
 
 ### 2. Fork the repo
 
-Commit your customizations under `overlay/` (which upstream ships empty except a
-README). Your **entire diff against upstream lives in `overlay/`**, and upstream
-never writes there, so `git merge upstream/main` is conflict-free in perpetuity.
-The engine and builtin defaults you inherit; your overlay you own. `overlay/` is
-just the default single entry on `CREDPROXY_OVERLAY_PATH` — the fork story and
-the no-fork bundle are the same mechanism.
+Create a named overlay under the `overlay/` container (which upstream ships
+empty except a README) and commit your customizations there:
+
+```sh
+mkdir overlay/acme-corp        # discovered immediately, labeled overlay:acme-corp
+```
+
+Your **entire diff against upstream lives in `overlay/acme-corp/`**, and
+upstream never writes there, so `git merge upstream/main` is conflict-free in
+perpetuity. The engine and builtin defaults you inherit; your overlay you own.
+A discovered overlay and an env-listed bundle are the same mechanism — the fork
+story and the no-fork bundle differ only in how the directory is named.
 
 ## What you can put in an overlay
 
