@@ -182,6 +182,22 @@ class Workspace:
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
 
+def hostname_for(name: str) -> str:
+    """Sanitize a workspace name into a container hostname (an RFC-1123 DNS
+    label), so the in-container shell prompt reads `user@myproject` instead of a
+    hex container id (the distrobox/toolbox pattern).
+
+    Workspace names allow `[A-Za-z0-9][A-Za-z0-9._-]*`, a superset of valid
+    labels, so this narrows: lowercase; map `_` and `.` to `-`; collapse repeated
+    `-`; strip leading/trailing `-`; truncate to 63 chars (re-stripping a `-`
+    the cut may expose). Pure and deterministic. Returns '' only for a
+    pathological input (can't happen given the leading-alnum name rule, but the
+    caller guards and skips the flag)."""
+    h = re.sub(r"[_.]", "-", name.lower())
+    h = re.sub(r"-+", "-", h).strip("-")
+    return h[:63].rstrip("-")
+
+
 def for_name(name: str) -> Workspace:
     """Build a Workspace for a concrete name, validating it. Raises
     WorkspaceError on an invalid name. Defaults are resolved in porcelain,

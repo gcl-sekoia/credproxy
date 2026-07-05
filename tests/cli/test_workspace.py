@@ -179,6 +179,53 @@ def test_derive_empty_raises(xdg, workspaces_dir):
         derive_workspace_name("/a/@@@")
 
 
+# ---- hostname_for ------------------------------------------------------------
+
+
+def test_hostname_for_already_valid_is_idempotent():
+    from credproxy_cli.core.workspace import hostname_for
+
+    assert hostname_for("myproject") == "myproject"
+    assert hostname_for("my-project") == "my-project"
+    # idempotent: sanitizing a sanitized name is a no-op
+    assert hostname_for(hostname_for("My_Proj.1")) == hostname_for("My_Proj.1")
+
+
+def test_hostname_for_charset_mapping():
+    from credproxy_cli.core.workspace import hostname_for
+
+    # lowercased, '_' and '.' -> '-'
+    assert hostname_for("My_Proj.API") == "my-proj-api"
+    # repeated separators collapse to a single '-'
+    assert hostname_for("a__b..c--d") == "a-b-c-d"
+    # leading/trailing separators stripped (names can't start with one, but a
+    # trailing '_'/'.' is legal in a workspace name)
+    assert hostname_for("proj_") == "proj"
+    assert hostname_for("proj.") == "proj"
+
+
+def test_hostname_for_truncates_to_63():
+    from credproxy_cli.core.workspace import hostname_for
+
+    long = "a" * 100
+    assert hostname_for(long) == "a" * 63
+    # a '-' exposed at the 63-char cut is stripped
+    name = "a" * 62 + "-bbbb"
+    out = hostname_for(name)
+    assert len(out) <= 63
+    assert not out.endswith("-")
+    assert out == "a" * 62
+
+
+def test_hostname_for_empty_guard():
+    from credproxy_cli.core.workspace import hostname_for
+
+    # pathological input that sanitizes to '' (can't arise from a valid
+    # workspace name, but the guard must hold)
+    assert hostname_for("---") == ""
+    assert hostname_for("") == ""
+
+
 # ---- lifecycle lock ----------------------------------------------------------
 
 

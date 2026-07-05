@@ -41,7 +41,7 @@ from .errors import (
     WorkspaceError,
 )
 from .imageenv import ImageEnv
-from .workspace import Workspace, ensure_token
+from .workspace import Workspace, ensure_token, hostname_for
 from .paths import IMAGE_TAG, PROXY_DIR, atomic_write_text
 from .proxy_http import proxy_status, push_config, wait_for_ready
 
@@ -69,6 +69,7 @@ def _write_applied_spec(ws: Workspace, cfg: dict, proxy_id: str | None) -> None:
         "run_flags": cfg.get("run_flags") or [],
         "map_host_user": bool(cfg.get("map_host_user")),
         "user_uid": cfg.get("user_uid"),
+        "hostname": hostname_for(ws.name),
         "proxy_id": proxy_id,
     }
     atomic_write_text(ws.applied_spec_path, json.dumps(spec, indent=2) + "\n")
@@ -239,6 +240,14 @@ def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
     args = [
         "run", "-d",
         "--name", ws.proxy_container,
+        # Name the container's UTS host after the workspace, so the in-container
+        # shell prompt reads `user@myproject` not a hex id. On Docker the netns
+        # joiner (the workspace) INHERITS this hostname (Docker rejects
+        # --hostname on the joiner), so setting it here is the only lever there;
+        # on podman it just names the proxy (the workspace carries its own copy,
+        # added in create_ws_container). Always safe on both runtimes. Guarded
+        # against an empty sanitized name (can't happen given the name charset).
+        *(["--hostname", hostname_for(ws.name)] if hostname_for(ws.name) else []),
         "--label", "credproxy.role=proxy",
         "--label", f"credproxy.workspace={ws.name}",
         "--cap-add", "NET_ADMIN",
@@ -431,6 +440,28 @@ def chown_user_owned_volumes(ws: Workspace, cfg: dict, notify: Notify) -> None:
                    "chown", "-R", user, *targets])
 
 
+def _ws_hostname_flag(ws: Workspace, cfg: dict) -> list[str]:
+    """`--hostname <name>` for the workspace container, or [] when not wanted.
+
+    Only podman needs (and accepts) it on the netns joiner: a podman netns join
+    leaves UTS independent, so the workspace keeps its own hostname and podman
+    lets us set it here. Docker rejects --hostname on the joiner (the workspace
+    inherits the proxy's, set in create_proxy), so we never add it there.
+
+    run_flags wins: if the user already set --hostname (either `--hostname X` or
+    `--hostname=X`), credproxy leaves it alone -- run_flags is the escape hatch,
+    mirroring the --userns precedence. Also skipped if the sanitized name is
+    empty (can't happen given the name charset, but guarded)."""
+    from .runtime import is_podman
+    host = hostname_for(ws.name)
+    if not host or not is_podman():
+        return []
+    run_flags = cfg.get("run_flags") or []
+    if any(f == "--hostname" or f.startswith("--hostname=") for f in run_flags):
+        return []
+    return ["--hostname", host]
+
+
 def create_ws_container(
     ws: Workspace, cfg: dict, spec_hash: str, proxy_id: str | None = None
 ) -> None:
@@ -464,6 +495,10 @@ def create_ws_container(
         "--security-opt", "label=disable",
         # Share the proxy's netns so all egress is captured.
         "--network", f"container:{ws.proxy_container}",
+        # Name the UTS host after the workspace (podman only; Docker inherits the
+        # proxy's -- see create_proxy). Suppressed if the user's run_flags already
+        # set --hostname. Empty on Docker/absent-daemon.
+        *_ws_hostname_flag(ws, cfg),
     ]
     # Create this workspace's managed volumes up front, LABELLED with the
     # workspace name, so delete can enumerate them unambiguously (see
@@ -714,7 +749,7 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
 
     # ---- workspace container ----
     proxy_id = docker.inspect(ws.proxy_container, "{{.Id}}")
-    spec_hash = workspace_spec_hash(cfg, proxy_id)
+    spec_hash = workspace_spec_hash(cfg, proxy_id, hostname_for(ws.name))
     status = docker.container_status(ws.ws_container)
     if status is not None:
         current = docker.inspect(

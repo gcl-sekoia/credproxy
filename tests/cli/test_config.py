@@ -945,6 +945,21 @@ def test_spec_hash_changes_on_user_uid(xdg):
     assert workspace_spec_hash(base, "p") != workspace_spec_hash({**base, "user_uid": 1000}, "p")
 
 
+def test_spec_hash_changes_on_hostname(xdg):
+    """The container hostname rides the spec hash: adding it (or changing it)
+    yields a new hash, so a pre-feature workspace recreates once to pick up the
+    flag. It's passed as the third arg (name-derived), not a cfg field."""
+    from credproxy_cli.core.config import workspace_spec_hash
+
+    base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
+    # default (no hostname) differs from a set one -> pre-feature recreate once
+    assert workspace_spec_hash(base, "p") != workspace_spec_hash(base, "p", "myproj")
+    # different hostnames differ
+    assert workspace_spec_hash(base, "p", "a") != workspace_spec_hash(base, "p", "b")
+    # same hostname is stable
+    assert workspace_spec_hash(base, "p", "a") == workspace_spec_hash(base, "p", "a")
+
+
 def test_load_config_user_uid(xdg, workspaces_dir):
     from credproxy_cli.core.config import load_config
     from credproxy_cli.core.workspace import Workspace
