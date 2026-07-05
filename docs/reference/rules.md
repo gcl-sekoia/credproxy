@@ -1,4 +1,13 @@
+[← docs index](../README.md) · [Concepts](../concepts.md)
+
 # Rules — governing traffic on intercepted hosts
+
+This is the full reference for the traffic-governance layer: every action, the
+matching model, visibility, and rule scripts. If you just want to add a guardrail
+— block a method, stub a response, rewrite a header — the [rules
+guide](../guide/07-rules.md) is the faster path. Come here for the details behind
+it and for scripted rules.
+
 
 A **rule** is the credential-free sibling of a binding. Where a binding shapes a
 credential *into* a request, a rule *governs* a request/response on an
@@ -327,7 +336,7 @@ credential's bindings, so `credproxy workspace NAME preset add org-guardrails`
 stamps the whole policy — hosts, params, visibility — in one move. An org overlay
 ships the `.star` under `scripts/` and the pack under `presets/` in the same
 overlay, and every workspace applies it identically. See the preset section in
-[`configuration.md`](configuration.md#bindings) and [`overlays.md`](overlays.md);
+[`configuration.md`](configuration.md#bindings) and [`overlays.md`](../advanced/overlays.md);
 a preset `[[rule]]` is a standard rule with a `suffix` (→ `name`
 `<preset>-<suffix>`) and full `[rule.params]` support.
 

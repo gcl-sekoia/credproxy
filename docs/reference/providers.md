@@ -1,4 +1,14 @@
+[← docs index](../README.md) · [Concepts](../concepts.md)
+
 # Provider exec protocol
+
+This page is for people who want to write a credential source of their own, or
+who need the exact contract the built-in ones follow. A
+[provider](../concepts.md#provider) is a small host program that hands credproxy
+a secret when asked. If you only want to *use* the shipped providers (`env`,
+`op`, `gh-cli`, `keychain`, `bw`, `docker-credential`), the [secret-managers
+guide](../guide/05-secret-managers.md) covers that; come here to build one.
+
 
 A **provider** is a host-side executable that fetches a secret value from a
 backend (a vault, an environment variable, the OS keychain, a script). The CLI
@@ -136,7 +146,7 @@ at all: the builtin `gh-cli` provider returns `gh auth token --hostname <ref>`
 without prompting. Its `describe`/`help` are static — like every provider, the
 backend is touched only in the `get` path, so `provider list`/`show` never
 shells out. It pairs with the `github` preset, which defaults its provider to
-`gh-cli` and its secret to `github.com`, so `binding add --preset github` wires
+`gh-cli` and its secret to `github.com`, so `preset add github` wires
 GitHub API + git + ghcr off one existing login with no further flags.
 
 The builtin `docker-credential` provider adapts any `docker-credential-*` helper

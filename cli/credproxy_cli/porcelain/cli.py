@@ -1377,7 +1377,7 @@ def do_scaffold(ctx: Ctx, kind: str, name: str, lang: str = "python") -> None:
     render.OUT.scaffolded(result.kind, result.name, str(result.path))
     if kind == "provider":
         say("the template is just a starting point -- a provider can be any "
-            "executable that speaks the JSON protocol (docs/providers.md).")
+            "executable that speaks the JSON protocol (docs/reference/providers.md).")
 
 
 def do_def_list(ctx: Ctx, kind: str) -> None:
@@ -1996,14 +1996,14 @@ _RULE_ADD_HELP = (
     "\n"
     "  A visible block self-identifies (X-Credproxy-Rule header + a credproxy JSON\n"
     "  body); a hidden block is a bare status. Hidden rules are excluded from\n"
-    "  /setup but ALWAYS logged/audited for the operator. See docs/rules.md."
+    "  /setup but ALWAYS logged/audited for the operator. See docs/reference/rules.md."
 )
 
 _CREATE_HELP = (
     "credproxy workspace create NAME -- scaffold a workspace config file and\n"
     "auth token (does not start anything). The scaffold sets a concrete image;\n"
     "edit the generated <name>.toml to change it (its comments show what to\n"
-    "adjust), or override the template in an overlay (see docs/overlays.md).\n"
+    "adjust), or override the template in an overlay (see docs/advanced/overlays.md).\n"
     "\n"
     "  --here        associate the workspace with the current directory, so a\n"
     "                loose `credp <verb>` run from at/under it resolves here.\n"
@@ -2066,7 +2066,7 @@ def _scaffold_help(kind: str) -> str:
             "sh = POSIX shell + jq).\n\n"
             "A provider is ANY executable -- a script in any language, or a "
             "compiled\nbinary -- that speaks the JSON stdin/stdout protocol "
-            "(docs/providers.md);\nit can also be a directory with an executable "
+            "(docs/reference/providers.md);\nit can also be a directory with an executable "
             "`run`."
         )
     s += f"\nThen `credproxy {kind} list` shows it."

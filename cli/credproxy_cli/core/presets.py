@@ -16,7 +16,7 @@ editing/removing the stamped blocks afterwards is normal.
 Presets are *data*, loaded from the layered registry (user > overlays >
 builtin, paths.layered_dirs) -- a `<name>.toml` per preset, the name being the
 filename stem. So an org adds its own packs by dropping a TOML in an overlay, no
-code. See docs/overlays.md and builtin/presets/github.toml.
+code. See docs/advanced/overlays.md and builtin/presets/github.toml.
 """
 from __future__ import annotations
 

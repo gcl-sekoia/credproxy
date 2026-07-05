@@ -1,3 +1,5 @@
+[← docs index](../README.md) · [Concepts](../concepts.md)
+
 # Customizing credproxy with overlays
 
 An org or team often wants its own defaults: a standard workspace image, an
@@ -140,12 +142,12 @@ Because it rides the same walk as the registries, a **user** can keep a personal
 Drop a `<name>.toml` (or executable, or `.star`) in the matching subdir. Same
 name as a builtin (or a less-specific overlay) **replaces** it; a new name
 **adds** it. The shapes match the builtin examples — see
-[`injectors.md`](injectors.md), [`providers.md`](providers.md), and
+[`injectors.md`](../reference/injectors.md), [`providers.md`](../reference/providers.md), and
 `cli/credproxy_cli/builtin/presets/github.toml`.
 
 **Shipping a policy as a pack.** A rule script (`scripts/readonly-guard.star`)
 and a **preset** that wires it (`presets/org-guardrails.toml`, an optional
-`[[rule]]` array; see [`rules.md`](rules.md#distributing-a-policy-script--preset))
+`[[rule]]` array; see [`rules.md`](../reference/rules.md#distributing-a-policy-script--preset))
 travel together in the overlay, so a workspace applies the whole policy with one
 `credproxy workspace NAME preset add org-guardrails`. A preset can carry bindings,
 rules, or both — a **pure-rule** pack (no `[placeholder]`/provider) is a
@@ -168,7 +170,7 @@ overlay dir** into the container (confined within the overlay dir, read-only by
 default). With N overlays, `REL` is searched in declared order — the first
 overlay containing it wins — so a more-specific overlay can override a shipped
 file. The overlay becomes a self-contained bundle: declarative config *and* the
-static assets it references. See [`configuration.md`](configuration.md) `mounts`.
+static assets it references. See [`configuration.md`](../reference/configuration.md) `mounts`.
 
 ## Provenance — which override actually won
 

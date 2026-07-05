@@ -75,7 +75,7 @@ def overlay_dirs() -> list[tuple[str, Path]]:
     """The ordered org *overlays*, most specific first -- the middle tier(s)
     between the end-user's XDG config and the in-package `builtin` defaults. Each
     holds an org's customized scaffold and definitions (injectors/providers/
-    scripts/presets) -- see docs/overlays.md.
+    scripts/presets) -- see docs/advanced/overlays.md.
 
     `CREDPROXY_OVERLAY_PATH` is an `os.pathsep`-separated list of dirs, searched
     leftmost-first (PATH semantics); it REPLACES the default entirely. Unset
