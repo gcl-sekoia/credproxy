@@ -70,10 +70,10 @@ to GitHub succeeds:
 
 ```console
 $ credp enter
-vscode@myproject:~$ export GITHUB_TOKEN=$(curl -s http://proxy.local/setup | jq -r '.bindings[0].placeholder')
-vscode@myproject:~$ echo "$GITHUB_TOKEN"
+vscode@73fd8fd26e2e:~$ export GITHUB_TOKEN=$(curl -s http://proxy.local/setup | jq -r '.bindings[0].placeholder')
+vscode@73fd8fd26e2e:~$ echo "$GITHUB_TOKEN"
 credproxy_AOFWLTeyzi8jUF1YTApGxjlCpXn62z
-vscode@myproject:~$ curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user | jq .login
+vscode@73fd8fd26e2e:~$ curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user | jq .login
 "your-github-username"
 ```
 
@@ -93,7 +93,7 @@ Open a second terminal on the host and stream the audit log while you run the
 
 ```console
 $ credp logs --audit
-2026-07-05T18:30:12Z  audit inject     GET api.github.com/user  'bearer-env' injected
+2026-07-05T18:30:12Z  audit inject    GET api.github.com/user  'bearer-env' injected
 ```
 
 *(Sample output.)* The audit record names the binding, the host, and the method

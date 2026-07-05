@@ -55,11 +55,15 @@ then starts the workspace container. It is safe to re-run at any time.
 
 ```console
 $ credp enter
-vscode@myproject:~$ whoami
+vscode@73fd8fd26e2e:~$ whoami
 vscode
-vscode@myproject:~$ curl -s https://example.com -o /dev/null -w '%{http_code}\n'
+vscode@73fd8fd26e2e:~$ curl -s https://example.com -o /dev/null -w '%{http_code}\n'
 200
 ```
+
+> [!NOTE]
+> The hostname in the prompt (`73fd8fd26e2e` here) is the container's ID. Yours
+> will differ.
 
 You are now inside your container. Its network already flows through the proxy.
 Regular HTTPS works because the workspace trusts the proxy's certificate, set up
