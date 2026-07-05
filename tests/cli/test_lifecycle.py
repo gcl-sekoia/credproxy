@@ -227,6 +227,103 @@ def test_map_host_user_noop_on_docker(xdg, ws_factory, monkeypatch):
     assert not any(a.startswith("--userns") for a in calls[-1])
 
 
+# ---- runc sysfs failure enrichment (#50) ------------------------------------
+
+# The raw OCI mount error a runc-on-rootless-podman workspace run dies with.
+_SYSFS_ERR = (
+    'docker run failed: Error: runc: runc create failed: unable to start '
+    'container process: error during container init: error mounting "sysfs" to '
+    'rootfs at "/sys": mount src=sysfs, dst=/sys, flags=MS_RDONLY|MS_NOSUID|'
+    'MS_NODEV|MS_NOEXEC: operation not permitted: OCI permission denied'
+)
+
+
+def _keepid_cfg(**over):
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "user": "vscode", "map_host_user": True, "run_flags": []}
+    cfg.update(over)
+    return cfg
+
+
+def test_enrich_sysfs_with_keepid_adds_both_remedies(monkeypatch):
+    """A sysfs run failure WHEN credproxy emitted keep-id -> the error is
+    augmented with both remedies while preserving the original OCI text."""
+    import os
+    if not hasattr(os, "getuid"):
+        import pytest
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.errors import DockerError
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    out = lifecycle._enrich_ws_run_error(DockerError(_SYSFS_ERR), _keepid_cfg())
+    msg = str(out)
+    assert _SYSFS_ERR in msg                      # original text preserved
+    assert 'runtime = "crun"' in msg              # remedy 1: crun
+    assert "map_host_user = false" in msg         # remedy 2: turn it off
+    assert "docs/troubleshooting.md" in msg
+
+
+def test_enrich_sysfs_without_keepid_map_host_user_off(monkeypatch):
+    """Same sysfs failure but map_host_user off -> credproxy emitted no keep-id,
+    so the original error passes through unchanged."""
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.errors import DockerError
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    orig = DockerError(_SYSFS_ERR)
+    out = lifecycle._enrich_ws_run_error(orig, _keepid_cfg(map_host_user=False))
+    assert out is orig
+    assert 'runtime = "crun"' not in str(out)
+
+
+def test_enrich_sysfs_with_run_flags_userns_override(monkeypatch):
+    """A user-supplied --userns in run_flags means credproxy's keep-id isn't in
+    force -> the sysfs failure is the user's to own, error unchanged."""
+    import os
+    if not hasattr(os, "getuid"):
+        import pytest
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.errors import DockerError
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    orig = DockerError(_SYSFS_ERR)
+    out = lifecycle._enrich_ws_run_error(
+        orig, _keepid_cfg(run_flags=["--userns=host"]))
+    assert out is orig
+
+
+def test_enrich_non_sysfs_failure_with_keepid(monkeypatch):
+    """A non-sysfs run failure with keep-id emitted -> not our signature, so the
+    original error passes through (no misattribution)."""
+    import os
+    if not hasattr(os, "getuid"):
+        import pytest
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.errors import DockerError
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    orig = DockerError("docker run failed: Error: no such image: x")
+    out = lifecycle._enrich_ws_run_error(orig, _keepid_cfg())
+    assert out is orig
+
+
+def test_emits_keep_id_predicate(monkeypatch):
+    """emits_keep_id gates on credproxy-owned keep-id (rootless podman +
+    map_host_user + non-root user) and NOT a run_flags --userns override."""
+    import os
+    if not hasattr(os, "getuid"):
+        import pytest
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    assert lifecycle.emits_keep_id(_keepid_cfg()) is True
+    assert lifecycle.emits_keep_id(_keepid_cfg(map_host_user=False)) is False
+    assert lifecycle.emits_keep_id(_keepid_cfg(user="root")) is False
+    assert lifecycle.emits_keep_id(_keepid_cfg(run_flags=["--userns=host"])) is False
+    # Non-rootless-podman: no keep-id emitted regardless.
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: False)
+    assert lifecycle.emits_keep_id(_keepid_cfg()) is False
+
+
 # ---- workspace hostname (prompt shows the workspace name) --------------------
 
 

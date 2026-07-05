@@ -152,10 +152,43 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
             _fail(f"ws:{ws.name}:token", f"[{ws.name}] auth token missing/empty",
                   f"recreate it with `credproxy workspace {ws.name} push` "
                   f"(or delete + recreate the workspace)"))
+    elif cfg is not None:
+        # Managed workspace only (attached has no container of its own to run):
+        # predict the runc `sysfs` failure (#50) before `start` hits the raw OCI
+        # error. Skips silently on every not-bad case.
+        out += _runc_keep_id_check(ws, cfg)
     out += _binding_checks(ws, fetch=fetch)
     out += _script_compile_checks(ws)
     out += _rule_checks(ws)
     return out
+
+
+def _runc_keep_id_check(ws: Workspace, cfg: dict) -> list[Check]:
+    """Predict the runc `sysfs` failure (#50): on rootless podman with the `runc`
+    OCI runtime, a config that emits `--userns=keep-id` (map_host_user + non-root
+    user, no `run_flags --userns` override) combines with the always-present
+    netns join to fail the workspace container at init -- runc refuses the fresh
+    read-only sysfs mount when keep-id's userns doesn't own the joined netns
+    (crun handles it fine). FAIL loudly with both remedies so a green doctor
+    really means `start` will get past container init.
+
+    Emits NOTHING on every not-bad case -- Docker, crun, rootful podman,
+    map_host_user off, or a hand-rolled --userns. `emits_keep_id` already gates
+    on rootless podman + credproxy-owned keep-id; we add the runtime==runc check.
+    Both read the SAME cached runtime probe doctor's env checks already ran, so
+    no extra docker round-trip."""
+    from . import lifecycle
+    from .runtime import oci_runtime
+    if not lifecycle.emits_keep_id(cfg) or oci_runtime() != "runc":
+        return []
+    return [_fail(
+        f"ws:{ws.name}:runc-sysfs",
+        f"[{ws.name}] rootless podman with runc + map_host_user will fail the "
+        f"workspace container at init (sysfs mount under --userns=keep-id on the "
+        f"shared-netns join)",
+        'switch podman to crun (~/.config/containers/containers.conf -> '
+        '[engine] runtime = "crun") or set `map_host_user = false` in the '
+        "workspace TOML; see docs/troubleshooting.md")]
 
 
 def _script_compile_checks(ws: Workspace) -> list[Check]:

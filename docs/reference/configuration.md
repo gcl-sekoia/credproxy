@@ -243,7 +243,11 @@ depends on the runtime:
   which maps **your host uid onto `user_uid`**. The two **need not be equal** —
   keep-id maps *across* them — so a baked `vscode` (uid 1000) works even when your
   host uid is 501. credproxy just needs to know `user_uid` (it defaults to your
-  host uid; the scaffold sets `1000` for the default image).
+  host uid; the scaffold sets `1000` for the default image). **runc caveat:** the
+  keep-id userns plus the shared-netns join trips a `runc` limitation — the
+  workspace container fails at init with a `sysfs` mount error. Use `crun` (or set
+  `map_host_user = false`); see
+  [troubleshooting](../troubleshooting.md#workspace-fails-to-start-with-a-sysfs-mount-error-rootless-podman--runc).
 - **Rootful Docker (Linux):** container uid **==** host uid — no remapping, no
   keep-id. So here `user_uid` **must equal** your host uid for the mounts to line
   up, and `map_host_user` is a no-op. You match them by creating the user as

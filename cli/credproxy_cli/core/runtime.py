@@ -10,14 +10,19 @@ runtime really is:
 - the workspace-hostname flag cares about **podman at all** (rootful or
   rootless): podman leaves UTS independent on a netns join and accepts
   `--hostname` on the joiner, whereas Docker rejects it there.
+- the runc-on-rootless-podman `sysfs` gotcha (#50) cares about the OCI runtime
+  NAME (`runc` vs `crun`): `--userns=keep-id` + a netns join fails at init on
+  `runc` but works on `crun`, so detection/enrichment reads `oci_runtime()`.
 
-Both read the SAME daemon probe, so there is exactly one round-trip per process.
-The probe asks the *daemon*, so it is correct even when the binary is a shim,
-via a podman-shaped `info` field that doubles as the engine discriminator:
-podman's info has `.Host.Security.Rootless` (prints true/false, exit 0); real
-Docker's info has no `.Host`, so the Go template errors (non-zero exit). So a
-zero exit == podman regardless of the printed value; error or non-podman -> we
-treat it as Docker/absent and inject nothing.
+All three read the SAME daemon probe, so there is exactly one round-trip per
+process. The probe asks the *daemon*, so it is correct even when the binary is a
+shim, via a podman-shaped `info` field that doubles as the engine discriminator:
+podman's info has `.Host.Security.Rootless` (prints true/false, exit 0) and
+`.Host.OCIRuntime.Name` (the runtime name); real Docker's info has no `.Host`,
+so the Go template errors (non-zero exit). So a zero exit == podman regardless
+of the printed value; error or non-podman -> we treat it as Docker/absent and
+inject nothing. The probe reads both fields in ONE template (space-separated),
+so adding the runtime name costs no extra round-trip.
 """
 from __future__ import annotations
 
@@ -34,7 +39,8 @@ def _probe() -> tuple[int, str]:
     predicates read as 'not podman'."""
     try:
         r = subprocess.run(
-            ["docker", "info", "-f", "{{.Host.Security.Rootless}}"],
+            ["docker", "info", "-f",
+             "{{.Host.Security.Rootless}} {{.Host.OCIRuntime.Name}}"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -61,5 +67,23 @@ def is_podman_rootless() -> bool:
     Any failure (no binary, daemon down, real Docker's template error) yields
     False -- the safe default that injects no userns flag."""
     rc, out = _probe()
-    # Real Docker: no `.Host` field -> non-zero exit. Podman: prints true/false.
-    return rc == 0 and out.strip() == "true"
+    # Real Docker: no `.Host` field -> non-zero exit. Podman: prints
+    # "<rootless> <runtime>"; the first field is the rootless bool.
+    parts = out.split()
+    return rc == 0 and bool(parts) and parts[0] == "true"
+
+
+def oci_runtime() -> str | None:
+    """The OCI runtime podman reports for this daemon (e.g. `"runc"`/`"crun"`),
+    or None on real Docker / any probe failure.
+
+    Reads the second field of the combined probe (`<rootless> <runtime>`). On
+    Docker the template errors (non-zero exit) so there's no runtime name to
+    report -> None; a zero exit with a missing/blank second field (an older
+    podman that doesn't fill it) also yields None. Used to detect the runc
+    `sysfs` limitation on rootless podman with `--userns=keep-id` (#50)."""
+    rc, out = _probe()
+    if rc != 0:
+        return None
+    parts = out.split()
+    return parts[1] if len(parts) >= 2 and parts[1] else None
