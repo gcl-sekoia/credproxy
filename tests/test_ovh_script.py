@@ -1,41 +1,28 @@
-"""Tests for the builtin OVH API scripted injector (ovh.star).
+"""Tests for the builtin OVH API scripted injector (ovh).
 
-Builds a ScriptedScheme directly from the builtin source and drives
-on_request against a RequestCtx, then independently recomputes the
-expected SHA1 in Python to verify all four injected headers.
+Drives the injector through `testkit` -- which resolves the `ovh` manifest AND
+its `ovh.star` through the layered registry and builds the scheme exactly like
+the push path -- then independently recomputes the expected SHA1 in Python to
+verify all four injected headers. Because the harness pairs manifest+script, a
+manifest that declared the wrong slots would fail this test rather than passing
+against a config the proxy would reject.
 """
 import hashlib
-from pathlib import Path
 
-import pytest
-from mitmproxy.test import tutils
+import testkit
 
-import schemes
-from starlark_runtime import ScriptedScheme
-
-OVH = (Path(__file__).resolve().parents[1]
-       / "cli" / "credproxy_cli" / "builtin" / "scripts" / "ovh.star").read_text()
-
-_SLOTS = ("app_key", "app_secret", "consumer_key")
+_SECRETS = {"app_key": "AK", "app_secret": "AS", "consumer_key": "CK"}
 
 
-def _scheme():
-    return ScriptedScheme("ovh", OVH, family="sign",
-                          slots=_SLOTS, location_kind="header")
-
-
-def _secrets():
-    return {"app_key": "AK", "app_secret": "AS", "consumer_key": "CK"}
+def _kit():
+    return testkit.load_injector("ovh")
 
 
 def test_ovh_sets_signed_headers():
-    s = _scheme()
-    req = tutils.treq(host="eu.api.ovh.com", method=b"GET", path=b"/1.0/me", content=b"")
-    req.headers.clear()
-    req.headers["host"] = "eu.api.ovh.com"
-    ctx = schemes.RequestCtx(req, _secrets(), {}, None)
+    kit = _kit()
+    req = testkit.make_request("GET", "https://eu.api.ovh.com/1.0/me")
 
-    assert s.on_request(ctx) is True
+    assert kit.run(req, _SECRETS).injected is True
 
     ts = req.headers["X-Ovh-Timestamp"]
     # Empty body -> base has "++" between url and ts
@@ -51,13 +38,12 @@ def test_ovh_signs_hostname_not_ip():
     """Regression for #7: in transparent mode flow.request.host is the
     destination IP; the script must sign the HOSTNAME URL (from pretty_host /
     the Host header), or OVH rejects with 'Invalid signature'."""
-    s = _scheme()
-    req = tutils.treq(host="54.88.241.89", method=b"GET", path=b"/1.0/me", content=b"")
-    req.headers.clear()
-    req.headers["host"] = "eu.api.ovh.com"   # the real hostname
-    ctx = schemes.RequestCtx(req, _secrets(), {}, None)
+    kit = _kit()
+    # Destination is the IP; the Host header is the real hostname.
+    req = testkit.make_request("GET", "https://54.88.241.89/1.0/me",
+                               headers={"Host": "eu.api.ovh.com"})
 
-    assert s.on_request(ctx) is True
+    assert kit.run(req, _SECRETS).injected is True
 
     ts = req.headers["X-Ovh-Timestamp"]
     # Signed over the hostname URL, not https://54.88.241.89/...
@@ -69,45 +55,32 @@ def test_ovh_signs_hostname_not_ip():
 def test_ovh_placeholder_present_signs_and_overwrites_app():
     """With a placeholder, the workspace presents it as X-Ovh-Application; the
     proxy signs and overwrites the four headers with the real app key."""
-    s = _scheme()
-    req = tutils.treq(host="eu.api.ovh.com", method=b"GET", path=b"/1.0/me", content=b"")
-    req.headers.clear()
-    req.headers["host"] = "eu.api.ovh.com"
-    req.headers["X-Ovh-Application"] = "PLACEHOLDER-APP"
-    ctx = schemes.RequestCtx(req, _secrets(), {}, "PLACEHOLDER-APP")
+    kit = _kit()
+    req = testkit.make_request("GET", "https://eu.api.ovh.com/1.0/me",
+                               headers={"X-Ovh-Application": "PLACEHOLDER-APP"})
 
-    assert s.on_request(ctx) is True
+    assert kit.run(req, _SECRETS, placeholder="PLACEHOLDER-APP").injected is True
     assert req.headers["X-Ovh-Application"] == "AK"   # placeholder -> real app key
     assert "X-Ovh-Signature" in req.headers
 
 
 def test_ovh_placeholder_mismatch_skips():
     """No / wrong X-Ovh-Application -> not our request; add no signature."""
-    s = _scheme()
-    req = tutils.treq(host="eu.api.ovh.com", method=b"GET", path=b"/1.0/me", content=b"")
-    req.headers.clear()
-    req.headers["host"] = "eu.api.ovh.com"   # no X-Ovh-Application presented
-    ctx = schemes.RequestCtx(req, _secrets(), {}, "PLACEHOLDER-APP")
+    kit = _kit()
+    req = testkit.make_request("GET", "https://eu.api.ovh.com/1.0/me")
 
-    assert s.on_request(ctx) is False
+    assert kit.run(req, _SECRETS, placeholder="PLACEHOLDER-APP").injected is False
     assert "X-Ovh-Signature" not in req.headers
 
 
 def test_ovh_post_with_body():
-    s = _scheme()
+    kit = _kit()
     body = '{"description":"test"}'
-    req = tutils.treq(
-        host="eu.api.ovh.com",
-        method=b"POST",
-        path=b"/1.0/domain/zone/example.com/record",
-        content=body.encode(),
-    )
-    req.headers.clear()
-    req.headers["host"] = "eu.api.ovh.com"
-    req.headers["Content-Type"] = "application/json"
-    ctx = schemes.RequestCtx(req, _secrets(), {}, None)
+    req = testkit.make_request(
+        "POST", "https://eu.api.ovh.com/1.0/domain/zone/example.com/record",
+        headers={"Content-Type": "application/json"}, body=body)
 
-    assert s.on_request(ctx) is True
+    assert kit.run(req, _SECRETS).injected is True
 
     ts = req.headers["X-Ovh-Timestamp"]
     url = "https://eu.api.ovh.com/1.0/domain/zone/example.com/record"

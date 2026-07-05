@@ -1,36 +1,29 @@
-"""Tests for the builtin jwt-bearer Starlark script.
+"""Tests for the builtin jwt-bearer scripted injector.
 
-Verifies that on_request mints an RS256-signed JWT, injects it as
-Authorization: Bearer <jwt>, and that the JWT's header, claims, and signature
-are all well-formed and verifiable with the corresponding public key.
+Drives the injector through `testkit` (which resolves the `jwt-bearer` manifest
++ `jwt-bearer.star` and builds the scheme like the push path), then verifies that
+on_request mints an RS256-signed JWT, injects it as Authorization: Bearer <jwt>,
+and that the JWT's header, claims, and signature are all well-formed and
+verifiable with the corresponding public key.
 """
 import base64
 import json
 import time
-from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from mitmproxy.test import tutils
 
-import schemes
-from starlark_runtime import ScriptedScheme
+import testkit
 
-JWT_STAR = (Path(__file__).resolve().parents[1]
-            / "cli" / "credproxy_cli" / "builtin" / "scripts" / "jwt-bearer.star").read_text()
+# The test uses its own iss/aud (distinct from the manifest defaults) to assert
+# the params actually flow through, so every run() passes params explicitly.
+_PARAMS = {"iss": "svc@example.com", "aud": "https://api.example.com", "ttl": "60"}
 
 
 def _b64url_decode(s: str) -> bytes:
     """Decode an unpadded base64url string."""
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
-
-
-def _make_scheme():
-    return ScriptedScheme(
-        "jwt-bearer", JWT_STAR,
-        family="sign", slots=("private_key",), location_kind="header",
-    )
 
 
 def _make_key():
@@ -44,17 +37,16 @@ def _make_key():
     return key, pem
 
 
-def _make_ctx(pem: str, params: dict | None = None):
-    req = tutils.treq(host="api.example.com")
-    req.headers.clear()
-    req.headers["host"] = "api.example.com"
-    ctx = schemes.RequestCtx(
-        req,
-        {"private_key": pem},
-        params or {"iss": "svc@example.com", "aud": "https://api.example.com", "ttl": "60"},
-        None,
-    )
-    return ctx, req
+def _run(pem: str, params: dict | None = None, placeholder=None,
+         authorization=None):
+    """Resolve the jwt-bearer injector and run it against a fresh request.
+    Returns (result, req)."""
+    kit = testkit.load_injector("jwt-bearer")
+    headers = {"Authorization": authorization} if authorization is not None else None
+    req = testkit.make_request("GET", "https://api.example.com/", headers=headers)
+    result = kit.run(req, {"private_key": pem}, params=params or _PARAMS,
+                     placeholder=placeholder)
+    return result, req
 
 
 # ---------------------------------------------------------------------------
@@ -63,14 +55,12 @@ def _make_ctx(pem: str, params: dict | None = None):
 
 def test_jwt_bearer_mints_verifiable_token():
     key, pem = _make_key()
-    s = _make_scheme()
-    ctx, req = _make_ctx(pem)
 
     before = int(time.time())
-    result = s.on_request(ctx)
+    result, req = _run(pem)
     after = int(time.time())
 
-    assert result is True
+    assert result.injected is True
 
     auth = req.headers["Authorization"]
     assert auth.startswith("Bearer ")
@@ -104,13 +94,11 @@ def test_jwt_bearer_mints_verifiable_token():
 
 def test_jwt_bearer_custom_ttl():
     key, pem = _make_key()
-    s = _make_scheme()
-    ctx, req = _make_ctx(pem, params={
+    _, req = _run(pem, params={
         "iss": "svc@example.com",
         "aud": "https://api.example.com",
         "ttl": "7200",
     })
-    assert s.on_request(ctx) is True
     _, c_b64, _ = req.headers["Authorization"][len("Bearer "):].split(".")
     claims = json.loads(_b64url_decode(c_b64))
     assert claims["exp"] - claims["iat"] == 7200
@@ -122,14 +110,12 @@ def test_jwt_bearer_custom_ttl():
 
 def test_jwt_bearer_sub_included_when_set():
     key, pem = _make_key()
-    s = _make_scheme()
-    ctx, req = _make_ctx(pem, params={
+    _, req = _run(pem, params={
         "iss": "svc@example.com",
         "aud": "https://api.example.com",
         "ttl": "60",
         "sub": "user@example.com",
     })
-    assert s.on_request(ctx) is True
     _, c_b64, _ = req.headers["Authorization"][len("Bearer "):].split(".")
     claims = json.loads(_b64url_decode(c_b64))
     assert claims["sub"] == "user@example.com"
@@ -137,14 +123,12 @@ def test_jwt_bearer_sub_included_when_set():
 
 def test_jwt_bearer_sub_absent_when_empty():
     key, pem = _make_key()
-    s = _make_scheme()
-    ctx, req = _make_ctx(pem, params={
+    _, req = _run(pem, params={
         "iss": "svc@example.com",
         "aud": "https://api.example.com",
         "ttl": "60",
         "sub": "",
     })
-    assert s.on_request(ctx) is True
     _, c_b64, _ = req.headers["Authorization"][len("Bearer "):].split(".")
     claims = json.loads(_b64url_decode(c_b64))
     assert "sub" not in claims
@@ -153,43 +137,28 @@ def test_jwt_bearer_sub_absent_when_empty():
 def test_jwt_bearer_sub_absent_by_default():
     """When sub param is not provided at all, it should not appear in claims."""
     key, pem = _make_key()
-    s = _make_scheme()
     # No "sub" key in params at all
-    ctx, req = _make_ctx(pem, params={
+    _, req = _run(pem, params={
         "iss": "svc@example.com",
         "aud": "https://api.example.com",
         "ttl": "60",
     })
-    assert s.on_request(ctx) is True
     _, c_b64, _ = req.headers["Authorization"][len("Bearer "):].split(".")
     claims = json.loads(_b64url_decode(c_b64))
     assert "sub" not in claims
 
 
 # ---------------------------------------------------------------------------
-# Each call mints a fresh JWT (iat/exp advance with time)
+# Each call mints a fresh JWT
 # ---------------------------------------------------------------------------
 
 def test_jwt_bearer_each_call_is_fresh():
-    """Two successive calls must produce different tokens (different iat/exp
-    if any time passes, or at minimum different signatures since RSA-PKCS1v15
-    is deterministic -- so tokens identical iff iat identical)."""
+    """Two successive calls both produce well-formed Bearer tokens (iat may match
+    within one second, so we only assert both parse)."""
     key, pem = _make_key()
-    s = _make_scheme()
-
-    ctx1, req1 = _make_ctx(pem)
-    ctx2, req2 = _make_ctx(pem)
-
-    assert s.on_request(ctx1) is True
-    # Allow a wall-clock tick between calls; even without one, both JWTs are
-    # valid -- we only assert both are well-formed Bearer tokens.
-    assert s.on_request(ctx2) is True
-
-    jwt1 = req1.headers["Authorization"]
-    jwt2 = req2.headers["Authorization"]
-    # Both are parseable Bearer JWTs (no assertion on equality -- iat may match
-    # within the same second on a fast machine).
-    for auth in (jwt1, jwt2):
+    _, req1 = _run(pem)
+    _, req2 = _run(pem)
+    for auth in (req1.headers["Authorization"], req2.headers["Authorization"]):
         assert auth.startswith("Bearer ")
         assert len(auth[len("Bearer "):].split(".")) == 3
 
@@ -199,28 +168,12 @@ def test_jwt_bearer_each_call_is_fresh():
 # requests that carry it (per-request opt-in + multi-identity disambiguation).
 # ---------------------------------------------------------------------------
 
-def _ctx_with_placeholder(pem: str, placeholder, authorization=None):
-    req = tutils.treq(host="api.example.com")
-    req.headers.clear()
-    req.headers["host"] = "api.example.com"
-    if authorization is not None:
-        req.headers["Authorization"] = authorization
-    ctx = schemes.RequestCtx(
-        req,
-        {"private_key": pem},
-        {"iss": "svc@example.com", "aud": "https://api.example.com", "ttl": "60"},
-        placeholder,
-    )
-    return ctx, req
-
-
 def test_jwt_bearer_placeholder_present_mints():
     """Workspace presents the placeholder bearer -> real JWT is minted in place."""
     key, pem = _make_key()
-    s = _make_scheme()
-    ctx, req = _ctx_with_placeholder(pem, "PLACEHOLDER-TOKEN",
-                                     authorization="Bearer PLACEHOLDER-TOKEN")
-    assert s.on_request(ctx) is True
+    result, req = _run(pem, placeholder="PLACEHOLDER-TOKEN",
+                       authorization="Bearer PLACEHOLDER-TOKEN")
+    assert result.injected is True
     auth = req.headers["Authorization"]
     assert auth.startswith("Bearer ")
     assert auth != "Bearer PLACEHOLDER-TOKEN"          # placeholder replaced
@@ -230,19 +183,17 @@ def test_jwt_bearer_placeholder_present_mints():
 def test_jwt_bearer_placeholder_absent_skips():
     """No Authorization header -> not our request; leave it untouched."""
     key, pem = _make_key()
-    s = _make_scheme()
-    ctx, req = _ctx_with_placeholder(pem, "PLACEHOLDER-TOKEN", authorization=None)
-    assert s.on_request(ctx) is False
+    result, req = _run(pem, placeholder="PLACEHOLDER-TOKEN")
+    assert result.injected is False
     assert "Authorization" not in req.headers
 
 
 def test_jwt_bearer_placeholder_mismatch_skips():
     """A different token (another identity) -> not ours; leave it untouched."""
     key, pem = _make_key()
-    s = _make_scheme()
-    ctx, req = _ctx_with_placeholder(pem, "PLACEHOLDER-TOKEN",
-                                     authorization="Bearer SOMEONE-ELSES-TOKEN")
-    assert s.on_request(ctx) is False
+    result, req = _run(pem, placeholder="PLACEHOLDER-TOKEN",
+                       authorization="Bearer SOMEONE-ELSES-TOKEN")
+    assert result.injected is False
     assert req.headers["Authorization"] == "Bearer SOMEONE-ELSES-TOKEN"
 
 
@@ -253,9 +204,7 @@ def test_jwt_bearer_placeholder_mismatch_skips():
 def test_jwt_bearer_wrong_key_fails_verification():
     key, pem = _make_key()
     other_key, _ = _make_key()   # unrelated key pair
-    s = _make_scheme()
-    ctx, req = _make_ctx(pem)
-    assert s.on_request(ctx) is True
+    _, req = _run(pem)
 
     h_b64, c_b64, sig_b64 = req.headers["Authorization"][len("Bearer "):].split(".")
     sig = _b64url_decode(sig_b64)
