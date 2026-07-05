@@ -1750,6 +1750,7 @@ _STRICT_HELP = (
     "  credproxy workspace NAME resolve --json|--out FILE   (build wire config, no proxy)\n"
     "  credproxy workspace create NAME --attach SELECTOR   (attached: externally-run containers)\n"
     "  credproxy push --admin URL --config FILE --token FILE   (stateless push; no workspace)\n"
+    "  credproxy emit-compose [NAME] [--image TAG]   (Docker Compose proxy-sidecar fragment)\n"
     "  credproxy workspace NAME exec [--login|--raw] -- CMD...   (one-shot; scriptable)\n"
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
     "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
@@ -1788,6 +1789,7 @@ _LOOSE_HELP = (
     "  credp push [NAME] [--wait]      resolve + POST config to the workspace's proxy\n"
     "  credp resolve [NAME] --json|--out FILE   build wire config (no proxy)\n"
     "  credp create [NAME] --attach SELECTOR    attached workspace (externally-run containers)\n"
+    "  credp emit-compose [NAME] [--image TAG]  Docker Compose proxy-sidecar fragment\n"
     "  credp mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
     "  credp rule add|remove|list|test ...      (traffic guardrails)\n"
@@ -2433,6 +2435,8 @@ def main(loose_default: bool = False) -> None:
             _dispatch_dev(ctx, rest, trailing)
         elif head == "push":
             _dispatch_push(ctx, rest, trailing)
+        elif head == "emit-compose":
+            _dispatch_emit_compose(ctx, rest)
         elif loose:
             # Loose surface: top-level aliases.
             _dispatch_alias(ctx, head, rest, trailing)
@@ -2751,6 +2755,72 @@ def _read_token_file(path: str) -> str:
     if not token:
         fail(f"--token file is empty: {path}")
     return token
+
+
+_EMIT_COMPOSE_HELP = (
+    "credproxy emit-compose [NAME] [--image TAG] -- print a Docker Compose\n"
+    "fragment for a credproxy proxy sidecar to stdout (the one Compose-aware\n"
+    "command; everything else is parent-agnostic). Ports and mount paths come\n"
+    "from the proxy image's ENV contract, so they can't go stale.\n"
+    "\n"
+    "  NAME          bake this workspace's real token path (<state>/auth.token)\n"
+    "                into the bind mount -- the workspace must exist (pairs with\n"
+    "                `create --attach`). Omit NAME to emit a\n"
+    "                ${CREDPROXY_STATE:?...}/auth.token reference a Compose .env\n"
+    "                can interpolate.\n"
+    "  --image TAG   proxy image for `docker inspect` AND the emitted `image:`\n"
+    "                line (default the built-in proxy image tag).\n"
+    "\n"
+    "The healthcheck gates on /ready (creds-ready), not /health, so a Compose\n"
+    "`service_healthy` dependency opens only once credentials are pushed. Push\n"
+    "after `up`: `credproxy workspace NAME push` (or the stateless `credproxy\n"
+    "push`). (`--json` does not apply -- it emits YAML.)"
+)
+
+
+def _dispatch_emit_compose(ctx: Ctx, rest: list[str]) -> None:
+    """Top-level `emit-compose [NAME] [--image TAG]`: a Compose fragment to
+    stdout. Available on both surfaces (it names no implicit workspace)."""
+    if _wants_help(rest):
+        say(_EMIT_COMPOSE_HELP)
+        return
+    # YAML is not credproxy's to structure, so --json has nothing to wrap --
+    # refuse it rather than emit non-JSON on a --json call (mirrors `exec`).
+    if ctx.json:
+        fail("emit-compose prints a YAML Compose fragment; `--json` does not "
+             "apply")
+    p = _LeafParser(prog="credproxy emit-compose", add_help=False)
+    p.add_argument("name", nargs="?", default=None)
+    p.add_argument("--image", dest="image", default=None, metavar="TAG")
+    a = p.parse_args(rest)
+    do_emit_compose(ctx, a.name, a.image)
+
+
+def do_emit_compose(ctx: Ctx, name: str | None, image: str | None) -> None:
+    """Build + print the Compose fragment. With NAME, bake the workspace's real
+    token path (the workspace must exist); without NAME, emit a
+    ${CREDPROXY_STATE:?...}/auth.token reference plus a comment on where that dir
+    lives. Every port/path is read from the image's ENV contract via ImageEnv."""
+    from ..core import compose as core_compose
+    from ..core.imageenv import ImageEnv
+    from ..core.paths import IMAGE_TAG
+
+    image_tag = image or IMAGE_TAG
+    meta = ImageEnv.load(image_tag)
+    if name is not None:
+        ws = for_name(name)
+        _require_exists(ws)
+        token_source = str(ws.token_path)
+        note = None
+    else:
+        # No workspace resolved: leave the token path to a Compose `.env`.
+        # `:?` makes Compose fail loudly if CREDPROXY_STATE is unset rather than
+        # silently bind-mounting an empty path.
+        token_source = "${CREDPROXY_STATE:?set to the workspace state dir}/auth.token"
+        note = ("# CREDPROXY_STATE is the workspace state dir "
+                "($XDG_STATE_HOME/credproxy/workspaces/NAME; "
+                "`credproxy workspace NAME inspect` shows it).")
+    print(core_compose.emit_compose(meta, image_tag, token_source, note))
 
 
 def do_script_check(ctx: Ctx, name: str | None, force_container: bool) -> None:
