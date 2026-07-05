@@ -330,6 +330,36 @@ def _with_auto_names(bindings: list[Binding]) -> list[Binding]:
     return out
 
 
+def _with_auto_placeholders(bindings: list[Binding]) -> list[Binding]:
+    """Return bindings with any None placeholder filled (in-memory only) for the
+    substitute family -- the same generation `materialize_bindings` writes to
+    disk, but without a file to write back to (the stateless push path). Sign
+    schemes hold no placeholder and are left untouched."""
+    out: list[Binding] = []
+    for b in bindings:
+        if b.placeholder is None:
+            injector = find_injector(b.injector)
+            if injector.spec.uses_placeholder:
+                out.append(replace(b, placeholder=injector.placeholder.generate()))
+                continue
+        out.append(b)
+    return out
+
+
+def bindings_from_raw(raw: dict, source: str,
+                      *, fill_placeholders: bool = False) -> list[Binding]:
+    """Parse + validate `[[binding]]` from an already-parsed TOML dict, filling
+    auto-names (and, with `fill_placeholders`, generating in-memory placeholders)
+    -- the workspace-free sibling of `load_bindings`, for the stateless push path.
+    Shares `_parse_bindings`/`validate`, so a stateless config is held to the same
+    rules a workspace one is (G3)."""
+    bindings = _with_auto_names(_parse_bindings(raw, source))
+    if fill_placeholders:
+        bindings = _with_auto_placeholders(bindings)
+    validate(bindings, source)
+    return bindings
+
+
 # ---- materialization (surgical text edits) ----------------------------------
 
 # A `[[binding]]` table header line (a trailing comment is allowed).

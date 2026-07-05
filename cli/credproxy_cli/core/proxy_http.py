@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from typing import Callable
 
-from .bindings import materialize_bindings, wire_config
+from .bindings import materialize_bindings
 from .errors import ProxyError
 from .workspace import Workspace, read_token
 
@@ -126,38 +126,26 @@ def push_config(ws: Workspace, http_port: int, notify: Notify = _noop,
                 bindings=None, rules=None, fingerprint=None):
     """Materialize bindings + rules, fetch each secret from its provider, and
     POST the resulting wire config (bindings + rules + a metadata `fingerprint`)
-    to /admin/config.
+    to the managed proxy's /admin/config on 127.0.0.1:<http_port>.
 
     `bindings`/`rules`/`fingerprint` may be supplied by the caller (the start
     path computes them to decide whether a push is even needed); otherwise they
     are materialized/computed here. Materialization may rewrite the config file
     (filling generated names/placeholders); announced via `notify`.
 
-    Returns `(bindings, rules)` (the materialized instances) so the caller can
-    record applied-bindings.json / applied-rules.json."""
-    from .rules import (combined_fingerprint, materialize_rules,
-                        rule_wire_entries)
+    A thin wrapper over the shared push engine (`push.push_to_target`), so
+    `start`/`apply` (this function) and the `push`/stateless verbs POST a
+    byte-identical wire body for the same inputs. Returns `(bindings, rules)`
+    (the materialized instances) so the caller can record applied state."""
+    from . import push as core_push
+    from .rules import combined_fingerprint, materialize_rules
 
-    token = read_token(ws)
     if bindings is None:
         bindings = materialize_bindings(ws, notify)
     if rules is None:
         rules = materialize_rules(ws, notify)
     if fingerprint is None:
         fingerprint = combined_fingerprint(bindings, rules)
-    wire = wire_config(bindings)
-    wire["rules"] = rule_wire_entries(rules)
-    wire["fingerprint"] = fingerprint
-    body = json.dumps(wire).encode()
-    status, payload = _http_post_json(
-        f"http://127.0.0.1:{http_port}/admin/config", body, token
-    )
-    if status == 200:
-        return bindings, rules
-    if status == 401:
-        raise ProxyError(
-            f"proxy rejected the token (HTTP 401); check {ws.token_path}"
-        )
-    raise ProxyError(
-        f"config push failed: HTTP {status}: {payload.get('error', payload)}"
-    )
+    return core_push.push_to_target(
+        f"http://127.0.0.1:{http_port}", read_token(ws),
+        bindings, rules, fingerprint, notify=notify)
