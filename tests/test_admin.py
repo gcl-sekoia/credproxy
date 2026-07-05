@@ -123,9 +123,12 @@ async def test_post_with_correct_token_reloads(aiohttp_client, app, state):
         json=VALID_CONFIG,
     )
     assert resp.status == 200
-    assert await resp.json() == {"ok": True}
+    assert await resp.json() == {"ok": True, "generation": 1}
     assert "api.github.com" in state.creds.intercept_hosts()
-    assert json.loads(admin.CONFIG_PATH.read_text()) == VALID_CONFIG
+    # The persisted envelope is the client body PLUS the proxy-internal generation.
+    persisted = json.loads(admin.CONFIG_PATH.read_text())
+    assert persisted == dict(VALID_CONFIG, generation=1)
+    assert state.generation == 1
 
 
 async def test_post_no_authorization_header_401(aiohttp_client, app):
@@ -365,6 +368,167 @@ async def test_listener_bound_probe_observes_real_socket():
         srv.close()
     # Port is closed now -> connect refused -> not bound.
     assert await bootstrap._listener_bound(host, port) is False
+
+
+# ---- /ready: creds-readiness (capture-ready AND a config pushed) ----
+
+
+def _app_over_state(st):
+    """Build a fresh HTTP app bound to `st` -- mirrors the `app` fixture but for a
+    state we constructed ourselves (e.g. a reload-restored one)."""
+    a = web.Application(middlewares=[admin.no_store, admin.fetch_metadata_guard])
+    a[admin.STATE_KEY] = st
+    a.router.add_routes(admin.admin_routes)
+    a.router.add_routes(bootstrap.bootstrap_routes)
+    return a
+
+
+async def test_ready_503_before_any_push(aiohttp_client, app):
+    """Generation 0 (no config yet) -> /ready is 503 with `config` pending and
+    generation 0, EVEN though /health (capture-ready) is 200. This is the I1/I2
+    non-collapse: /health = capture-ready, /ready = /health + creds-ready."""
+    client = await aiohttp_client(app)
+    r_health = await client.get("/health")
+    assert r_health.status == 200  # capture-ready per the fixture
+
+    r_ready = await client.get("/ready")
+    assert r_ready.status == 503
+    body = await r_ready.json()
+    assert body["ok"] is False
+    assert body["generation"] == 0
+    assert body["pending"] == ["config"]
+
+
+async def test_ready_200_after_valid_push(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    r = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"}, json=VALID_CONFIG)
+    assert r.status == 200
+
+    r_ready = await client.get("/ready")
+    assert r_ready.status == 200
+    body = await r_ready.json()
+    assert body["ok"] is True
+    assert body["generation"] == 1
+    assert "pending" not in body
+
+
+async def test_ready_generation_increments_on_second_push(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    for expected in (1, 2):
+        r = await client.post(
+            "/admin/config",
+            headers={"Authorization": "Bearer established"}, json=VALID_CONFIG)
+        assert (await r.json())["generation"] == expected
+        assert (await (await client.get("/ready")).json())["generation"] == expected
+
+
+async def test_ready_green_for_rules_only_config(aiohttp_client, app):
+    """A rules-only config (zero bindings, >= 1 rule) is a valid, ready state:
+    gating on the generation counter -- not `bindings` being non-empty -- is what
+    lets a guardrail-only proxy go green."""
+    rules_only = {"bindings": [], "rules": [
+        {"name": "blk", "hosts": ["api.github.com"], "action": "block"},
+    ]}
+    client = await aiohttp_client(app)
+    r = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"}, json=rules_only)
+    assert r.status == 200
+    r_ready = await client.get("/ready")
+    assert r_ready.status == 200
+    assert (await r_ready.json())["generation"] == 1
+
+
+async def test_ready_503_when_capture_not_ready_despite_config(
+        aiohttp_client, app, monkeypatch):
+    """Even with a config pushed (generation >= 1), /ready stays 503 while the
+    capture layer isn't ready -- it is a superset of /health, not a replacement."""
+    client = await aiohttp_client(app)
+    r = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"}, json=VALID_CONFIG)
+    assert r.status == 200
+    monkeypatch.setattr(bootstrap, "_listener_bound", _async_return(False))
+    r_ready = await client.get("/ready")
+    assert r_ready.status == 503
+    body = await r_ready.json()
+    assert body["generation"] == 1
+    assert "mitmproxy-listener" in body["pending"]
+    assert "config" not in body["pending"]
+
+
+async def test_generation_persists_across_reload(aiohttp_client, app, state):
+    """Simulate `credproxy dev reload`: a POST writes config.json to the tmpfs,
+    then a fresh AppState built from that same tmpfs (via load_initial_state, as
+    the re-exec'd process does) restores the generation -- so /ready stays green
+    across the reload instead of flapping red."""
+    client = await aiohttp_client(app)
+    for _ in range(2):
+        r = await client.post(
+            "/admin/config",
+            headers={"Authorization": "Bearer established"}, json=VALID_CONFIG)
+        assert r.status == 200
+    assert state.generation == 2
+
+    # Fresh process: re-read the surviving tmpfs. TOKEN_PATH/CONFIG_PATH are the
+    # monkeypatched tmp_path files the POSTs just wrote.
+    restored = admin.load_initial_state()
+    assert restored.generation == 2
+    assert "api.github.com" in restored.creds.intercept_hosts()
+
+    fresh_client = await aiohttp_client(_app_over_state(restored))
+    r_ready = await fresh_client.get("/ready")
+    assert r_ready.status == 200
+    assert (await r_ready.json())["generation"] == 2
+
+
+async def test_invalid_config_does_not_increment_generation(aiohttp_client, app, state):
+    """A validation failure returns 400 without bumping the generation -- so a
+    bad push can't flip /ready green or advance the counter."""
+    client = await aiohttp_client(app)
+    r = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"}, json=VALID_CONFIG)
+    assert r.status == 200
+    assert state.generation == 1
+
+    r_bad = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"}, json={"not-bindings": {}})
+    assert r_bad.status == 400
+    assert state.generation == 1
+    assert (await (await client.get("/ready")).json())["generation"] == 1
+
+
+async def test_setup_carries_config_generation(aiohttp_client, app):
+    """`/setup` exposes config_generation so a workspace-side consumer can poll
+    readiness without an admin route -- and it tracks the counter."""
+    client = await aiohttp_client(app)
+    body0 = await (await client.get("/setup")).json()
+    assert body0["config_generation"] == 0
+
+    r = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"}, json=VALID_CONFIG)
+    assert r.status == 200
+    body1 = await (await client.get("/setup")).json()
+    assert body1["config_generation"] == 1
+
+
+async def test_setup_generation_adds_no_disclosure(aiohttp_client, app):
+    """config_generation is the ONLY new /setup field; the disclosure posture is
+    otherwise unchanged (no secret/provider/secret-id keys creep in)."""
+    client = await aiohttp_client(app)
+    await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"}, json=VALID_CONFIG)
+    body = await (await client.get("/setup")).json()
+    assert set(body.keys()) == {
+        "version", "workspace", "config_generation", "ca_url", "env",
+        "intercept_hosts", "bindings", "rules",
+    }
 
 
 def test_running_hook_is_log_only_no_state():
