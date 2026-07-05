@@ -65,4 +65,4 @@ different workspace image, edit `image` (and `user`/`home` to match) in your
 template — or, per workspace, in the generated `<name>.toml`.
 
 See the builtin defaults under `cli/credproxy_cli/builtin/` for complete worked
-copies. Full guide: [`docs/overlays.md`](../docs/overlays.md).
+copies. Full guide: [`docs/advanced/overlays.md`](../docs/advanced/overlays.md).

@@ -31,7 +31,7 @@ PROVIDER_LANGS = ("python", "sh")
 # (only fetch() and the dispatch syntax differ). Kept here, NOT under
 # builtin/providers/, so it doesn't show up as a real provider in `list`.
 _PROVIDER_TEMPLATE_SH = '''#!/bin/sh
-# credproxy provider: env  —  protocol: docs/providers.md  (needs jq)
+# credproxy provider: env  —  protocol: docs/reference/providers.md  (needs jq)
 #
 # A provider is any executable speaking the batch protocol. This is the env
 # provider written in POSIX sh + jq, as a starting point: edit the metadata and

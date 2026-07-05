@@ -731,7 +731,7 @@ def render_template(name: str) -> str:
     workspace name, and nothing else (no `str.format`, so literal braces need no
     doubling). To use a different image, edit the scaffolded file (the template's
     comments show what to adjust), or override the template in an overlay (see
-    docs/overlays.md)."""
+    docs/advanced/overlays.md)."""
     path = resolve_singleton("workspace.template.toml")
     if path is None:
         raise ConfigError(

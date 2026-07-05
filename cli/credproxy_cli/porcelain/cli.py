@@ -39,7 +39,7 @@ from ..core import docker as core_docker
 from ..core import lifecycle
 from ..core import pointer
 from ..core import workspace as core_workspace
-from ..core.errors import CredproxyError, DependencyError
+from ..core.errors import CredproxyError, DependencyError, ImageError
 from ..core.workspace import RESERVED_NAMES, Workspace, for_name
 from ..core.paths import (
     IMAGE_TAG,
@@ -147,6 +147,84 @@ def _confirm_running_recreate(ctx: Ctx, ws: Workspace, sessions: int) -> None:
     print(f"{msg}. Continue? [y/N] ", end="", file=sys.stderr, flush=True)
     if sys.stdin.readline().strip().lower() not in ("y", "yes"):
         fail("aborted")
+
+
+def ensure_proxy_image(ctx: Ctx) -> None:
+    """Make sure the proxy image is present -- and warn when the checkout has
+    drifted from it -- before a command that needs it (the `start`/`recreate`
+    paths). So a newcomer's first `start` OFFERS to build instead of failing with
+    a bare "run credproxy dev build"; the `exec` fast path (both containers already
+    up) is exempt and never reaches here.
+
+    Prompting/surface awareness is a porcelain concern (like the `_confirm_*`
+    gates), so this lives here rather than in the print-free core; the core's
+    ImageEnv.load missing-image error stays as the backstop for other callers."""
+    if core_docker.inspect(IMAGE_TAG, "{{.Id}}") is None:
+        _build_missing_image(ctx)
+    else:
+        _warn_if_stale_image(ctx)
+
+
+def _missing_image_remedy() -> str:
+    return (f"proxy image '{IMAGE_TAG}' not found; build it with: "
+            f"credproxy dev build")
+
+
+def _build_missing_image(ctx: Ctx) -> None:
+    """Missing image. Strict never builds implicitly -- fail with the exact
+    remedy. Loose offers to build inline (default Yes; `--yes` builds unprompted);
+    loose without a TTY fails closed with the same remedy (matching the safety
+    gate). On yes, run the `dev build` code path in-process, then continue."""
+    if not ctx.loose:
+        fail(ImageError(_missing_image_remedy()))
+    if not ctx.assume_yes:
+        if not sys.stdin.isatty():
+            fail(ImageError(_missing_image_remedy()))
+        print(f"proxy image '{IMAGE_TAG}' not found — build it now "
+              f"(runs docker build, ~a minute)? [Y/n] ",
+              end="", file=sys.stderr, flush=True)
+        if sys.stdin.readline().strip().lower() in ("n", "no"):
+            fail(ImageError(_missing_image_remedy()))
+    say(f"building proxy image '{IMAGE_TAG}'...")
+    do_dev_build(ctx)
+
+
+def _warn_if_stale_image(ctx: Ctx) -> None:
+    """The image is present: compare the checkout's source digest against the
+    `credproxy.src_digest` label `dev build` stamped. A mismatch is NOT an error
+    (the old image still works), so never block. Loose+TTY offers a rebuild
+    (default NO); strict prints a one-line warning and proceeds; an image with no
+    label (built before this change) is 'unknown' -> the same warning, never a
+    rebuild prompt. Skipped silently without a repo checkout (nothing to compare)."""
+    from ..core import paths
+
+    digest = paths.proxy_src_digest()
+    if digest is None:
+        return  # no repo checkout -> nothing to compare
+    label = core_docker.inspect(
+        IMAGE_TAG, '{{index .Config.Labels "' + paths.SRC_DIGEST_LABEL + '"}}')
+    stamped = paths.image_label_digest(label)
+    if stamped == digest:
+        return  # image is up to date
+    if stamped is None:
+        say(f"proxy image '{IMAGE_TAG}' has no source-digest label (built before "
+            f"staleness tracking); rebuild with `credproxy dev build` if it seems "
+            f"out of date")
+        return
+    warn = (f"proxy source changed since image '{IMAGE_TAG}' was built; "
+            f"rebuild with `credproxy dev build`")
+    # Strict, --yes, and no-TTY all take the default (No) -- never a surprise
+    # rebuild -- and just warn, proceeding with the current image.
+    if not ctx.loose or ctx.assume_yes or not sys.stdin.isatty():
+        say(warn)
+        return
+    print("proxy source changed since the image was built — rebuild now? [y/N] ",
+          end="", file=sys.stderr, flush=True)
+    if sys.stdin.readline().strip().lower() in ("y", "yes"):
+        say(f"rebuilding proxy image '{IMAGE_TAG}'...")
+        do_dev_build(ctx)
+    else:
+        say("proceeding with the current image")
 
 
 def _require_exists(ws: Workspace) -> None:
@@ -461,6 +539,7 @@ def do_edit(ctx: Ctx, name: str | None) -> None:
 def do_start(ctx: Ctx, name: str | None) -> None:
     ws = _resolve_ws(ctx, name)
     _reject_if_attached(ws, "start")
+    ensure_proxy_image(ctx)
     lifecycle.start_workspace(ws, notify=say)
     render.OUT.started(ws.name)
 
@@ -567,6 +646,7 @@ def do_recreate(ctx: Ctx, name: str | None, include_proxy: bool,
     # gated like delete: confirm on an implicit default workspace (loose surface).
     if reset_volumes:
         _confirm_destructive(ctx, ws, implicit, "reset volume(s) of")
+    ensure_proxy_image(ctx)
     lifecycle.recreate_workspace(ws, notify=say, include_proxy=include_proxy,
                                  reset_volumes=reset_volumes)
     render.OUT.recreated(ws.name, include_proxy, reset_volumes)
@@ -1297,7 +1377,7 @@ def do_scaffold(ctx: Ctx, kind: str, name: str, lang: str = "python") -> None:
     render.OUT.scaffolded(result.kind, result.name, str(result.path))
     if kind == "provider":
         say("the template is just a starting point -- a provider can be any "
-            "executable that speaks the JSON protocol (docs/providers.md).")
+            "executable that speaks the JSON protocol (docs/reference/providers.md).")
 
 
 def do_def_list(ctx: Ctx, kind: str) -> None:
@@ -1346,10 +1426,19 @@ def do_provider_show(ctx: Ctx, name: str) -> None:
 
 
 def do_dev_build(ctx: Ctx) -> None:
+    from ..core import paths
+
     if not PROXY_DIR.is_dir():
         fail(f"{PROXY_DIR} not found -- `dev` commands need the repo checkout")
 
-    core_docker.docker(["build", "-t", IMAGE_TAG, str(PROXY_DIR)], stream=True)
+    args = ["build", "-t", IMAGE_TAG]
+    # Stamp the source digest so `start`/`doctor` can detect a checkout that has
+    # drifted from the built image (a `git pull` that touched proxy/).
+    digest = paths.proxy_src_digest()
+    if digest:
+        args += ["--label", f"{paths.SRC_DIGEST_LABEL}={digest}"]
+    args += [str(PROXY_DIR)]
+    core_docker.docker(args, stream=True)
 
 
 def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
@@ -1907,14 +1996,14 @@ _RULE_ADD_HELP = (
     "\n"
     "  A visible block self-identifies (X-Credproxy-Rule header + a credproxy JSON\n"
     "  body); a hidden block is a bare status. Hidden rules are excluded from\n"
-    "  /setup but ALWAYS logged/audited for the operator. See docs/rules.md."
+    "  /setup but ALWAYS logged/audited for the operator. See docs/reference/rules.md."
 )
 
 _CREATE_HELP = (
     "credproxy workspace create NAME -- scaffold a workspace config file and\n"
     "auth token (does not start anything). The scaffold sets a concrete image;\n"
     "edit the generated <name>.toml to change it (its comments show what to\n"
-    "adjust), or override the template in an overlay (see docs/overlays.md).\n"
+    "adjust), or override the template in an overlay (see docs/advanced/overlays.md).\n"
     "\n"
     "  --here        associate the workspace with the current directory, so a\n"
     "                loose `credp <verb>` run from at/under it resolves here.\n"
@@ -1977,7 +2066,7 @@ def _scaffold_help(kind: str) -> str:
             "sh = POSIX shell + jq).\n\n"
             "A provider is ANY executable -- a script in any language, or a "
             "compiled\nbinary -- that speaks the JSON stdin/stdout protocol "
-            "(docs/providers.md);\nit can also be a directory with an executable "
+            "(docs/reference/providers.md);\nit can also be a directory with an executable "
             "`run`."
         )
     s += f"\nThen `credproxy {kind} list` shows it."

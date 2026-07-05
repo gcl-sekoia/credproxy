@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from . import hostmatch
 from .errors import CredproxyError
 from .imageenv import ImageEnv
-from .paths import IMAGE_TAG, overlay_dirs
+from .paths import IMAGE_TAG, SRC_DIGEST_LABEL, image_label_digest, overlay_dirs, proxy_src_digest
 from .workspace import Workspace, for_name, list_names
 
 
@@ -81,6 +81,7 @@ def _env_checks(*, skip_image: bool = False) -> list[Check]:
         try:
             ImageEnv.load(IMAGE_TAG)
             out.append(_ok("image", f"proxy image {IMAGE_TAG} present + valid"))
+            out += _image_staleness_check()
         except CredproxyError as e:
             out.append(_fail("image", str(e), "run `credproxy dev build`"))
 
@@ -100,6 +101,31 @@ def _env_checks(*, skip_image: bool = False) -> list[Check]:
                        _fail(cid, f"configured overlay {d} does not exist",
                              "create the directory or drop it from CREDPROXY_OVERLAY_PATH"))
     return out
+
+
+def _image_staleness_check() -> list[Check]:
+    """Compare the checkout's source digest against the `credproxy.src_digest`
+    label `dev build` stamped on the (present, already-validated) image. A
+    mismatch is NOT a failure -- the old image still works -- so it's a PASSING
+    check carrying a rebuild hint. Skipped when there's no repo checkout (nothing
+    to compare). Runs only after the `:image` check passed, so docker inspect works."""
+    from . import docker as core_docker
+
+    digest = proxy_src_digest()
+    if digest is None:
+        return []  # no repo checkout -> nothing to compare
+    label = core_docker.inspect(
+        IMAGE_TAG, '{{index .Config.Labels "' + SRC_DIGEST_LABEL + '"}}')
+    stamped = image_label_digest(label)
+    if stamped == digest:
+        return [_ok("image:fresh", f"proxy image {IMAGE_TAG} matches the checkout")]
+    if stamped is None:
+        return [Check("image:fresh", True,
+                      f"proxy image {IMAGE_TAG} predates source-digest tracking",
+                      "rebuild with `credproxy dev build` if it seems out of date")]
+    return [Check("image:fresh", True,
+                  f"proxy source changed since {IMAGE_TAG} was built",
+                  "rebuild with `credproxy dev build` to pick up the changes")]
 
 
 def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:

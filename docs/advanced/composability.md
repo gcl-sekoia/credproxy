@@ -1,3 +1,5 @@
+[← docs index](../README.md) · [Concepts](../concepts.md)
+
 # Composability — attached workspaces
 
 An **attached** workspace is a first-class credproxy workspace whose *containers*
@@ -10,8 +12,8 @@ second identity system; an attached workspace is just a workspace that declares
 an `attach` table instead of container fields.
 
 This builds on credproxy's existing decisions — the push model
-([`providers.md`](providers.md)), the binding/scheme model
-([`injectors.md`](injectors.md)), the host-owned bearer token, the
+([`providers.md`](../reference/providers.md)), the binding/scheme model
+([`injectors.md`](../reference/injectors.md)), the host-owned bearer token, the
 ephemeral-port-resolved-at-call-time rule — and nothing here weakens the threat
 model in `CLAUDE.md`.
 
@@ -152,7 +154,7 @@ resolver — no new resolution logic.
 ### `credproxy workspace NAME push [--wait] [--timeout SECS]`
 
 The first-class extraction of step (2): resolve every binding's refs (batched
-per provider exactly as `start` does — [`providers.md`](providers.md)) and POST
+per provider exactly as `start` does — [`providers.md`](../reference/providers.md)) and POST
 the **full wire config, bindings *and* rules**, to the workspace's proxy — the
 managed proxy for a managed workspace, the resolved attach target for an
 attached one. `start`/`apply` call this same engine internally.

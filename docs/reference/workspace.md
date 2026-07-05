@@ -1,4 +1,13 @@
-# Workspace
+[← docs index](../README.md) · [Concepts](../concepts.md)
+
+# Workspace internals
+
+This page is the bring-your-own-image contract. It explains what joining the
+proxy's network namespace imposes on your workspace container — which `docker
+run` flags stop working, how users and mounts behave, and the SELinux handling on
+Fedora and RHEL. Read it when you are using a custom image, debugging a container
+that will not join the network, or working on a Linux host with SELinux enforcing.
+
 
 The **workspace** is whatever container the user runs to do their work
 behind credproxy — an LLM agent, a CI runner, a dev shell, a batch job.

@@ -2,7 +2,7 @@
 
 A *provider* is a host-side executable that fetches secret values from a
 backend, speaking the small versioned stdin/stdout protocol documented in
-`docs/providers.md`. This module resolves a provider by name and execs it,
+`docs/reference/providers.md`. This module resolves a provider by name and execs it,
 mapping its exit codes to typed errors. The CLI pushes the *resolved* values
 to the proxy; the protocol deliberately says nothing about who the parent is
 (today the CLI, tomorrow maybe a daemon).
@@ -38,7 +38,7 @@ PROTOCOL_VERSION = 1
 # (inherited) terminal for a passphrase or MFA tap.
 FETCH_TIMEOUT = 120.0
 
-# Exit-code meanings from the provider protocol (docs/providers.md).
+# Exit-code meanings from the provider protocol (docs/reference/providers.md).
 EXIT_NOT_FOUND = 2
 EXIT_UNSUPPORTED = 3
 

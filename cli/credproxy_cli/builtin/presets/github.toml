@@ -7,7 +7,7 @@
 # checks still pass and there is no hand-computed base64.
 #
 # `default_provider` / `default_secret` make the common case flagless: a bare
-# `binding add --preset github` wires all three off an existing `gh` login.
+# `preset add github` wires all three off an existing `gh` login.
 # `default_secret` applies only when the resolved provider is `default_provider`
 # (a ref's meaning is provider-specific). The preset's name is the filename stem.
 

@@ -1,4 +1,13 @@
+[← docs index](../README.md) · [Concepts](../concepts.md)
+
 # Workspace configuration
+
+This is the reference for the workspace TOML file — every field, and the
+commands that edit it. Reach for it when you want the exact name or shape of a
+setting the guide mentioned in passing, or when you would rather edit the file
+directly than run a command. New to credproxy? Follow [the
+guide](../guide/01-install.md) first; this page assumes you already know what a
+workspace and a binding are.
 
 A workspace is defined by a single TOML file. That file is the **source of
 truth**: imperative commands (`workspace create`, `binding add`, …) are sugar
@@ -107,7 +116,7 @@ hosts    = ["sts.amazonaws.com"]
 |---|---|---|---|
 | `image` | string | **required** | The workspace container image — your own image; never modified or privileged. `credproxy create` scaffolds this to a devcontainers base that ships a non-root sudo user (`vscode`, uid 1000) plus curl + ca-certificates (so the bootstrap and a non-root shell work with no setup), along with the matching `user`/`home`/`map_host_user`. To run a different image, edit `image` here (and `user`/`home` to match — the scaffold comments explain). There is no built-in default: `image` is mandatory, and omitting it is an error. |
 | `home` | string | _(none)_ | Sugar for a managed volume named `home` mounted at this (absolute) path — the persistent, image-seeded home. **Optional**: omit it for an ephemeral home (the image's, lost on recreate). The volume survives stop/start and recreate; wiped by `recreate --reset-volume home` or `delete`. Also the default `workdir`. |
-| `mounts` | list | `[]` | Things mounted into the workspace. A **string** is a host **bind** (`"SRC:DST[:ro]"`; `~` expanded on `SRC`, which must be an existing absolute path; `DST` absolute). A **table** is a typed mount with exactly one of: `{ bind = "SRC", target = "/dst", readonly = false }` (host bind), `{ volume = "NAME", target = "/dst" }` (a managed named volume — persistent, image-seeded, ownership-clean; namespaced per workspace; great for caches), or `{ overlay = "REL", target = "/dst" }` (a path **relative to an overlay dir**, searched in declared order and confined within the winning overlay, read-only by default — for static files shipped with a fork; see [overlays.md](overlays.md)). No two mounts may share a `target`; no two volumes a name (`home` is reserved for the home sugar). Managed volumes can also be added with `credproxy workspace NAME mount add --volume VOL --target PATH [--ro] [--preserve]` (a surgical TOML edit; `--volume home` writes the home sugar) — see *Adding a volume, keeping existing data* below. |
+| `mounts` | list | `[]` | Things mounted into the workspace. A **string** is a host **bind** (`"SRC:DST[:ro]"`; `~` expanded on `SRC`, which must be an existing absolute path; `DST` absolute). A **table** is a typed mount with exactly one of: `{ bind = "SRC", target = "/dst", readonly = false }` (host bind), `{ volume = "NAME", target = "/dst" }` (a managed named volume — persistent, image-seeded, ownership-clean; namespaced per workspace; great for caches), or `{ overlay = "REL", target = "/dst" }` (a path **relative to an overlay dir**, searched in declared order and confined within the winning overlay, read-only by default — for static files shipped with a fork; see [overlays.md](../advanced/overlays.md)). No two mounts may share a `target`; no two volumes a name (`home` is reserved for the home sugar). Managed volumes can also be added with `credproxy workspace NAME mount add --volume VOL --target PATH [--ro] [--preserve]` (a surgical TOML edit; `--volume home` writes the home sugar) — see *Adding a volume, keeping existing data* below. |
 | `env` | table (string → string) | `{}` | Passed to the container as `-e KEY=VALUE`. Both keys and values must be strings. |
 | `setup` | list of strings | `[]` | Shell commands run **once**, right after the container is (re)created, via `sh -lc`. A failing command stops `start` and leaves the container in place for debugging. Re-run only happens when the container is recreated (see drift below), not on every `start`. |
 | `run_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the workspace `docker run`. credproxy's structural flags (`--name`, labels, `--network`, the home volume) are applied **after** these and win on conflict, so `run_flags` can't detach the netns or rename the container; additive flags (`--userns`, an extra `--mount`/`-v`, `--security-opt`) take effect. The main use is runtime-specific uid mapping (see *Non-root user & mount ownership* below). |
@@ -325,7 +334,9 @@ surgical edit that preserves your comments and ordering. After that the values
 are static — the file stays the single source of truth, with nothing held only
 in memory.
 
-**Host patterns.** A `hosts` entry without `*` is matched exactly (the common
+#### Host patterns
+
+A `hosts` entry without `*` is matched exactly (the common
 case, and the fast path). An entry containing `*` is a **glob**, where `*` spans
 any characters including dots — so one binding can cover a family of endpoints:
 
@@ -376,7 +387,7 @@ any host it **newly TLS-intercepts** (a preset rule on a bindings-free host flip
 it — see [`rules.md`](rules.md#interception-is-a-union--a-rule-can-flip-a-host-to-intercepted)). `credproxy preset list`
 shows every pack's full expansion (bindings and rules) before you apply. Presets
 are data in the layered registry, so an org ships its own by dropping a TOML in
-an overlay — see [`overlays.md`](overlays.md).
+an overlay — see [`overlays.md`](../advanced/overlays.md).
 
 Injector definitions are a separate declarative file type (scheme, params,
 placeholder pattern, env hint) — see [`injectors.md`](injectors.md). Providers

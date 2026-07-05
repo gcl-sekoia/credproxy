@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# credproxy provider: bw (Bitwarden)  —  protocol: docs/providers.md
+# credproxy provider: bw (Bitwarden)  —  protocol: docs/reference/providers.md
 #
 # A provider is a standalone executable speaking the batch protocol. Everything
 # specific to THIS provider is the metadata block and the get() function; the
