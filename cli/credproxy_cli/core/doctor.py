@@ -47,14 +47,20 @@ def run(ws_name: str | None = None, *, fetch: bool = False) -> list[Check]:
     traversal validation every other command uses -- so `doctor '../../etc/passwd'`
     is a clean error, not a config read outside the workspaces dir. `list_names()`
     only returns already-valid names, so the scan-all path needs no re-validation."""
-    checks = _env_checks()
     targets = [for_name(ws_name)] if ws_name else [Workspace(n) for n in list_names()]
+    # An attached workspace has no container/image of its own -- its containers are
+    # managed externally -- so a `doctor NAME` for one skips the proxy-image env
+    # check (docker is still checked; discovery may need it). The scan-all path
+    # keeps the image check (some workspace may be managed).
+    from .config import quick_attach
+    skip_image = bool(ws_name) and len(targets) == 1 and quick_attach(targets[0])
+    checks = _env_checks(skip_image=skip_image)
     for ws in targets:
         checks += _workspace_checks(ws, fetch=fetch)
     return checks
 
 
-def _env_checks() -> list[Check]:
+def _env_checks(*, skip_image: bool = False) -> list[Check]:
     out: list[Check] = []
     if shutil.which("docker") is None:
         # Nothing else works without the engine; stop here with a clear hint.
@@ -69,11 +75,14 @@ def _env_checks() -> list[Check]:
     except (OSError, subprocess.SubprocessError) as e:
         out.append(_fail("docker", f"`docker info` failed: {e}"))
 
-    try:
-        ImageEnv.load(IMAGE_TAG)
-        out.append(_ok("image", f"proxy image {IMAGE_TAG} present + valid"))
-    except CredproxyError as e:
-        out.append(_fail("image", str(e), "run `credproxy dev build`"))
+    # An attached-only `doctor NAME` doesn't run credproxy's proxy container, so
+    # the proxy image needn't be built locally -- skip the check.
+    if not skip_image:
+        try:
+            ImageEnv.load(IMAGE_TAG)
+            out.append(_ok("image", f"proxy image {IMAGE_TAG} present + valid"))
+        except CredproxyError as e:
+            out.append(_fail("image", str(e), "run `credproxy dev build`"))
 
     # One existence check per EXPLICITLY configured overlay entry (index-
     # qualified so a --json consumer can't collide two). Only when
@@ -98,12 +107,25 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
         return [_fail(f"ws:{ws.name}", f"workspace '{ws.name}' has no config file",
                       f"credproxy workspace create {ws.name}")]
     out: list[Check] = []
-    from .config import load_config
+    from .config import load_config, quick_attach
+    attached = quick_attach(ws)
     try:
-        load_config(ws)
-        out.append(_ok(f"ws:{ws.name}:config", f"[{ws.name}] container config valid"))
+        cfg = load_config(ws)
+        label = "attach block valid" if attached else "container config valid"
+        out.append(_ok(f"ws:{ws.name}:config", f"[{ws.name}] {label}"))
     except CredproxyError as e:
+        cfg = None
         out.append(_fail(f"ws:{ws.name}:config", f"[{ws.name}] config: {e}"))
+    if attached:
+        # The push (managed or attached) is bearer-authed with the host token, so
+        # a missing/empty token would fail every push -- surface it here.
+        tok = ws.token_path
+        out.append(
+            _ok(f"ws:{ws.name}:token", f"[{ws.name}] auth token present")
+            if tok.exists() and tok.read_text().strip() else
+            _fail(f"ws:{ws.name}:token", f"[{ws.name}] auth token missing/empty",
+                  f"recreate it with `credproxy workspace {ws.name} push` "
+                  f"(or delete + recreate the workspace)"))
     out += _binding_checks(ws, fetch=fetch)
     out += _script_compile_checks(ws)
     out += _rule_checks(ws)

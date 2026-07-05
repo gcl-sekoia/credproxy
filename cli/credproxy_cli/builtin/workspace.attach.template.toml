@@ -1,0 +1,34 @@
+# credproxy ATTACHED workspace config.
+# The workspace + proxy containers are run by an external tool (Docker Compose,
+# a devcontainer, a CI job); credproxy manages ONLY this workspace's credentials
+# and pushes them to the externally-run proxy. Push with:
+#     credproxy workspace {name} push
+# (there is no start/stop/enter here -- the container lifecycle is not ours).
+
+# How to reach the externally-run proxy's admin API (exactly ONE selector).
+# `create --attach SELECTOR` stamps this for you; edit it to change the target.
+#   compose_project = "P"  -- find the proxy by its Docker Compose labels
+#                             (project=P, service=proxy). The common case.
+#   container = "NAME_OR_ID"        -- a specific proxy container.
+#   discover = "label=value,..."    -- match by arbitrary container labels.
+#   admin_url = "http://127.0.0.1:PORT"  -- a fixed loopback admin URL. The wire
+#                             carries resolved secrets over plain HTTP, so the
+#                             host MUST be loopback (127.0.0.0/8 or localhost).
+attach = { compose_project = "{name}" }
+
+# Optional host directory this workspace is "for", so a loose `credp push` run
+# from at/under it resolves here (cwd-addressing). Host-side only.
+# directory = "/abs/path/to/project"
+
+# Credential bindings -- identical to a managed workspace. Each ties an injector
+# (how a credential is shaped into a request) to a provider (where the value
+# comes from), scoped to one or more hosts. The real secret never enters the
+# workspace; the proxy swaps the placeholder for the real value at egress.
+# Add them with `credproxy workspace {name} binding add` (or a `preset`), or
+# uncomment and edit:
+# [[binding]]
+# injector = "bearer"            # a scheme; see `credproxy injector list`
+# provider = "env"               # a value source; see `credproxy provider list`
+# secret   = "GITHUB_TOKEN"      # ref the provider resolves (env: a host env var name)
+# hosts    = ["api.github.com"]
+# name + placeholder + env are auto-generated; override here if needed.
