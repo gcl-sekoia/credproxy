@@ -56,8 +56,89 @@ _VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 KNOWN_KEYS = frozenset({
     "image", "home", "directory", "mounts", "env", "setup", "user", "workdir",
     "enter_prelude", "shell", "exec_flags", "run_flags", "map_host_user",
-    "user_uid", "auto_stop", "binding", "rule",
+    "user_uid", "auto_stop", "binding", "rule", "attach",
 })
+
+# The `attach` selector keys. Exactly one must be present. `compose_project` is
+# sugar for a `discover` on the Compose project + service=proxy labels (the ONLY
+# Compose-aware bit); it is normalized to `discover` at load.
+_ATTACH_SELECTORS = ("admin_url", "container", "discover", "compose_project")
+
+# Every container-lifecycle key an attached workspace may NOT carry -- credproxy
+# manages only credentials/config for an attached workspace; its containers are
+# run externally (Compose/devcontainers/CI). `directory` (host-side cwd
+# resolution) and `[[binding]]`/`[[rule]]` stay valid.
+_ATTACH_EXCLUSIVE = frozenset({
+    "image", "home", "mounts", "env", "setup", "user", "user_uid",
+    "map_host_user", "run_flags", "shell", "workdir", "enter_prelude",
+    "exec_flags", "auto_stop",
+})
+
+
+def _parse_attach(raw_attach, source: str) -> dict:
+    """Validate + normalize an `attach` table into exactly one selector:
+    `{"admin_url": U}` | `{"container": X}` | `{"discover": SPEC}`. Enforces one
+    selector, non-empty string values, `discover`/`compose_project` shape, and the
+    loopback-only rule on `admin_url` (I8). `compose_project = "P"` normalizes to
+    `discover = "com.docker.compose.project=P,com.docker.compose.service=proxy"`."""
+    if not isinstance(raw_attach, dict):
+        raise ConfigError(f"{source}: `attach` must be a table")
+    extra = sorted(set(raw_attach) - set(_ATTACH_SELECTORS))
+    if extra:
+        raise ConfigError(
+            f"{source}: `attach` has unknown key(s): {', '.join(extra)} "
+            f"(one of {', '.join(_ATTACH_SELECTORS)})")
+    present = [k for k in _ATTACH_SELECTORS if k in raw_attach]
+    if len(present) != 1:
+        raise ConfigError(
+            f"{source}: `attach` needs exactly one of "
+            f"{', '.join(_ATTACH_SELECTORS)} (got {len(present)})")
+    key = present[0]
+    val = raw_attach[key]
+    if not isinstance(val, str) or not val:
+        raise ConfigError(f"{source}: `attach.{key}` must be a non-empty string")
+
+    if key == "compose_project":
+        return {"discover": f"com.docker.compose.project={val},"
+                            f"com.docker.compose.service=proxy"}
+    if key == "discover":
+        from .push import parse_discover
+        parse_discover(val)   # validates the k=v,k=v shape (raises ConfigError)
+        return {"discover": val}
+    if key == "admin_url":
+        from .push import normalize_admin_url, require_loopback
+        url = normalize_admin_url(val)
+        require_loopback(url)
+        return {"admin_url": url}
+    return {"container": val}
+
+
+def _attached_config(raw: dict, ws: Workspace) -> dict:
+    """The normalized config for an attached workspace: the `attach` selector plus
+    every container-lifecycle field defaulted to empty/None, so the shape matches
+    the managed path (inspect/resolve read one dict). Rejects any lifecycle key
+    (mutual exclusion) before validating the selector."""
+    offending = sorted(k for k in raw if k in _ATTACH_EXCLUSIVE)
+    if offending:
+        raise ConfigError(
+            f"{ws.config_path}: `attach` is mutually exclusive with "
+            f"container-lifecycle fields -- remove: {', '.join(offending)} "
+            f"(an attached workspace's container is managed externally; credproxy "
+            f"manages only its credentials/config)")
+    attach = _parse_attach(raw["attach"], str(ws.config_path))
+
+    directory = raw.get("directory")
+    if directory is not None and (not isinstance(directory, str)
+                                  or not directory.startswith("/")):
+        raise ConfigError(f"{ws.config_path}: `directory` must be an absolute path")
+
+    return {
+        "attach": attach, "directory": directory,
+        "image": None, "home": None, "mounts": [], "env": {}, "setup": [],
+        "user": None, "workdir": None, "enter_prelude": None, "shell": None,
+        "exec_flags": [], "run_flags": [], "map_host_user": False,
+        "user_uid": None, "auto_stop": False,
+    }
 
 
 def _bind_source(raw_src: str, where: str) -> str:
@@ -185,6 +266,12 @@ def load_config(ws: Workspace) -> dict:
         raise ConfigError(
             f"{ws.config_path}: unknown key(s): {', '.join(_hint(k) for k in unknown)}"
         )
+
+    # Attached workspace: credproxy manages only credentials/config; the
+    # container is run externally. Mutually exclusive with every lifecycle field
+    # (checked in _attached_config), so it takes a distinct, container-free path.
+    if raw.get("attach") is not None:
+        return _attached_config(raw, ws)
 
     # image (mandatory -- the scaffold writes a concrete one; there is no
     # built-in default image to fall back to).
@@ -380,6 +467,7 @@ def load_config(ws: Workspace) -> dict:
             )
 
     return {
+        "attach": None,
         "image": image,
         "home": home,
         "directory": directory,
@@ -421,6 +509,17 @@ def quick_image(ws: Workspace) -> str:
         return "?"
 
 
+def quick_attach(ws: Workspace) -> bool:
+    """Best-effort "is this an attached workspace?" for verb gating, tolerant of
+    an otherwise-invalid config (a half-edited peer must not break the gate).
+    True iff a top-level `attach` table is present."""
+    try:
+        raw = tomllib.loads(ws.config_path.read_text())
+        return raw.get("attach") is not None
+    except Exception:
+        return False
+
+
 def quick_directory(ws: Workspace) -> str | None:
     """Best-effort `directory` read for cwd-resolution and `list`, tolerant of
     an otherwise-invalid config (a half-edited peer workspace must not break
@@ -434,14 +533,21 @@ def quick_directory(ws: Workspace) -> str | None:
 
 
 def set_top_level_key(text: str, key: str, value: str) -> str:
-    """Insert or replace a top-level `key = "value"` string assignment in a TOML
-    document, preserving comments and ordering. Top-level keys must precede the
-    first table header, so a new key is inserted before the first `[...]` /
-    `[[...]]` line (or appended if there is none); an existing top-level
-    assignment is replaced in place. A surgical text edit, like placeholder
-    materialization -- the TOML file stays the single source of truth."""
+    """Insert or replace a top-level `key = "value"` string assignment (see
+    set_top_level_raw); `value` is TOML-string-escaped."""
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    assignment = f'{key} = "{escaped}"'
+    return set_top_level_raw(text, key, f'"{escaped}"')
+
+
+def set_top_level_raw(text: str, key: str, raw_value: str) -> str:
+    """Insert or replace a top-level `key = <raw_value>` assignment in a TOML
+    document, preserving comments and ordering. `raw_value` is emitted verbatim
+    (already-rendered TOML -- e.g. an inline table `{ container = "x" }`). Top-level
+    keys must precede the first table header, so a new key is inserted before the
+    first `[...]`/`[[...]]` line (or appended if there is none); an existing
+    top-level assignment is replaced in place. A surgical text edit -- the TOML
+    file stays the single source of truth."""
+    assignment = f'{key} = {raw_value}'
     lines = text.splitlines(keepends=True)
     header_re = re.compile(r"\s*\[")
     key_re = re.compile(rf"\s*{re.escape(key)}\s*=")
@@ -633,3 +739,25 @@ def render_template(name: str) -> str:
             "overlays, and the builtin defaults)"
         )
     return path.read_text().replace("{name}", name)
+
+
+def render_attach_inline(selector: dict) -> str:
+    """Render a normalized attach selector (`_parse_attach`'s output) as an inline
+    TOML table, e.g. `{ container = "foo" }`. The value is TOML-escaped."""
+    (key, val), = selector.items()
+    return f'{{ {key} = {_toml_basic_str(val)} }}'
+
+
+def render_attach_template(name: str, selector: dict) -> str:
+    """Scaffold an ATTACHED workspace TOML from the resolved
+    `workspace.attach.template.toml` (user > overlay > builtin, same walk as the
+    managed template), with `{name}` filled and the template's placeholder
+    `attach = ...` line replaced by the chosen selector."""
+    path = resolve_singleton("workspace.attach.template.toml")
+    if path is None:
+        raise ConfigError(
+            "no workspace.attach.template.toml found (looked in the user config, "
+            "the overlays, and the builtin defaults)"
+        )
+    text = path.read_text().replace("{name}", name)
+    return set_top_level_raw(text, "attach", render_attach_inline(selector))

@@ -30,6 +30,7 @@ from pathlib import Path
 from aiohttp import web
 
 import config
+import log
 from config import BindingCredentials, Credentials
 
 TOKEN_PATH = Path(os.environ["CREDPROXY_TOKEN_PATH"])
@@ -39,6 +40,11 @@ CONFIG_PATH = Path(os.environ["CREDPROXY_TMPFS"]) / "config.json"
 @dataclass
 class AppState:
     creds: Credentials = field(default_factory=lambda: BindingCredentials({}))
+    # Monotonic count of accepted (validated) config pushes. 0 == no config ever
+    # accepted; >= 1 == creds-ready (what `/ready` gates on). Persisted inside the
+    # tmpfs config envelope so it survives a SIGHUP re-exec (the tmpfs lives on);
+    # a docker stop/start clears the tmpfs and correctly resets it to 0.
+    generation: int = 0
 
 
 STATE_KEY: web.AppKey[AppState] = web.AppKey("state", AppState)
@@ -61,12 +67,16 @@ def load_initial_state() -> AppState:
     if not CONFIG_PATH.exists():
         return AppState()
     try:
-        creds = config.load_resolved(
-            json.loads(CONFIG_PATH.read_text()), source=str(CONFIG_PATH)
-        )
+        raw = json.loads(CONFIG_PATH.read_text())
+        creds = config.load_resolved(raw, source=str(CONFIG_PATH))
     except config.ConfigError as e:
         raise SystemExit(f"[admin] persisted config invalid: {e}")
-    return AppState(creds=creds)
+    # Restore the generation stamped into the envelope so `/ready` stays green
+    # across a `credproxy dev reload` (SIGHUP re-exec keeps the tmpfs). A file
+    # written by an accepted push always carries `generation`; default 0 only
+    # for a hand-crafted/legacy file (pre-release, no compat burden).
+    generation = raw.get("generation", 0) if isinstance(raw, dict) else 0
+    return AppState(creds=creds, generation=generation)
 
 
 # ---- Middleware ----
@@ -98,7 +108,6 @@ async def no_store(request: web.Request, handler):
 
 @web.middleware
 async def access_log(request: web.Request, handler):
-    import log
     log.emit("api", method=request.method, path=request.path)
     return await handler(request)
 
@@ -150,12 +159,22 @@ async def admin_config(request: web.Request) -> web.Response:
     # augmentable, not baked immutable at push time.
     new_creds.adopt_runtime(state.creds)
 
+    # Bump the config generation on every accepted push (a validation failure
+    # returns above without touching it). `/ready` gates on generation >= 1, so
+    # this is the creds-ready signal that attached-workspace integrations poll.
+    generation = state.generation + 1
+
     # The whole body (including an optional `fingerprint` the host sends to mark
-    # this config version) is persisted to tmpfs; load_resolved ignores keys
-    # other than `bindings`.
-    _atomic_write(CONFIG_PATH, json.dumps(body).encode(), 0o400)
+    # this config version) is persisted to tmpfs, with `generation` folded into
+    # the envelope so it survives a SIGHUP re-exec. `generation` is proxy-internal
+    # bookkeeping the client never sends; we set it here so an incoming key can't
+    # spoof it. load_resolved ignores keys other than `bindings`/`rules`.
+    envelope = dict(body, generation=generation)
+    _atomic_write(CONFIG_PATH, json.dumps(envelope).encode(), 0o400)
     state.creds = new_creds
-    return web.json_response({"ok": True})
+    state.generation = generation
+    log.emit("api", msg="config accepted", generation=generation)
+    return web.json_response({"ok": True, "generation": generation})
 
 
 async def admin_config_get(request: web.Request) -> web.Response:

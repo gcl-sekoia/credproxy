@@ -29,6 +29,15 @@ def say(msg: str) -> None:
     print(f"[credproxy] {msg}", file=sys.stderr, flush=True)
 
 
+def _say_push_hint(ws: str, attached: bool) -> None:
+    """The follow-up hint after a config edit (binding/rule/preset add): how to
+    get it onto the proxy. Managed workspaces hint `start` (which pushes);
+    ATTACHED workspaces have no `start` -- their verb is `push` (`apply` is its
+    alias there, so mentioning it stays correct on both)."""
+    verb = "push" if attached else "start"
+    say(f"run `credproxy workspace {ws} {verb}` (or `apply`) to push it to the proxy")
+
+
 # ---- the renderer ------------------------------------------------------
 
 
@@ -160,9 +169,12 @@ class Renderer:
             print(f"  {k:<24}{short(v) if v else '(default)'}")
 
     # -- create / use / generic name ack --
-    def created(self, name: str, path: str) -> None:
+    def created(self, name: str, path: str, attached: bool = False) -> None:
         print(f"created workspace '{name}' at {path}")
-        say(f"edit {path}, then run `credproxy workspace {name} start`")
+        # An ATTACHED workspace has no `start` (its containers are external);
+        # the follow-up there is a config push.
+        verb = "push" if attached else "start"
+        say(f"edit {path}, then run `credproxy workspace {name} {verb}`")
 
     def used(self, name: str) -> None:
         print(f"default workspace is now '{name}'")
@@ -207,6 +219,18 @@ class Renderer:
     def reloaded(self, name: str) -> None:
         print(f"reloaded proxy for workspace '{name}'")
 
+    def pushed(self, name: str | None, admin_url: str, *, attached=False,
+               stateless: bool = False, as_apply: bool = False) -> None:
+        if stateless:
+            print(f"pushed config to {admin_url}")
+            return
+        kind = "attached workspace" if attached else "workspace"
+        verb = "applied (pushed)" if as_apply else "pushed config for"
+        print(f"{verb} {kind} '{name}' to {admin_url}")
+
+    def resolved(self, name: str, out: str) -> None:
+        print(f"resolved config for workspace '{name}' -> {out} (mode 0600)")
+
     def scaffolded(self, kind: str, name: str, path: str) -> None:
         print(f"scaffolded {kind} '{name}' at {path}")
 
@@ -228,6 +252,9 @@ class Renderer:
         print(f"workspace   {data['name']}")
         print(f"config      {data['config_path']}")
         c = data["config"]
+        if data.get("attach") is not None:
+            self._inspect_attached(data)
+            return
         print(f"image       {c['image']}")
         print(f"home        {c['home']}")
         if c["mounts"]:
@@ -244,6 +271,20 @@ class Renderer:
         print(f"workspace   {data['ws_status'] or 'absent'}")
         if data["host_port"] is not None:
             print(f"host port   127.0.0.1:{data['host_port']}")
+        self._inspect_tail(data)
+
+    def _inspect_attached(self, data: dict) -> None:
+        """Inspect body for an ATTACHED workspace: the attach selector + the admin
+        URL it currently resolves to (best-effort), then bindings/rules/drift."""
+        attach = data["attach"]
+        (key, val), = attach.items()
+        print(f"attach      {key} = {val}")
+        target = data.get("attach_target")
+        target_txt = target or "(unresolved -- proxy not found / docker unavailable)"
+        print(f"target      {target_txt}")
+        self._inspect_tail(data)
+
+    def _inspect_tail(self, data: dict) -> None:
         if data["bindings"]:
             print(f"bindings    {len(data['bindings'])}")
             for b in data["bindings"]:
@@ -290,7 +331,8 @@ class Renderer:
                     print(f"  {item}{bindings_qualifier}")
 
     # -- binding add --
-    def binding_added(self, name: str, ws: str, b: dict) -> None:
+    def binding_added(self, name: str, ws: str, b: dict,
+                      attached: bool = False) -> None:
         from ..core.bindings import secret_display
         print(f"added binding '{name}' to workspace '{ws}'")
         print(f"  injector    {b['injector']}")
@@ -300,6 +342,10 @@ class Renderer:
         print(f"  placeholder {b['placeholder'] or '(none)'}")
         if b.get("env"):
             print(f"  env         {b['env']}")
+        # Managed workspaces stay hintless (start/enter/apply all push); an
+        # ATTACHED workspace has no such implicit path, so hint the push.
+        if attached:
+            _say_push_hint(ws, attached=True)
 
     def bindings_added(self, ws: str, rows: list[dict]) -> None:
         """Several bindings added in one command (a preset expansion). Human mode
@@ -354,7 +400,8 @@ class Renderer:
                 print(f"FAIL  {r['name']}  (provider {r['provider']}): {r['error']}")
 
     # -- rule add / remove / list / test --
-    def rule_added(self, name: str, ws: str, r: dict) -> None:
+    def rule_added(self, name: str, ws: str, r: dict,
+                   attached: bool = False) -> None:
         print(f"added rule '{name}' to workspace '{ws}'")
         print(f"  hosts    {', '.join(r['hosts'])}")
         if r.get("methods"):
@@ -365,7 +412,7 @@ class Renderer:
               + (f" ({r['script']})" if r.get("script") else ""))
         vis = "visible" if r["visible"] else "hidden (not enumerated to the workspace)"
         print(f"  {vis}")
-        say(f"run `credproxy workspace {ws} start` (or `apply`) to push it to the proxy")
+        _say_push_hint(ws, attached)
 
     def rule_removed(self, name: str, ws: str) -> None:
         print(f"removed rule '{name}' from workspace '{ws}'")
@@ -541,7 +588,8 @@ class Renderer:
                 print(f"  rule    {r['name']:<14} {act:<7} {', '.join(r['hosts'])}{vis}")
 
     def preset_applied(self, ws: str, preset: str, bindings: list[dict],
-                       rules: list[dict], newly_intercepted: list[str]) -> None:
+                       rules: list[dict], newly_intercepted: list[str],
+                       attached: bool = False) -> None:
         nb, nr = len(bindings), len(rules)
         print(f"applied preset '{preset}' to workspace '{ws}': "
               f"{nb} binding(s), {nr} rule(s)")
@@ -558,7 +606,7 @@ class Renderer:
                 + ", ".join(newly_intercepted)
                 + " -- a workspace that hasn't bootstrapped the CA will see a "
                   "cert error there until it does")
-        say(f"run `credproxy workspace {ws} start` (or `apply`) to push it to the proxy")
+        _say_push_hint(ws, attached)
 
 
 class JsonRenderer(Renderer):
@@ -579,7 +627,7 @@ class JsonRenderer(Renderer):
     def info(self, d: dict) -> None:
         self._emit(d)
 
-    def created(self, name: str, path: str) -> None:
+    def created(self, name: str, path: str, attached: bool = False) -> None:
         self._emit({"name": name, "config_path": path})
 
     def used(self, name: str) -> None:
@@ -621,6 +669,17 @@ class JsonRenderer(Renderer):
     def reloaded(self, name: str) -> None:
         self._emit({"name": name, "reloaded": True})
 
+    def pushed(self, name: str | None, admin_url: str, *, attached=False,
+               stateless: bool = False, as_apply: bool = False) -> None:
+        if stateless:
+            self._emit({"pushed": True, "admin_url": admin_url})
+            return
+        self._emit({"workspace": name, "pushed": True, "admin_url": admin_url,
+                    "attached": bool(attached), "apply": as_apply})
+
+    def resolved(self, name: str, out: str) -> None:
+        self._emit({"workspace": name, "out": out})
+
     def scaffolded(self, kind: str, name: str, path: str) -> None:
         self._emit({"kind": kind, "name": name, "path": path})
 
@@ -632,7 +691,8 @@ class JsonRenderer(Renderer):
         out = {k: v for k, v in data.items() if not k.startswith("_")}
         self._emit(out)
 
-    def binding_added(self, name: str, ws: str, b: dict) -> None:
+    def binding_added(self, name: str, ws: str, b: dict,
+                      attached: bool = False) -> None:
         self._emit({"workspace": ws, "binding": b})
 
     def bindings_added(self, ws: str, rows: list[dict]) -> None:
@@ -654,7 +714,8 @@ class JsonRenderer(Renderer):
     def binding_test(self, results: list[dict]) -> None:
         self._emit(results)
 
-    def rule_added(self, name: str, ws: str, r: dict) -> None:
+    def rule_added(self, name: str, ws: str, r: dict,
+                   attached: bool = False) -> None:
         self._emit({"workspace": ws, "rule": r})
 
     def rule_removed(self, name: str, ws: str) -> None:
@@ -684,7 +745,8 @@ class JsonRenderer(Renderer):
         self._emit(rows)
 
     def preset_applied(self, ws: str, preset: str, bindings: list[dict],
-                       rules: list[dict], newly_intercepted: list[str]) -> None:
+                       rules: list[dict], newly_intercepted: list[str],
+                       attached: bool = False) -> None:
         self._emit({"workspace": ws, "preset": preset, "bindings": bindings,
                     "rules": rules, "newly_intercepted": newly_intercepted})
 

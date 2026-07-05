@@ -161,6 +161,8 @@ If proxy.local does not resolve, use 169.254.1.1 directly.
 
 Endpoints (all GET):
   /health        capture-readiness probe (json; 503 until intercept+CA are up)
+  /ready         creds-readiness probe (json; 503 until /health passes AND a
+                 config has been pushed -- carries {"generation": N})
   /ca.crt        CA certificate (PEM)
   /bootstrap.sh  one-shot setup: install CA + write /etc/profile.d
   /env.sh        env-var exports only (for `eval` use)
@@ -256,6 +258,35 @@ async def health(_: web.Request) -> web.Response:
     return _json(body)
 
 
+async def ready(request: web.Request) -> web.Response:
+    """Creds-readiness probe: 200 only once the proxy is BOTH capture-ready
+    (everything `/health` checks -- transparent listener accepting + CA on disk)
+    AND has accepted at least one config push (`config_generation >= 1`).
+
+    This is the signal an attached-workspace integration (Compose/devcontainers/CI)
+    gates on before handing work to the sandbox: `/health` says traffic is being
+    intercepted, `/ready` additionally says credentials have been pushed.
+
+    Gating on the generation counter -- not "bindings is non-empty" -- is
+    deliberate: a RULES-ONLY config (a guardrail proxy with zero bindings) is a
+    valid, ready state, and it bumps the generation like any other accepted push.
+
+    Kept strictly separate from `/health` (which must NEVER depend on config, or
+    standalone `start` -- which waits on `/health` and only THEN pushes -- would
+    deadlock). The body mirrors `/health`'s style and carries `generation` in
+    both states."""
+    state = request.app[STATE_KEY]
+    generation = state.generation
+    pending = await _capture_pending()
+    if generation < 1:
+        pending.append("config")
+    body = {"ok": not pending, "version": VERSION, "generation": generation}
+    if pending:
+        body["pending"] = pending
+        return _json(body, status=503)
+    return _json(body)
+
+
 async def ca_crt(_: web.Request) -> web.Response:
     try:
         pem = CA_CERT_PATH.read_bytes()
@@ -277,6 +308,10 @@ async def setup(request: web.Request) -> web.Response:
     return _json({
         "version": VERSION,
         "workspace": os.environ.get("CREDPROXY_WORKSPACE") or None,
+        # Creds-readiness counter (0 == no config pushed yet), so a workspace-side
+        # consumer can poll readiness without hitting an admin route. Discloses no
+        # secret -- just a monotonic bookkeeping integer.
+        "config_generation": state.generation,
         "ca_url": "http://proxy.local/ca.crt",
         "env": CA_ENV,
         # Least disclosure: hosts referenced ONLY by a hidden rule are withheld
@@ -306,6 +341,7 @@ async def index(_: web.Request) -> web.Response:
         "Bootstrap routes (open, no auth):\n"
         "  GET /             this page\n"
         "  GET /health       capture-readiness (503 until intercept+CA up)\n"
+        "  GET /ready        creds-readiness (503 until /health + a config push)\n"
         "  GET /ca.crt       proxy CA certificate (PEM)\n"
         "  GET /bootstrap.sh install CA + trust env  (curl -sSL proxy.local/bootstrap.sh | sh)\n"
         "  GET /env.sh       CA-trust env exports\n"
@@ -319,6 +355,7 @@ async def index(_: web.Request) -> web.Response:
 bootstrap_routes = [
     web.get("/", index),
     web.get("/health", health),
+    web.get("/ready", ready),
     web.get("/ca.crt", ca_crt),
     web.get("/bootstrap.sh", bootstrap_sh),
     web.get("/env.sh", env_sh),

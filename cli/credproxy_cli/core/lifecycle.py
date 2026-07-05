@@ -36,7 +36,10 @@ from .config import (
     render_template,
     workspace_spec_hash,
 )
-from .errors import ConfigError, DockerError, ImageError, ProxyError, WorkspaceError
+from .errors import (
+    ConfigError, CredproxyError, DockerError, ImageError, ProxyError,
+    WorkspaceError,
+)
 from .imageenv import ImageEnv
 from .workspace import Workspace, ensure_token
 from .paths import IMAGE_TAG, PROXY_DIR, atomic_write_text
@@ -143,6 +146,93 @@ def create_workspace_files(ws: Workspace) -> None:
     ws.config_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(ws.config_path, render_template(ws.name))
     ensure_token(ws)
+
+
+def create_attached_workspace_files(ws: Workspace, selector: dict) -> None:
+    """Scaffold an ATTACHED workspace: the attach template stamped with the given
+    (already-validated, normalized) selector, plus the auth token. The token is
+    still host-owned -- it authenticates the config push to the externally-run
+    proxy exactly as for a managed workspace."""
+    from .config import render_attach_template
+
+    if ws.exists():
+        raise WorkspaceError(
+            f"workspace '{ws.name}' already exists ({ws.config_path})"
+        )
+    ws.config_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(ws.config_path, render_attach_template(ws.name, selector))
+    ensure_token(ws)
+
+
+def resolve_admin_url(ws: Workspace, notify: Notify = _noop) -> str:
+    """The loopback admin base URL for a workspace's proxy, managed or attached.
+
+    Managed: the proxy container's published ephemeral port (resolved live, I6);
+    raises WorkspaceError if it isn't running (G4 -- push does not auto-start).
+    Attached: the `attach` selector resolved via docker (container/discover) or
+    used verbatim (admin_url)."""
+    from . import push as core_push
+
+    cfg = load_config(ws)
+    attach = cfg.get("attach")
+    if attach is not None:
+        return core_push.resolve_admin_url(attach, notify)
+    meta = ImageEnv.load()
+    if docker.container_status(ws.proxy_container) != "running":
+        raise WorkspaceError(
+            f"workspace '{ws.name}' proxy is not running; start it first "
+            f"(`credproxy workspace {ws.name} start`) before pushing")
+    port = docker.resolve_host_port(ws.proxy_container, meta.http_port)
+    return f"http://127.0.0.1:{port}"
+
+
+def push_workspace(ws: Workspace, notify: Notify = _noop, *,
+                   wait: bool = False, timeout: float = 120.0) -> str:
+    """The `push` verb: resolve every binding's secret and POST the FULL wire
+    config (bindings + rules, the SAME body `start` sends) to the workspace's
+    proxy -- managed or attached. Records applied-bindings/-rules (G5) so
+    `inspect` drift works. Returns the admin URL pushed to.
+
+    `wait` polls `/health` (never `/ready`, I1) until capture-ready or `timeout`.
+    A blocking per-workspace push lock makes a concurrent push WAIT then re-push
+    rather than race (never skip). Atomic fail-closed (I3): an unresolvable ref
+    aborts the whole push before anything is sent (materialize/wire_config raise)."""
+    from . import push as core_push
+    from .bindings import materialize_bindings
+    from .rules import combined_fingerprint, materialize_rules
+    from .workspace import read_token
+
+    admin_url = resolve_admin_url(ws, notify)
+    if wait:
+        core_push.wait_for_health(admin_url, timeout, notify)
+    token = read_token(ws)
+    with core_push.workspace_push_lock(ws):
+        notify("pushing config...")
+        bindings = materialize_bindings(ws, notify)
+        rules = materialize_rules(ws, notify)
+        fp = combined_fingerprint(bindings, rules)
+        core_push.push_to_target(admin_url, token, bindings, rules, fp, notify)
+        _write_applied_bindings(ws, bindings)
+        _write_applied_rules(ws, rules)
+    return admin_url
+
+
+def resolve_workspace_wire(ws: Workspace, notify: Notify = _noop) -> dict:
+    """Build the FULL wire config (bindings + rules + fingerprint) with resolved
+    secret VALUES, without contacting any proxy -- the `resolve` verb. Names and
+    placeholders are materialized (like push) so the wire is complete and valid.
+
+    The result carries real secrets: it is the one at-rest disclosure path, so
+    `resolve --out` writes it mode 0600 and warns outside the state dir."""
+    from . import push as core_push
+    from .bindings import materialize_bindings
+    from .rules import combined_fingerprint, materialize_rules
+
+    with ws.lock():
+        bindings = materialize_bindings(ws, notify)
+        rules = materialize_rules(ws, notify)
+    fp = combined_fingerprint(bindings, rules)
+    return core_push.build_wire(bindings, rules, fp)
 
 
 def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
@@ -859,18 +949,24 @@ def add_managed_volume(ws: Workspace, *, name: str, target: str,
             recreate_workspace(ws, notify=notify)
 
 
-def delete_workspace(ws: Workspace, keep_volumes: bool = False) -> None:
+def delete_workspace(ws: Workspace, keep_volumes: bool = False,
+                     *, containers: bool = True) -> None:
     """Remove both containers, the workspace's managed volumes (unless
     `keep_volumes`), the config file, and the state dir. Best-effort on the
-    Docker objects (absent ones are fine)."""
+    Docker objects (absent ones are fine).
+
+    `containers=False` (an ATTACHED workspace) removes only the config file + state
+    dir: an attached workspace owns no containers or volumes -- they are managed
+    externally -- so there is nothing to `docker rm`/`volume rm`."""
     import shutil
 
     with ws.lock():
-        docker.docker_quiet(["rm", "-f", ws.ws_container])
-        docker.docker_quiet(["rm", "-f", ws.proxy_container])
-        if not keep_volumes:
-            for vol in _workspace_volumes(ws):
-                docker.docker_quiet(["volume", "rm", vol])
+        if containers:
+            docker.docker_quiet(["rm", "-f", ws.ws_container])
+            docker.docker_quiet(["rm", "-f", ws.proxy_container])
+            if not keep_volumes:
+                for vol in _workspace_volumes(ws):
+                    docker.docker_quiet(["volume", "rm", vol])
         # Remove config file
         if ws.config_path.exists():
             ws.config_path.unlink()
@@ -921,6 +1017,11 @@ class WorkspaceInspect:
     bindings: tuple[BindingSummary, ...]
     drift: DriftReport
     rules: tuple = ()           # tuple of core.rules.Rule (traffic governance)
+    # Attached workspaces: the `attach` selector and, best-effort, the admin URL
+    # it currently resolves to (None if unresolvable / docker absent). Both None
+    # for a managed workspace.
+    attach: dict | None = None
+    attach_target: str | None = None
 
 
 def _compute_drift(
@@ -1147,6 +1248,9 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
 
     cfg = load_config(ws)
 
+    if cfg.get("attach") is not None:
+        return _inspect_attached(ws, cfg)
+
     proxy_status = docker.container_status(ws.proxy_container)
     ws_status = docker.container_status(ws.ws_container)
     running = ws_status == "running"
@@ -1190,6 +1294,44 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
         bindings=bindings,
         rules=tuple(current_rules),
         drift=drift,
+    )
+
+
+def _inspect_attached(ws: Workspace, cfg: dict) -> WorkspaceInspect:
+    """Inspect an attached workspace: the attach selector + the admin URL it
+    currently resolves to (best-effort, tolerating docker absence), plus the
+    binding/rule summary and drift against applied state -- but no container
+    status (the containers are managed externally)."""
+    import tomllib
+
+    from .bindings import _parse_bindings, _with_auto_names
+    from .rules import named_rules_from_raw
+
+    attach = cfg["attach"]
+    attach_target: str | None = None
+    try:
+        attach_target = resolve_admin_url(ws)
+    except CredproxyError:
+        attach_target = None
+
+    raw = tomllib.loads(ws.config_path.read_text())
+    parsed = _with_auto_names(_parse_bindings(raw, str(ws.config_path)))
+    bindings = tuple(
+        BindingSummary(name=b.name, injector=b.injector, provider=b.provider,
+                       secret=b.secret, hosts=b.hosts, placeholder=b.placeholder,
+                       env=b.env)
+        for b in parsed
+    )
+    current_rules = named_rules_from_raw(raw, str(ws.config_path))
+    # No managed container, so "running" is not meaningful; drift is computed
+    # against applied-bindings/-rules regardless (added/removed/changed).
+    drift = _compute_drift(ws, cfg, bindings, running=False,
+                           current_rules=current_rules)
+    return WorkspaceInspect(
+        name=ws.name, config_path=str(ws.config_path), config=cfg,
+        proxy_status=None, ws_status=None, running=False, host_port=None,
+        bindings=bindings, rules=tuple(current_rules), drift=drift,
+        attach=attach, attach_target=attach_target,
     )
 
 
