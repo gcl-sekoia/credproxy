@@ -478,6 +478,20 @@ class Renderer:
     def injector_api(self, text: str) -> None:
         print(text, end="" if text.endswith("\n") else "\n")
 
+    def script_check(self, results: list[dict]) -> None:
+        if not results:
+            return
+        for r in results:
+            status = "ok  " if r["ok"] else "FAIL"
+            prof = f" [{'/'.join(r['profiles'])}]" if r.get("profiles") else ""
+            line = f"{status}  {r['name']}  ({r['origin']}){prof}"
+            print(line)
+            if not r["ok"] and r.get("error"):
+                print(f"      {r['error']}")
+        failed = sum(1 for r in results if not r["ok"])
+        say(f"{failed} of {len(results)} script(s) FAILED to compile" if failed
+            else f"all {len(results)} script(s) compile")
+
     def injector_check(self, name: str, info: dict) -> None:
         status = "ok  " if info["ok"] else "FAIL"
         print(f"{status}  injector '{name}': {info['detail']}")
@@ -687,6 +701,9 @@ class JsonRenderer(Renderer):
 
     def injector_check(self, name: str, info: dict) -> None:
         self._emit({"name": name, **info})
+
+    def script_check(self, results: list[dict]) -> None:
+        self._emit(results)
 
 
 # Active renderer, installed by set_format() in main().

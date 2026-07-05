@@ -1644,6 +1644,7 @@ _STRICT_HELP = (
     "Definitions:\n"
     "  credproxy injector scaffold NAME [--script] | list | check NAME | api\n"
     "  credproxy provider scaffold NAME | provider list | show NAME\n"
+    "  credproxy script check [NAME]       (compile .star scripts before push)\n"
     "  credproxy preset list               (service setup packs: bindings + guardrails)\n"
     "Dev harness:\n"
     "  credproxy dev build|test|reload\n"
@@ -1676,6 +1677,7 @@ _LOOSE_HELP = (
     "Definitions:\n"
     "  credp injector scaffold NAME [--script] | list | check NAME | api\n"
     "  credp provider scaffold NAME | provider list | show NAME\n"
+    "  credp script check [NAME]       (compile .star scripts before push)\n"
     "  credp preset list               (service setup packs: bindings + guardrails)\n"
     "Dev harness:\n"
     "  credp dev build|test|reload\n"
@@ -2231,6 +2233,8 @@ def main(loose_default: bool = False) -> None:
             _dispatch_def(ctx, head, rest)
         elif head == "preset":
             _dispatch_preset(ctx, rest)
+        elif head == "script":
+            _dispatch_script(ctx, rest)
         elif head == "dev":
             _dispatch_dev(ctx, rest, trailing)
         elif loose:
@@ -2481,6 +2485,47 @@ def _compile_script_in_image(source: str) -> str | None:
         fail(f"proxy image '{IMAGE_TAG}' not found; build it with "
              f"`credproxy dev build`")
     return out or f"compile failed (exit {r.returncode})"
+
+
+def do_script_check(ctx: Ctx, name: str | None, force_container: bool) -> None:
+    """Compile the named script (or every resolvable script) in the proxy runtime
+    and report per-script results. Exit 0 iff all pass."""
+    from ..core import scriptcheck
+
+    results = scriptcheck.run(name, force_container=force_container)
+    if not results:
+        say(f"no script '{name}' found" if name else "no scripts to check")
+    render.OUT.script_check([
+        {"name": r.name, "origin": r.origin, "ok": r.ok, "error": r.error,
+         "profiles": list(r.profiles)}
+        for r in results
+    ])
+    if any(not r.ok for r in results):
+        sys.exit(1)
+
+
+def _dispatch_script(ctx: Ctx, rest: list[str]) -> None:
+    """`script` definition commands. Today just `check [NAME]` -- compile scripts
+    before push (sibling of `injector list`/`provider list`/`preset list`)."""
+    usage = ("usage: credproxy script check [NAME] [--container]\n"
+             "Compile resolvable .star scripts in the proxy runtime (on-host when\n"
+             "the Starlark deps import, else in the image). A script referenced by\n"
+             "a scripted-injector manifest is compiled under the injector profile\n"
+             "paired with that manifest; an unreferenced script is tried under both\n"
+             "the injector and rule profiles. Exit 0 iff all compile.")
+    if not rest or _wants_help(rest):
+        say(usage)
+        return
+    if rest[0] != "check":
+        fail(f"unknown script command '{rest[0]}' ({usage})")
+    args = rest[1:]
+    names = [a for a in args if not a.startswith("-")]
+    flags = [a for a in args if a.startswith("-")]
+    force_container = "--container" in flags or "--docker" in flags
+    bad = [f for f in flags if f not in ("--container", "--docker")]
+    if bad or len(names) > 1:
+        fail(usage)
+    do_script_check(ctx, names[0] if names else None, force_container)
 
 
 def _dispatch_preset(ctx: Ctx, rest: list[str]) -> None:

@@ -154,6 +154,81 @@ def test_doctor_missing_docker_reported(xdg, monkeypatch):
     assert "not found" in checks[0].message and checks[0].hint
 
 
+def _overlay_scripted(tmp_path, monkeypatch, script_body):
+    """Set up an overlay with a scripted injector `sig` + its script, and return
+    nothing (the overlay is on CREDPROXY_OVERLAY_PATH)."""
+    ov = tmp_path / "ov"
+    (ov / "scripts").mkdir(parents=True)
+    (ov / "injectors").mkdir(parents=True)
+    (ov / "injectors" / "sig.toml").write_text(
+        'scheme = "script"\nscript = "sig"\nfamily = "sign"\n'
+        'slots = ["k"]\nlocation_kind = "header"\n')
+    (ov / "scripts" / "sig.star").write_text(script_body)
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
+
+
+def test_doctor_compiles_referenced_script(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """When the Starlark runtime imports on-host (the CLI test venv), doctor
+    upgrades the script-existence probe to a real compile paired with the
+    manifest -- a valid script passes `ws:<name>:script:<script>`."""
+    _overlay_scripted(tmp_path, monkeypatch,
+                      "def on_request():\n"
+                      "    req_set_header('X', secret('k'))\n"
+                      "    return True\n")
+    _write(workspaces_dir, "sc", """
+        image = "x"
+        [[binding]]
+        name = "b"
+        injector = "sig"
+        provider = "env"
+        secret = { k = "TOK" }
+        hosts = ["api.example.com"]
+    """)
+    ids = {c.id: c for c in doctor_run("sc")}
+    assert "ws:sc:script:sig" in ids and ids["ws:sc:script:sig"].ok
+
+
+def test_doctor_flags_broken_referenced_script(xdg, workspaces_dir, tmp_path, monkeypatch):
+    _overlay_scripted(tmp_path, monkeypatch, "def on_request(\n    return True\n")
+    _write(workspaces_dir, "sc", """
+        image = "x"
+        [[binding]]
+        name = "b"
+        injector = "sig"
+        provider = "env"
+        secret = { k = "TOK" }
+        hosts = ["api.example.com"]
+    """)
+    ids = {c.id: c for c in doctor_run("sc")}
+    assert "ws:sc:script:sig" in ids and not ids["ws:sc:script:sig"].ok
+
+
+def test_doctor_skips_compile_when_starlark_absent(xdg, workspaces_dir, tmp_path, monkeypatch):
+    """No proxy runtime on-host -> the compile is skipped with a note, never a
+    failure (doctor must not require the venv/docker for this)."""
+    _overlay_scripted(tmp_path, monkeypatch,
+                      "def on_request():\n    return True\n")
+    from credproxy_cli.core import scriptcheck
+    monkeypatch.setattr(scriptcheck, "starlark_importable", lambda: False)
+    _write(workspaces_dir, "sc", """
+        image = "x"
+        [[binding]]
+        name = "b"
+        injector = "sig"
+        provider = "env"
+        secret = { k = "TOK" }
+        hosts = ["api.example.com"]
+    """)
+    ids = {c.id: c for c in doctor_run("sc")}
+    assert "ws:sc:scripts" in ids and ids["ws:sc:scripts"].ok
+    assert "skipped" in ids["ws:sc:scripts"].message
+
+
+def doctor_run(name):
+    from credproxy_cli.core import doctor
+    return doctor.run(name)
+
+
 def test_doctor_missing_workspace_reported(xdg):
     from credproxy_cli.core import doctor
     fails = [c for c in doctor.run("nope") if not c.ok]
