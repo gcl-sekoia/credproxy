@@ -1262,11 +1262,18 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
     --proxy:     proxy suite only.
     --container: force the proxy suite into the image even if the deps are
                  importable on the host (the canonical, version-pinned env).
+
+    Overlay tests: each configured overlay (`CREDPROXY_OVERLAY_PATH`) with a
+    `tests/` subdir is run as its OWN pytest invocation (its `test_*.py` module
+    basenames would collide with the repo suite under one rootdir), using the
+    same on-host-or-image fallback as the proxy suite. The full overlay chain is
+    always mounted + on the resolution path so an overlay test can resolve
+    injectors/scripts from any tier.
     """
     import importlib.util
     import subprocess
     from ..core.imageenv import ImageEnv
-    from ..core.paths import TESTS_DIR, REPO_ROOT
+    from ..core.paths import TESTS_DIR, REPO_ROOT, overlay_dirs
 
     run_cli = not proxy_only
     run_proxy = not cli_only
@@ -1291,48 +1298,104 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
             if not run_proxy:
                 sys.exit(result.returncode)
 
+    # Every configured overlay, indexed (for container mount paths) + the subset
+    # that ships a tests/ suite. The full chain is mounted even when only one
+    # overlay's tests run, so resolution sees every tier (an overlay test may
+    # resolve a definition another overlay shadows).
+    all_overlays = list(enumerate(overlay_dirs()))                  # [(i, (label, dir))]
+    overlay_suites = [(i, label, d) for i, (label, d) in all_overlays
+                      if (d / "tests").is_dir()]
+
     # Proxy suite. tests/cli/ is excluded (host-only; its module names collide
     # with the proxy suite's under one rootdir). Prefer running it ON-HOST when
     # the proxy's runtime deps import there -- it skips the ~container-startup
     # tax that dominates the inner loop -- falling back to the image otherwise.
     proxy_deps = ("mitmproxy", "aiohttp", "starlark")
     missing = [m for m in proxy_deps if importlib.util.find_spec(m) is None]
+
     if not force_container and not missing:
         say("running proxy suite on-host (deps present; --container forces the image)...")
         env = {**os.environ, "PYTHONPATH": str(PROXY_DIR)}
         host_cmd = [sys.executable, "-m", "pytest", "-v", str(TESTS_DIR),
                     "--ignore", str(TESTS_DIR / "cli")] + trailing
-        if cli_failed:
-            r = subprocess.run(host_cmd, check=False, env=env)
-            sys.exit(1 if r.returncode == 0 else r.returncode)
-        os.execvpe(sys.executable, host_cmd, env)  # replace proc; preserves TTY
+        # Exec the proxy suite (preserves TTY) ONLY when it is the last thing to
+        # run -- nothing before it failed and no overlay suites follow. Otherwise
+        # run each suite as a subprocess and combine exit codes.
+        if not cli_failed and not overlay_suites:
+            os.execvpe(sys.executable, host_cmd, env)  # replace proc
+        combined = cli_failed
+        combined |= subprocess.run(host_cmd, check=False, env=env).returncode != 0
+        # Overlay tests import `testkit` (proxy dir) + resolve the CLI package;
+        # PYTHONPATH covers both. os.environ carries CREDPROXY_OVERLAY_PATH so
+        # resolution sees the same chain we discovered above.
+        ov_env = {**os.environ,
+                  "PYTHONPATH": os.pathsep.join([str(PROXY_DIR), str(REPO_ROOT / "cli")])}
+        for i, label, d in overlay_suites:
+            say(f"running overlay tests: {label} ({d / 'tests'})...")
+            ov_cmd = [sys.executable, "-m", "pytest", "-v", str(d / "tests")]
+            combined |= subprocess.run(ov_cmd, check=False, env=ov_env).returncode != 0
+        sys.exit(1 if combined else 0)
 
     if not force_container:
         say(f"proxy deps not importable on host ({', '.join(missing)}); running the "
             f"proxy suite in the image. Install them (see proxy/requirements.txt) "
             f"for the faster on-host path.")
     meta = ImageEnv.load()
-    cmd = [
-        "docker", "run", "--rm",
-        "-v", f"{PROXY_DIR}:{meta.source}",
-        "-v", f"{TESTS_DIR}:/opt/tests",
-        # Read-only so the proxy suite can validate the CLI's builtin scripts
-        # (the dogfood .star) against the Python built-ins -- single source of
-        # truth, even though the proxy never reads cli/ at runtime.
-        "-v", f"{REPO_ROOT / 'cli'}:/opt/cli:ro",
-        "-w", "/opt",
-        "--entrypoint", "python",
-        IMAGE_TAG,
-        "-m", "pytest", "-v", "tests/", "--ignore=tests/cli",
+
+    # Mounts + CREDPROXY_OVERLAY_PATH rewrite for the whole overlay chain: each
+    # host overlay dir is bind-mounted read-only at /opt/overlays/<i> and the env
+    # var is rewritten to those container paths (declared order preserved), so
+    # resolution INSIDE the image sees the overlays rather than absent host paths.
+    overlay_mounts: list[str] = []
+    container_overlay_paths: list[str] = []
+    for i, (label, d) in all_overlays:
+        cpath = f"/opt/overlays/{i}"
+        overlay_mounts += ["-v", f"{d}:{cpath}:ro"]
+        container_overlay_paths.append(cpath)
+    overlay_env = (["-e", "CREDPROXY_OVERLAY_PATH=" + ":".join(container_overlay_paths)]
+                   if container_overlay_paths else [])
+
+    def _docker_run(pytest_args: list[str], *, extra_env: list[str]) -> list[str]:
+        return [
+            "docker", "run", "--rm",
+            "-v", f"{PROXY_DIR}:{meta.source}",
+            "-v", f"{TESTS_DIR}:/opt/tests",
+            # Read-only so the proxy suite can validate the CLI's builtin scripts
+            # (the dogfood .star) against the Python built-ins -- single source of
+            # truth, even though the proxy never reads cli/ at runtime.
+            "-v", f"{REPO_ROOT / 'cli'}:/opt/cli:ro",
+            *overlay_mounts,
+            *extra_env,
+            "-w", "/opt",
+            "--entrypoint", "python",
+            IMAGE_TAG,
+            *pytest_args,
+        ]
+
+    proxy_cmd = _docker_run(
+        ["-m", "pytest", "-v", "tests/", "--ignore=tests/cli", *trailing],
+        extra_env=[],
+    )
+    # Overlay suites run under the rewritten CREDPROXY_OVERLAY_PATH; PYTHONPATH
+    # covers the proxy dir (for `import testkit`) + the CLI package (testkit also
+    # self-inserts /opt/cli, but be explicit since overlay tests carry no conftest).
+    ov_extra_env = overlay_env + ["-e", f"PYTHONPATH={meta.source}:/opt/cli"]
+    overlay_cmds = [
+        (label, _docker_run(["-m", "pytest", "-v", f"/opt/overlays/{i}/tests"],
+                            extra_env=ov_extra_env))
+        for i, label, d in overlay_suites
     ]
-    cmd += trailing
+
     try:
-        if cli_failed:
-            # Run via subprocess so the final exit reflects the combined result.
-            r = subprocess.run(cmd, check=False)
-            sys.exit(1 if r.returncode == 0 else r.returncode)
-        # Happy path or proxy-only: exec into docker (preserves TTY).
-        os.execvp("docker", cmd)
+        if not cli_failed and not overlay_cmds:
+            # Proxy suite is the only thing to run: exec (preserves TTY).
+            os.execvp("docker", proxy_cmd)
+        combined = cli_failed
+        combined |= subprocess.run(proxy_cmd, check=False).returncode != 0
+        for label, ocmd in overlay_cmds:
+            say(f"running overlay tests in image: {label}...")
+            combined |= subprocess.run(ocmd, check=False).returncode != 0
+        sys.exit(1 if combined else 0)
     except FileNotFoundError:
         # subprocess.run / execvp both raise this if `docker` isn't on PATH.
         raise DependencyError(core_docker.DOCKER_MISSING_MSG)
