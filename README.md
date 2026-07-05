@@ -1,63 +1,106 @@
 # credproxy
 
-credproxy runs a persistent, named workspace (container) whose outbound network passes through a per-workspace credential-injecting proxy. The proxy holds the real secrets; the workspace holds only inert placeholder tokens that are format-valid for each service. When the workspace sends a request to an approved host, the proxy substitutes the placeholder for the real credential before forwarding — so an agent or tool inside the workspace authenticates normally while the actual secret never enters the container.
+**Your credentials work inside a dev container without ever being inside it.**
 
-## How it works (two containers)
+You run tools and agents in a container: a coding assistant, a CI job, a batch
+script. They need real credentials to reach GitHub, AWS, or your internal APIs.
+But putting a real token inside a container you do not fully trust is risky. A
+process could read it, log it, or exfiltrate it.
 
-A credproxy workspace is a pair of containers sharing **one network namespace**:
+credproxy solves this. Your container holds only a **placeholder** — a token of
+the right shape that carries no secret. A small **proxy** sits in front of the
+container's network. When the container calls an approved host, the proxy swaps
+the placeholder for the real credential on the way out. The tool authenticates
+normally. The real secret never enters the container.
 
-1. A privileged **proxy** container (Linux, needs `NET_ADMIN`) that owns the netns: it installs the iptables redirect rules, runs mitmproxy (transparent TLS intercept) and a small HTTP API, and injects credentials for approved hosts.
-2. **Your** workspace container — your own image, run unprivileged and **never modified** — which joins that netns.
-
-All egress from the workspace is transparently redirected to the proxy: TLS to approved hosts is terminated (the workspace trusts the proxy's CA) and gets its placeholder swapped for the real secret; everything else is byte-passthrough. Secrets live only in the proxy and enter it only via the host CLI's authenticated config push — never in the workspace. See `docs/workspace.md` and `CLAUDE.md` for the architecture.
-
-## Requirements
-
-- **Docker** (or **rootless Podman**) — credproxy is two containers, so a container engine is required. Validated on Docker Desktop (macOS/Windows) and rootless Podman (Fedora/RHEL).
-- **Python ≥ 3.11** for the host CLI (uses stdlib `tomllib`).
-- **No installation needed for normal use.** The `bin/credproxy` and `bin/credp` shims put `cli/` on `sys.path` and run the standard-library-only CLI directly from a checkout — clone the repo and run `./bin/credproxy …`. (`uv sync` / `pip install` is only for packaging or running the test suite.)
-
-## Quickstart
-
-```sh
-# 1. Build the proxy image (needs the repo checkout)
-./bin/credproxy dev build
-
-# 2. Create a workspace (scaffolds a config file; edit it for image/mounts/env)
-./bin/credproxy workspace create myproj
-
-# 3. Add a credential binding (a GitHub PAT spans bearer + basic hosts, so use
-#    the preset; for a single host/scheme use `--injector bearer --host H`)
-./bin/credproxy workspace myproj binding add \
-    --preset github --provider env --secret GITHUB_TOKEN
-
-# 4. Start the workspace (resolves secrets, pushes config, starts containers)
-./bin/credproxy workspace myproj start
-
-# 5. Enter the workspace
-./bin/credproxy workspace myproj enter
+```mermaid
+flowchart LR
+    subgraph WS["Workspace container"]
+        tool["your tool<br/>sends placeholder"]
+    end
+    subgraph PX["Proxy container"]
+        swap["swap placeholder<br/>for real credential"]
+    end
+    api["Real API<br/>api.github.com"]
+    tool -->|"Bearer ghp_xxxx (fake)"| swap
+    swap -->|"Bearer real-token"| api
+    api -->|"200 OK"| swap
+    swap -->|"200 OK"| tool
 ```
 
-Inside the workspace, bootstrap the CA and fetch the placeholder bindings:
+The real credential lives on your host and enters only the proxy — never the
+workspace. See [How it works](docs/how-it-works.md) for the full picture.
+
+---
+
+## Quickstart (5 minutes)
+
+You need a container engine (Docker or rootless Podman) and Python 3.11+. Full
+setup is in the [install guide](docs/guide/01-install.md).
+
+**1. Clone the repo and put its commands on your PATH.**
 
 ```sh
-curl -sSL http://proxy.local/bootstrap.sh | sh
-curl -s http://proxy.local/setup | jq .bindings
+git clone https://github.com/gregclermont/credproxy.git
+cd credproxy
+export PATH="$PWD/bin:$PATH"
 ```
 
-## The two surfaces
+**2. Create a workspace.** Run this in the project directory you want to work in:
 
-`credproxy` is the strict, scriptable surface: every workspace is named explicitly, no defaults, no prompts. Use it in scripts and docs.
+```sh
+credp create myproject --here
+```
 
-`credp` is the human alias (`credproxy --loose`): resolves an omitted workspace from the current default, adds short aliases (`credp enter`, `credp use myproj`), and gates destructive implicit actions behind a confirmation prompt.
+**3. Start it.** The first start offers to build the proxy image. Say yes; it
+takes about a minute.
 
-Both surfaces share the same core; `--json` is available on either for machine-readable output.
+```console
+$ credp start
+proxy image 'credproxy:dev' not found — build it now (runs docker build, ~a minute)? [Y/n] y
+building proxy image 'credproxy:dev'...
+...
+workspace 'myproject' running
+```
 
-## Further reading
+**4. Add a GitHub credential.** This example reads a token from a host
+environment variable named `GITHUB_TOKEN` and sends it as a bearer token, but
+only to `api.github.com`:
 
-- `docs/configuration.md` — workspace config: the TOML file format and the CLI that edits it
-- `docs/workspace.md` — netns constraints, bootstrap guide, egress shape
-- `docs/injectors.md` — injector TOML format (how a credential is shaped into a request)
-- `docs/rules.md` — rules: block/stub/rewrite/script traffic on intercepted hosts (a credential-free guardrail; e.g. block `DELETE /repos/**`), with optional hidden rules as tripwires
-- `docs/providers.md` — provider exec protocol (writing your own backend)
-- `CLAUDE.md` — architecture guide for working on credproxy itself
+```sh
+export GITHUB_TOKEN=ghp_your_real_token   # a real token, on the host
+credp binding add \
+    --injector bearer --provider env --secret GITHUB_TOKEN \
+    --host api.github.com --env GITHUB_TOKEN
+credp start                                # re-push the new credential
+```
+
+**5. Enter the workspace and prove it works.** Inside, the real token is never
+present, yet the call succeeds:
+
+```console
+$ credp enter
+vscode@myproject:~$ export GITHUB_TOKEN=$(curl -s http://proxy.local/setup | jq -r '.bindings[0].placeholder')
+vscode@myproject:~$ curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user | jq .login
+"your-github-username"
+```
+
+The `GITHUB_TOKEN` inside the container is a placeholder. The proxy swapped in
+your real token. Watch the swap happen with `credp logs --audit`.
+
+> [!NOTE]
+> `credp` is the human command: it remembers a default workspace and adds short
+> aliases. Its strict twin is `credproxy`, which names every workspace
+> explicitly and never prompts — use `credproxy` in scripts. Both do the same
+> work.
+
+---
+
+## Three doors
+
+- **[The guide](docs/guide/01-install.md)** — start here. Install, build your
+  first workspace, learn the daily rhythm, add your first credential.
+- **[How it works](docs/how-it-works.md)** — the two containers, the shared
+  network, the placeholder swap, and why the secret stays out of the workspace.
+- **[Reference](docs/README.md)** — the full docs map: configuration, providers,
+  injectors, rules, security, troubleshooting, and advanced topics.
