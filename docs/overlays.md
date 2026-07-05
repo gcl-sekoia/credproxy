@@ -100,11 +100,12 @@ story and the no-fork bundle differ only in how the directory is named.
 
 ```
 <overlay>/
-  workspace.template.toml      # the scaffold a fresh `create` produces
-  injectors/<name>.toml        # request-shaping schemes
-  providers/<name>             # secret-source executables
-  scripts/<name>.star          # sandboxed Starlark injector / rule bodies
-  presets/<name>.toml          # service setup packs: bindings + rule guardrails
+  workspace.template.toml         # the scaffold a fresh `create` produces
+  workspace.attach.template.toml  # the scaffold `create --attach` produces (see composability.md)
+  injectors/<name>.toml           # request-shaping schemes
+  providers/<name>                # secret-source executables
+  scripts/<name>.star             # sandboxed Starlark injector / rule bodies
+  presets/<name>.toml             # service setup packs: bindings + rule guardrails
 ```
 
 > The only hardcoded engine constant is the proxy image tag (`IMAGE_TAG`). There
