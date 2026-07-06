@@ -80,13 +80,16 @@ present, yet the call succeeds:
 
 ```console
 $ credp enter
-vscode@myproject:~$ export GITHUB_TOKEN=$(curl -s http://proxy.local/setup | jq -r '.bindings[0].placeholder')
+vscode@myproject:~$ echo "$GITHUB_TOKEN"          # already set by the login shell
+credproxy_AOFWLTeyzi8jUF1YTApGxjlCpXn62z
 vscode@myproject:~$ curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user | jq .login
 "your-github-username"
 ```
 
-The `GITHUB_TOKEN` inside the container is a placeholder. The proxy swapped in
-your real token. Watch the swap happen with `credp logs --audit`.
+The `GITHUB_TOKEN` inside the container is a placeholder — a login shell exports
+it for you (the binding's `--env`, served from `http://proxy.local/exports.sh`).
+The proxy swapped in your real token. Watch the swap happen with
+`credp logs --audit`.
 
 > [!NOTE]
 > `credp` is the human command: it remembers a default workspace and adds short

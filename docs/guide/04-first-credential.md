@@ -66,11 +66,12 @@ if the containers are already up.
 ## Prove it from inside
 
 Enter the workspace. The real token is nowhere in this container, yet the call
-to GitHub succeeds:
+to GitHub succeeds — and because you gave the binding an `--env`, the placeholder
+is *already* in `$GITHUB_TOKEN` (a login shell reads `/etc/profile.d`, which
+pulls in `/exports.sh`):
 
 ```console
 $ credp enter
-vscode@myproject:~$ export GITHUB_TOKEN=$(curl -s http://proxy.local/setup | jq -r '.bindings[0].placeholder')
 vscode@myproject:~$ echo "$GITHUB_TOKEN"
 credproxy_AOFWLTeyzi8jUF1YTApGxjlCpXn62z
 vscode@myproject:~$ curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user | jq .login
@@ -83,8 +84,10 @@ and replaced it with your real token. GitHub saw the real token and answered.
 
 > [!NOTE]
 > The proxy advertises each binding's placeholder and its suggested variable
-> name at `http://proxy.local/setup`. Reading that endpoint, as above, is how a
-> tool inside the workspace learns what to send.
+> name at `http://proxy.local/setup`, where `bindings` is an object keyed by
+> name — `curl -s http://proxy.local/setup | jq -r '.bindings["bearer-env"].placeholder'`
+> returns this binding's placeholder. That endpoint is how a tool learns what to
+> send; the login-shell export above is the convenience built on top of it.
 
 ## Watch the swap
 

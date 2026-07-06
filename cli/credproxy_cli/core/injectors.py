@@ -24,6 +24,7 @@ Schema:
 """
 from __future__ import annotations
 
+import re
 import secrets
 import string
 from dataclasses import dataclass, replace
@@ -34,6 +35,15 @@ from .paths import layered_dirs
 from .schemes import SchemeSpec, build_script_spec, get_scheme, merge_params
 
 import tomllib
+
+# An env var name must be a valid shell identifier: it is interpolated
+# UNQUOTED into `export NAME=...` lines by the proxy's /exports.sh, so anything
+# else (a space, a `-`) would render a script that errors in every login
+# shell's eval. Validated here (injector hint) and in bindings._parse_bindings
+# (binding override); the proxy mirrors it defensively in bootstrap.exports_body.
+# Check with .fullmatch(), never .match() + `$`: a `$` anchor still accepts a
+# trailing newline ("FOO\n"), the exact line break-out this guard exists to stop.
+ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Default placeholder pattern when [placeholder] is omitted.
 DEFAULT_PREFIX = "credproxy_"
@@ -190,6 +200,11 @@ def _parse(path: Path, name: str, source: str) -> Injector:
     env = raw.get("env")
     if env is not None and (not isinstance(env, str) or not env):
         raise InjectorError(f"injector '{name}': `env` must be a non-empty string")
+    if env is not None and not ENV_NAME_RE.fullmatch(env):
+        raise InjectorError(
+            f"injector '{name}': `env` {env!r} must be a valid shell/env "
+            f"identifier (letters, digits, '_'; not starting with a digit)"
+        )
 
     return Injector(
         name=name,

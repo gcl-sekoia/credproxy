@@ -526,7 +526,7 @@ async def test_setup_generation_adds_no_disclosure(aiohttp_client, app):
         headers={"Authorization": "Bearer established"}, json=VALID_CONFIG)
     body = await (await client.get("/setup")).json()
     assert set(body.keys()) == {
-        "version", "workspace", "config_generation", "ca_url", "env",
+        "version", "workspace", "config_generation", "ca_url", "ca_env",
         "intercept_hosts", "bindings", "rules",
     }
 
@@ -550,6 +550,7 @@ async def test_index_route_map(aiohttp_client, app):
     assert resp.content_type == "text/plain"
     text = await resp.text()
     assert "/setup" in text and "/bootstrap.sh" in text
+    assert "/exports.sh" in text
 
 
 async def test_setup_static_fields(aiohttp_client, app):
@@ -564,9 +565,9 @@ async def test_setup_static_fields(aiohttp_client, app):
     body = await resp.json()
     assert body["ca_url"] == "http://proxy.local/ca.crt"
     assert body["version"] == bootstrap.VERSION
-    assert body["env"] == bootstrap.CA_ENV
+    assert body["ca_env"] == bootstrap.CA_ENV
     assert body["intercept_hosts"] == []
-    assert body["bindings"] == []
+    assert body["bindings"] == {}
 
 
 async def test_setup_reflects_state(aiohttp_client, app, state):
@@ -583,9 +584,11 @@ async def test_setup_reflects_state(aiohttp_client, app, state):
     body = await resp.json()
     assert body["intercept_hosts"] == ["api.github.com"]
     bindings = body["bindings"]
-    assert len(bindings) == 1
-    b = bindings[0]
-    assert b["name"] == "gh"
+    # Keyed by binding name; the key is the sole carrier of the name (no inner
+    # `name` field).
+    assert list(bindings.keys()) == ["gh"]
+    b = bindings["gh"]
+    assert "name" not in b
     assert b["placeholder"] == "ph"
     assert b["env"] == "GH_TOKEN"
     assert b["scheme"] == "bearer"
@@ -685,9 +688,10 @@ def test_workspace_bindings_function():
                           hosts=["api.example.com"]),
         ],
     )
-    result = bootstrap.workspace_bindings(creds)
-    assert len(result) == 2
-    by_name = {b["name"]: b for b in result}
+    by_name = bootstrap.workspace_bindings(creds)
+    assert set(by_name) == {"gh", "ex"}
+    # Keyed by name; the name is the key, never repeated inside the value.
+    assert "name" not in by_name["gh"]
     assert by_name["gh"]["placeholder"] == "ph1"
     assert by_name["gh"]["env"] == "GH_TOKEN"
     assert by_name["gh"]["scheme"] == "bearer"
@@ -699,7 +703,145 @@ def test_workspace_bindings_function():
 
 
 def test_workspace_bindings_empty():
-    assert bootstrap.workspace_bindings(BindingCredentials({})) == []
+    assert bootstrap.workspace_bindings(BindingCredentials({})) == {}
+
+
+# ---- /exports.sh: binding placeholder exports ----
+
+
+async def test_exports_sh_content_type(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    resp = await client.get("/exports.sh")
+    assert resp.status == 200
+    assert resp.content_type == "text/x-shellscript"
+
+
+async def test_exports_sh_empty_is_valid_script(aiohttp_client, app):
+    """No bindings -> a valid (empty) script, not a 404 or blank body."""
+    client = await aiohttp_client(app)
+    resp = await client.get("/exports.sh")
+    body = await resp.text()
+    assert body.strip().startswith("#")   # a comment line
+    import subprocess
+    r = subprocess.run(["sh", "-n"], input=body, text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr
+
+
+async def test_exports_sh_happy_path(aiohttp_client, app, state):
+    """One `export ENV="placeholder"` line per binding with env + placeholder."""
+    state.creds = BindingCredentials(
+        {"api.github.com": [_xform("ph1", "real")]},
+        [InwardBinding(name="gh", placeholder="ph1", env="GITHUB_TOKEN",
+                       scheme="bearer", params={"header": "Authorization"},
+                       hosts=["api.github.com"])],
+    )
+    client = await aiohttp_client(app)
+    body = await (await client.get("/exports.sh")).text()
+    assert "export GITHUB_TOKEN='ph1'" in body
+    # The value the shell would assign is exactly the placeholder.
+    import subprocess
+    out = subprocess.run(["sh", "-c", body + "\nprintf %s \"$GITHUB_TOKEN\""],
+                         text=True, capture_output=True)
+    assert out.stdout == "ph1"
+
+
+async def test_exports_sh_skips_missing_env(aiohttp_client, app, state):
+    """A binding with no env is skipped (nothing to export it as)."""
+    state.creds = BindingCredentials(
+        {"api.example.com": [_xform("ph2", "real")]},
+        [InwardBinding(name="ex", placeholder="ph2", env=None,
+                       scheme="bearer", params={"header": "X-API-Key"},
+                       hosts=["api.example.com"])],
+    )
+    client = await aiohttp_client(app)
+    body = await (await client.get("/exports.sh")).text()
+    assert "ph2" not in body
+    assert body.strip().startswith("#")
+
+
+async def test_exports_sh_skips_null_placeholder(aiohttp_client, app, state):
+    """A sign-family binding (no placeholder, e.g. sigv4) is skipped even with
+    an env, since there is nothing inert to export."""
+    state.creds = BindingCredentials(
+        {},
+        [InwardBinding(name="aws", placeholder=None, env="AWS_THING",
+                       scheme="sigv4", params={}, hosts=["s3.amazonaws.com"])],
+    )
+    client = await aiohttp_client(app)
+    body = await (await client.get("/exports.sh")).text()
+    assert "AWS_THING" not in body
+
+
+async def test_exports_sh_quotes_defensively(aiohttp_client, app, state):
+    """A placeholder with shell metacharacters must still assign literally --
+    single-quoting disables expansion; an embedded single quote round-trips."""
+    tricky = "a'b$c`d\"e\\f"
+    state.creds = BindingCredentials(
+        {"h": [_xform(tricky, "real")]},
+        [InwardBinding(name="t", placeholder=tricky, env="TRICKY",
+                       scheme="bearer", params={"header": "Authorization"},
+                       hosts=["h"])],
+    )
+    client = await aiohttp_client(app)
+    body = await (await client.get("/exports.sh")).text()
+    import subprocess
+    out = subprocess.run(["sh", "-c", body + "\nprintf %s \"$TRICKY\""],
+                         text=True, capture_output=True)
+    assert out.stdout == tricky
+
+
+async def test_exports_sh_skips_non_identifier_env(aiohttp_client, app, state):
+    """A wire env that isn't a shell identifier (the CLI rejects these, but the
+    wire may come from a non-CLI pusher) is skipped with an observable comment
+    -- never interpolated unquoted into an `export`, which would break the whole
+    script for every binding."""
+    state.creds = BindingCredentials(
+        {"h": [_xform("ph1", "real")], "g": [_xform("ph2", "real2")]},
+        [InwardBinding(name="bad", placeholder="ph1", env="MY TOKEN",
+                       scheme="bearer", params={"header": "Authorization"},
+                       hosts=["h"]),
+         # Trailing newline: passes a `$`-anchored .match() and would inject a
+         # literal line break into the export -- only .fullmatch() catches it.
+         InwardBinding(name="sneaky", placeholder="ph3", env="FOO\n",
+                       scheme="bearer", params={"header": "Authorization"},
+                       hosts=["h"]),
+         InwardBinding(name="good", placeholder="ph2", env="OK_TOKEN",
+                       scheme="bearer", params={"header": "Authorization"},
+                       hosts=["g"])],
+    )
+    client = await aiohttp_client(app)
+    body = await (await client.get("/exports.sh")).text()
+    assert "MY TOKEN" not in body
+    assert "export FOO" not in body
+    assert "# skipped 'bad': env is not a shell identifier" in body
+    assert "# skipped 'sneaky': env is not a shell identifier" in body
+    assert "export OK_TOKEN='ph2'" in body      # the good binding still exports
+    import subprocess
+    r = subprocess.run(["sh", "-n"], input=body, text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr
+
+
+async def test_exports_sh_reflects_live_config(aiohttp_client, app, state):
+    """/exports.sh reads the live loaded config each request (not a module
+    constant), so a config swap is reflected without a proxy restart."""
+    client = await aiohttp_client(app)
+    assert "FOO" not in await (await client.get("/exports.sh")).text()
+    state.creds = BindingCredentials(
+        {"h": [_xform("phX", "real")]},
+        [InwardBinding(name="b", placeholder="phX", env="FOO",
+                       scheme="bearer", params={"header": "Authorization"},
+                       hosts=["h"])],
+    )
+    assert "export FOO='phX'" in await (await client.get("/exports.sh")).text()
+
+
+def test_bootstrap_sh_appends_dynamic_exports_line():
+    """profile.d gets the CA-trust SNAPSHOT plus a DYNAMIC line that re-fetches
+    /exports.sh on each login shell, degrading silently if the proxy is down."""
+    sh = bootstrap.BOOTSTRAP_SH
+    assert 'curl -sf http://proxy.local/env.sh > "$PROFILE_PATH"' in sh
+    assert 'http://proxy.local/exports.sh' in sh
+    assert 'eval "$(curl -sf --max-time 1 http://proxy.local/exports.sh 2>/dev/null)"' in sh
 
 
 async def test_no_store_header_present(aiohttp_client, app):
@@ -778,5 +920,8 @@ async def test_llms_txt_covers_schemes_and_network_limits(aiohttp_client, app):
     assert resp.status == 200
     txt = await resp.text()
     for anchor in ("sigv4", "oauth2-reseal", "script", "session token",
-                   "IPv6", "HTTP/3", "GLOB", "credproxy workspace NAME logs"):
+                   "IPv6", "HTTP/3", "GLOB", "credproxy workspace NAME logs",
+                   # On ONE line: wrapped inside $(...) it would split into two
+                   # commands, breaking a literal copy-paste.
+                   'eval "$(curl -s http://proxy.local/exports.sh)"'):
         assert anchor in txt, anchor

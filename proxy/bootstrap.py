@@ -5,15 +5,18 @@ CREDPROXY_HTTP_PORT redirect installed in entrypoint.sh. All routes
 are GET, all unauthenticated -- the data they expose is what the
 workspace needs to function (CA cert, env vars, placeholders).
 
-Inward API / least-disclosure: /setup returns the `bindings` list with
-only the fields the workspace needs for self-configuration:
-  name, placeholder, env, scheme, params, hosts.
-It does NOT expose provider, secret-id, or real credential values --
-those never reach the proxy from the push model anyway.
+Inward API / least-disclosure: /setup returns `bindings` as an OBJECT keyed
+by binding name (a set addressed by name -- names are unique per the wire
+loader), each value carrying only the fields the workspace needs for
+self-configuration: placeholder, env, scheme, params, hosts. `rules` stays an
+ordered ARRAY (declaration order is the evaluation-order semantic). Neither
+exposes provider, secret-id, or real credential values -- those never reach
+the proxy from the push model anyway.
 """
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 
 from aiohttp import web
@@ -78,12 +81,16 @@ if command -v update-ca-certificates >/dev/null 2>&1; then
     && update-ca-certificates >/dev/null 2>&1 || true
 fi
 
-# Persistent env vars for tools that ignore the system trust store
-# (Python requests via certifi, Node, Cargo, AWS SDKs). Picked up by
-# future login shells; for the current shell, source it manually.
-# Pulled from /env.sh so CA_ENV in the proxy is the single source.
+# Persistent env for future login shells (tools that ignore the system trust
+# store: Python requests via certifi, Node, Cargo, AWS SDKs). Two parts:
+#   1. A SNAPSHOT of the CA-trust exports (/env.sh). Static per proxy lifetime;
+#      CA trust must not depend on the proxy answering at shell startup.
+#   2. A DYNAMIC line that re-fetches the binding exports (/exports.sh) on every
+#      new login shell, so a freshly-added binding's placeholder is already in
+#      the environment. Degrades to a silent no-op if the proxy is unreachable.
 if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then
   curl -sf http://proxy.local/env.sh > "$PROFILE_PATH"
+  echo 'eval "$(curl -sf --max-time 1 http://proxy.local/exports.sh 2>/dev/null)"' >> "$PROFILE_PATH"
 fi
 
 echo "Bootstrap complete. CA bundle at $CA_PATH; env in $PROFILE_PATH."
@@ -103,12 +110,12 @@ That installs the proxy CA system-wide and writes env vars to
 everything else is byte-passthrough.
 
 For intercepted hosts, the proxy injects credentials automatically. Fetch the
-active bindings -- what to present, and where -- from /setup:
+active bindings -- what to present, and where -- from /setup. `bindings` is an
+OBJECT keyed by binding name (iterate with `to_entries`; the key is the name):
 
-    curl -s http://proxy.local/setup | jq .bindings
+    curl -s http://proxy.local/setup | jq '.bindings | to_entries[]'
 
-Each binding entry has:
-  name        -- a handle for this credential (e.g. "github-api")
+Each binding value has:
   placeholder -- the inert sentinel to send as the credential value. null for
                  sign-family schemes (sigv4) that compute auth per request.
   env         -- suggested env var name to export the placeholder as (may be null)
@@ -122,8 +129,14 @@ What YOU must do, per scheme:
                      (bearer: the header in params.header, default Authorization;
                      basic: as the username or password of HTTP Basic; body:
                      anywhere in the request body). The proxy swaps in the real
-                     value. Example: env "GITHUB_TOKEN", placeholder "ghp_xxx..."
-                     -> export GITHUB_TOKEN=ghp_xxx... and use it as usual.
+                     value. If the binding has an `env`, a LOGIN shell (after
+                     bootstrap) already exports the placeholder under that name
+                     via /etc/profile.d -- e.g. $GITHUB_TOKEN is set. The
+                     fallback for any other shell (exports every binding's
+                     placeholder into the current one):
+
+                         eval "$(curl -s http://proxy.local/exports.sh)"
+
   sigv4              No placeholder. Configure your AWS SDK with ANY dummy STATIC
                      credentials (an access key id + secret) and NO session
                      token, and sign normally; the proxy re-signs with the real
@@ -165,23 +178,23 @@ Endpoints (all GET):
                  config has been pushed -- carries {"generation": N})
   /ca.crt        CA certificate (PEM)
   /bootstrap.sh  one-shot setup: install CA + write /etc/profile.d
-  /env.sh        env-var exports only (for `eval` use)
-  /setup         JSON: ca_url, env, version, intercept_hosts, bindings, rules
+  /env.sh        CA-trust env exports only (for `eval` use)
+  /exports.sh    binding placeholder exports (`export ENV="placeholder"`)
+  /setup         JSON: ca_url, ca_env, version, intercept_hosts, bindings, rules
   /llms.txt      this file
 """
 
 
-def workspace_bindings(creds: Credentials) -> list[dict]:
-    """JSON shape for /setup's `bindings` field.
-
-    Returns only the workspace-safe binding fields: name, placeholder,
-    env, scheme, params, hosts. Real credential values are intentionally
-    absent (least disclosure). This data is safe to expose because
-    placeholders are inert sentinels and params carry no secret.
+def workspace_bindings(creds: Credentials) -> dict:
+    """JSON shape for /setup's `bindings` field: an OBJECT keyed by binding
+    name (unique per the wire loader), so the workspace addresses a binding by
+    name without scanning. The inner value carries only the workspace-safe
+    fields -- placeholder, env, scheme, params, hosts (the `name` is the key,
+    never repeated). Real credential values are intentionally absent (least
+    disclosure): placeholders are inert sentinels and params carry no secret.
     """
-    return [
-        {
-            "name": b.name,
+    return {
+        b.name: {
             "placeholder": b.placeholder,
             "env": b.env,
             "scheme": b.scheme,
@@ -189,7 +202,47 @@ def workspace_bindings(creds: Credentials) -> list[dict]:
             "hosts": b.hosts,
         }
         for b in creds.inward_bindings()
-    ]
+    }
+
+
+def _sh_squote(value: str) -> str:
+    """POSIX single-quote `value` so it is safe as a shell word. Single quotes
+    disable every expansion (`$`, backtick, `\\`, `"`), and an embedded single
+    quote is closed, escaped, and reopened (`'\\''`). Placeholders are
+    alnumeric by construction today, but this holds if that ever changes."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+# The env NAME is interpolated UNQUOTED into `export NAME=...`, so it must be a
+# shell identifier or the whole script errors in every login shell's eval. The
+# CLI rejects non-identifiers at parse (core/injectors.ENV_NAME_RE, mirrored
+# here -- the wire may come from a non-CLI pusher). Check with .fullmatch(),
+# never .match() + `$`: a `$` anchor still accepts a trailing newline
+# ("FOO\n"), the exact line break-out this guard exists to stop.
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def exports_body(creds: Credentials) -> str:
+    """Body of /exports.sh: one `export ENV="placeholder"` line per binding that
+    has BOTH an effective env var name AND a non-null placeholder. Skips
+    sign-family bindings (no placeholder, e.g. sigv4) and env-less bindings; a
+    non-identifier env is skipped with an observable comment line (env names are
+    already disclosed via /setup) rather than breaking the whole script.
+    Reads the LIVE config each call. Nothing to export -> a valid empty script."""
+    lines = []
+    for b in creds.inward_bindings():
+        if not b.env or b.placeholder is None:
+            continue
+        if not _ENV_NAME_RE.fullmatch(b.env):
+            # A comment runs to end of line; scrub CR/LF from the (wire-supplied)
+            # name so it cannot escape the comment onto a live line.
+            name = b.name.replace("\r", " ").replace("\n", " ")
+            lines.append(f"# skipped '{name}': env is not a shell identifier")
+            continue
+        lines.append(f"export {b.env}={_sh_squote(b.placeholder)}")
+    if not lines:
+        return "# no credproxy exports\n"
+    return "\n".join(lines) + "\n"
 
 
 def _json(obj, status: int = 200) -> web.Response:
@@ -303,6 +356,15 @@ async def env_sh(_: web.Request) -> web.Response:
     return web.Response(body=ENV_SH, content_type="text/x-shellscript")
 
 
+async def exports_sh(request: web.Request) -> web.Response:
+    """Binding placeholder exports for `eval`. Kept separate from /env.sh (the
+    CA-trust snapshot) so a power user can source exactly one -- and so this one
+    reflects the LIVE loaded config on every request, not a module constant."""
+    state = request.app[STATE_KEY]
+    return web.Response(body=exports_body(state.creds),
+                        content_type="text/x-shellscript")
+
+
 async def setup(request: web.Request) -> web.Response:
     state = request.app[STATE_KEY]
     return _json({
@@ -313,7 +375,7 @@ async def setup(request: web.Request) -> web.Response:
         # secret -- just a monotonic bookkeeping integer.
         "config_generation": state.generation,
         "ca_url": "http://proxy.local/ca.crt",
-        "env": CA_ENV,
+        "ca_env": CA_ENV,
         # Least disclosure: hosts referenced ONLY by a hidden rule are withheld
         # here (a hidden tripwire must not be passively enumerable via /setup);
         # the decision path still intercepts them.
@@ -345,6 +407,7 @@ async def index(_: web.Request) -> web.Response:
         "  GET /ca.crt       proxy CA certificate (PEM)\n"
         "  GET /bootstrap.sh install CA + trust env  (curl -sSL proxy.local/bootstrap.sh | sh)\n"
         "  GET /env.sh       CA-trust env exports\n"
+        "  GET /exports.sh   binding placeholder exports (export ENV=...)\n"
         "  GET /setup        bindings + workspace info (JSON)\n"
         "  GET /llms.txt     guidance for agents\n\n"
         "Admin routes (/admin/*) require a bearer token and are host-only.\n"
@@ -359,6 +422,7 @@ bootstrap_routes = [
     web.get("/ca.crt", ca_crt),
     web.get("/bootstrap.sh", bootstrap_sh),
     web.get("/env.sh", env_sh),
+    web.get("/exports.sh", exports_sh),
     web.get("/setup", setup),
     web.get("/llms.txt", llms_txt),
 ]

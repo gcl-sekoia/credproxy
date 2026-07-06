@@ -98,7 +98,7 @@ provider    = "env"
 secret      = "GITHUB_TOKEN"      # single-slot: a bare ref
 hosts       = ["api.github.com"]
 placeholder = "ghp_…"             # auto-generated if omitted
-env         = "GITHUB_TOKEN"      # defaults to the injector's hint
+env         = "GITHUB_TOKEN"      # inherits the injector's hint; `false` suppresses
 
 # A multi-slot secret uses an inline table (slot -> provider ref) instead of a
 # bare string; the scheme declares which slots it needs. E.g. a sigv4 binding
@@ -330,7 +330,7 @@ it for the real value on requests to the scoped hosts.
 | `hosts` | yes | Non-empty list of hostnames the credential may be injected on. This is the security scope: a request to any other host never sees the real value. Each entry is a literal hostname (exact match) **or** a glob pattern containing `*` — see *Host patterns* below. |
 | `name` | no | Handle used to address the binding (`binding remove`, `binding test NAME`). Auto-generated as `<injector>-<provider>`, with a `-2`, `-3`, … suffix on collision. |
 | `placeholder` | no | The inert sentinel the workspace sends (substitute schemes). Auto-generated once from the injector's placeholder pattern (format-valid for the service), then written back to the file so it never drifts. Override only if you need a specific value. |
-| `env` | no | Suggested env var name surfaced to the workspace via `/setup`. Defaults to the injector's `env` hint. |
+| `env` | no | Suggested env var name surfaced to the workspace via `/setup` (and pre-exported via `/exports.sh`); must be a valid shell identifier (letters, digits, `_`; not starting with a digit). A non-empty string overrides; **absent** inherits the injector's `env` hint; **`env = false`** suppresses it entirely (no env exposed — `binding add --no-env`). `env = ""` and `env = true` are rejected. |
 
 **Materialization.** When the tool loads a binding that omits `name` or
 `placeholder`, it generates them and writes them back into the TOML with a
@@ -405,7 +405,7 @@ file. You can always skip the command and edit the TOML directly.
 | Command | Effect on the config |
 |---|---|
 | `credproxy workspace create NAME` | Scaffold `<name>.toml` (and the state dir + `auth.token`) from the workspace template. Does not start anything. To use a non-default image, edit the scaffolded `image`. |
-| `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E]` | Append a `[[binding]]` block, materializing `name`/`placeholder` immediately. Validates the whole set before writing, so a rejected binding never lands in the file. Repeat `--secret SLOT=REF` for a multi-slot secret; a single `--secret SLOT=REF` works too when `SLOT` is the scheme's slot name (e.g. `jwt-bearer`'s `private_key`). |
+| `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E | --no-env]` | Append a `[[binding]]` block, materializing `name`/`placeholder` immediately. Validates the whole set before writing, so a rejected binding never lands in the file. Repeat `--secret SLOT=REF` for a multi-slot secret; a single `--secret SLOT=REF` works too when `SLOT` is the scheme's slot name (e.g. `jwt-bearer`'s `private_key`). |
 | `credproxy workspace NAME preset add PRESET [--provider P --secret REF]` | Apply a **service setup pack**: stamp the preset's coordinated `[[binding]]` set (sharing one placeholder) **and** its `[[rule]]` guardrails, all-or-nothing. A binding-bearing preset takes provider/secret (or its defaults); a pure-rule pack takes none. Announces any newly-intercepted host. `preset list` shows the full expansion first. |
 | `credproxy workspace NAME binding remove BINDING_NAME` | Remove that binding's block (surgical text edit). Reversible in principle, but loses tuning — gated by confirmation when targeting the default workspace on the loose surface. |
 | `credproxy workspace NAME binding list` | Read and print the bindings (materializing any missing `name`/`placeholder` first). Shows name, injector, provider, secret-id, hosts, env, and placeholder. |

@@ -120,7 +120,7 @@ charset = "alnumeric"         # alnumeric | hex | base64url
 |---|---|---|---|
 | `scheme` | string | — (required) | The typed scheme the proxy runs. Must be a known scheme. |
 | `[params]` | table | scheme defaults | Scheme-specific settings, merged onto the scheme's defaults and passed to the proxy verbatim. For `bearer`/`basic`, `header` selects the header. |
-| `env` | string | none | Suggested workspace-side env var name, surfaced via `/setup` and used as a binding's `env` default. |
+| `env` | string | none | Suggested workspace-side env var name (a valid shell identifier: letters, digits, `_`; not starting with a digit), surfaced via `/setup` (and `/exports.sh`) and used as a binding's `env` default. A binding can override it with its own `env`, or suppress it entirely with `env = false` (`binding add --no-env`). |
 | `[placeholder]` | table | the default pattern | Shape of the generated sentinel. Omit to use `prefix = "credproxy_"`, `length = 40`, `charset = "alnumeric"`. |
 | `placeholder.prefix` | string | `"credproxy_"` | Literal leading characters. |
 | `placeholder.length` | integer | `40` | Total length **including** the prefix. Must exceed the prefix length. |

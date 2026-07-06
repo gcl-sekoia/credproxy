@@ -26,7 +26,7 @@ from typing import Callable
 
 from . import hostmatch
 from .errors import ConfigError, CredproxyError
-from .injectors import Injector, find_injector
+from .injectors import ENV_NAME_RE, Injector, find_injector
 from .paths import atomic_write_text as _atomic_write_text
 from .providers import fetch_many as provider_fetch_many
 from .schemes import location_key
@@ -50,7 +50,22 @@ class Binding:
     secret: str | dict[str, str]
     hosts: tuple[str, ...]
     placeholder: str | None  # None until materialized
-    env: str | None
+    env: str | None          # explicit override; None means "no override"
+    # `env = false` in TOML: suppress the injector's suggested env entirely, so
+    # the effective env is None (omitted from the wire, /setup, /exports.sh).
+    # Distinct from `env` being absent (None), which INHERITS the injector hint.
+    env_suppressed: bool = False
+
+
+def effective_env(binding: Binding, injector: Injector) -> str | None:
+    """The env var name exposed for this binding -- the ONE place the wire build,
+    fingerprint, and describe paths agree on. `env = false` suppresses (None); an
+    explicit `env` string overrides; absent falls back to the injector's hint."""
+    if binding.env_suppressed:
+        return None
+    if binding.env is not None:
+        return binding.env
+    return injector.env
 
 
 def secret_refs(binding: Binding) -> dict[str, str]:
@@ -152,9 +167,37 @@ def _parse_bindings(raw: dict, source: str) -> list[Binding]:
         placeholder = b.get("placeholder")
         if placeholder is not None and (not isinstance(placeholder, str) or not placeholder):
             raise ConfigError(f"{source}: {where}.placeholder must be a non-empty string")
-        env = b.get("env")
-        if env is not None and (not isinstance(env, str) or not env):
-            raise ConfigError(f"{source}: {where}.env must be a non-empty string")
+        # env: a non-empty string overrides the injector's hint; the boolean
+        # `false` SUPPRESSES it (effective env None). `""` and `true` are
+        # rejected distinctly. Absent (None) inherits the injector hint.
+        env_raw = b.get("env")
+        env: str | None = None
+        env_suppressed = False
+        if env_raw is False:
+            env_suppressed = True
+        elif env_raw is True:
+            raise ConfigError(
+                f"{source}: {where}.env must be a string or `false` (to suppress "
+                f"the injector's env hint); `true` is not valid"
+            )
+        elif isinstance(env_raw, str):
+            if not env_raw:
+                raise ConfigError(
+                    f"{source}: {where}.env must be a non-empty string (use "
+                    f"`false` to suppress the injector's env hint)"
+                )
+            # /exports.sh interpolates the name unquoted into `export NAME=...`,
+            # so a non-identifier would break every login shell's eval.
+            if not ENV_NAME_RE.fullmatch(env_raw):
+                raise ConfigError(
+                    f"{source}: {where}.env {env_raw!r} must be a valid "
+                    f"shell/env identifier (letters, digits, '_'; not starting "
+                    f"with a digit)"
+                )
+            env = env_raw
+        elif env_raw is not None:
+            raise ConfigError(
+                f"{source}: {where}.env must be a string or `false`")
 
         out.append(Binding(
             name=name,            # may be None -> materialized later
@@ -164,6 +207,7 @@ def _parse_bindings(raw: dict, source: str) -> list[Binding]:
             hosts=tuple(hosts),
             placeholder=placeholder,  # may be None -> materialized later
             env=env,
+            env_suppressed=env_suppressed,
         ))
     return out
 
@@ -201,6 +245,15 @@ def validate(bindings: list[Binding], source: str) -> None:
         if b.name in names:
             raise ConfigError(f"{source}: duplicate binding name '{b.name}'")
         names.add(b.name)
+
+        # Re-checked here (not only at parse) so a constructed Binding -- the
+        # `binding add --env` path -- fails at add time, not on the next load.
+        if b.env is not None and not ENV_NAME_RE.fullmatch(b.env):
+            raise ConfigError(
+                f"{source}: binding '{b.name}': env {b.env!r} must be a valid "
+                f"shell/env identifier (letters, digits, '_'; not starting "
+                f"with a digit)"
+            )
 
         # A `*`-bearing host is a glob pattern; validate it strictly (mirrors
         # proxy/hostmatch.py) so a too-broad pattern is caught at `binding add`,
@@ -588,7 +641,9 @@ def _render_binding_block(binding: Binding) -> str:
     ]
     if binding.placeholder is not None:
         lines.append(f'placeholder = {_toml_str(binding.placeholder)}')
-    if binding.env is not None:
+    if binding.env_suppressed:
+        lines.append("env      = false")
+    elif binding.env is not None:
         lines.append(f'env      = {_toml_str(binding.env)}')
     return "\n".join(lines) + "\n"
 
@@ -762,9 +817,10 @@ def _fingerprint_items(bindings: list[Binding]) -> list[dict]:
             "scheme": injector.scheme,
             "params": injector.params,
             "placeholder": b.placeholder,
-            # EFFECTIVE env -- the same fallback wire_config pushes, so editing
-            # the injector's suggested env (with no binding override) re-pushes.
-            "env": b.env if b.env is not None else injector.env,
+            # EFFECTIVE env -- the same value wire_config pushes (suppression and
+            # the injector fallback resolved in one place), so editing the
+            # injector's suggested env, or toggling `env = false`, re-pushes.
+            "env": effective_env(b, injector),
             "provider": b.provider,
             "secret": b.secret,
         }
@@ -854,9 +910,9 @@ def wire_config(
             entry["header_default"] = spec.header_default
         if b.placeholder is not None:
             entry["placeholder"] = b.placeholder
-        # env: prefer the binding-level override, fall back to the injector's
-        # suggested env var, omit entirely if neither is set.
-        env = b.env if b.env is not None else injector.env
+        # env: the effective value (override, injector fallback, or suppressed
+        # via `env = false`); omit the wire key entirely when it resolves None.
+        env = effective_env(b, injector)
         if env is not None:
             entry["env"] = env
         wire_bindings.append(entry)
