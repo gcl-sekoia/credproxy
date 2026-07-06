@@ -297,3 +297,80 @@ def test_doctor_malformed_toml_reported_not_crash(xdg, workspaces_dir):
     ids = {c.id: c for c in checks}
     assert not ids["ws:broke:config"].ok
     assert not ids["ws:broke:rules"].ok
+
+
+# ---- runc/rootless-podman sysfs preflight (#50) -----------------------------
+
+
+def _patch_runtime(monkeypatch, *, rootless, runtime):
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless",
+                        lambda: rootless)
+    monkeypatch.setattr("credproxy_cli.core.runtime.oci_runtime",
+                        lambda: runtime)
+
+
+_KEEPID_TOML = """
+    image = "x"
+    user = "vscode"
+    map_host_user = true
+"""
+
+
+def _runc_check(checks, name="ws1"):
+    return next((c for c in checks if c.id == f"ws:{name}:runc-sysfs"), None)
+
+
+def test_doctor_runc_keepid_flags_bad_combo(xdg, workspaces_dir, monkeypatch):
+    """Rootless podman + runc + map_host_user (non-root user) -> a failing
+    runc-sysfs check carrying both remedies."""
+    import os
+    if not hasattr(os, "getuid"):
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import doctor
+    _write(workspaces_dir, "ws1", _KEEPID_TOML)
+    _patch_runtime(monkeypatch, rootless=True, runtime="runc")
+    c = _runc_check(doctor.run("ws1"))
+    assert c is not None and not c.ok
+    assert 'runtime = "crun"' in c.hint and "map_host_user = false" in c.hint
+    assert "troubleshooting" in c.hint
+
+
+def test_doctor_runc_keepid_skipped_on_crun(xdg, workspaces_dir, monkeypatch):
+    """crun handles the case -> no check emitted."""
+    from credproxy_cli.core import doctor
+    _write(workspaces_dir, "ws1", _KEEPID_TOML)
+    _patch_runtime(monkeypatch, rootless=True, runtime="crun")
+    assert _runc_check(doctor.run("ws1")) is None
+
+
+def test_doctor_runc_keepid_skipped_on_docker(xdg, workspaces_dir, monkeypatch):
+    """Real Docker (not rootless podman, no runtime name) -> no check."""
+    from credproxy_cli.core import doctor
+    _write(workspaces_dir, "ws1", _KEEPID_TOML)
+    _patch_runtime(monkeypatch, rootless=False, runtime=None)
+    assert _runc_check(doctor.run("ws1")) is None
+
+
+def test_doctor_runc_keepid_skipped_when_rootful(xdg, workspaces_dir, monkeypatch):
+    """Rootful podman on runc: no keep-id emitted -> no check."""
+    from credproxy_cli.core import doctor
+    _write(workspaces_dir, "ws1", _KEEPID_TOML)
+    _patch_runtime(monkeypatch, rootless=False, runtime="runc")
+    assert _runc_check(doctor.run("ws1")) is None
+
+
+def test_doctor_runc_keepid_skipped_when_map_host_user_off(xdg, workspaces_dir, monkeypatch):
+    """map_host_user off -> no keep-id -> no check even on runc."""
+    from credproxy_cli.core import doctor
+    _write(workspaces_dir, "ws1", '\nimage = "x"\nuser = "vscode"\n')
+    _patch_runtime(monkeypatch, rootless=True, runtime="runc")
+    assert _runc_check(doctor.run("ws1")) is None
+
+
+def test_doctor_runc_keepid_skipped_with_run_flags_userns(xdg, workspaces_dir, monkeypatch):
+    """A hand-rolled --userns in run_flags -> the user owns the mapping -> no
+    check (credproxy's keep-id isn't in force)."""
+    from credproxy_cli.core import doctor
+    _write(workspaces_dir, "ws1", _KEEPID_TOML + '    run_flags = ["--userns=host"]\n')
+    _patch_runtime(monkeypatch, rootless=True, runtime="runc")
+    assert _runc_check(doctor.run("ws1")) is None

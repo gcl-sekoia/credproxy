@@ -1,8 +1,8 @@
 """Tests for core/runtime.py: the podman-rootless probe and its failure modes.
 
-The probe shells `docker info -f '{{.Host.Security.Rootless}}'`. We stub
-subprocess.run so the test never touches a real daemon, and clear the lru_cache
-between cases.
+The probe shells `docker info` with a combined template that prints
+`<rootless> <runtime>` (e.g. "true crun"). We stub subprocess.run so the test
+never touches a real daemon, and clear the lru_cache between cases.
 """
 from __future__ import annotations
 
@@ -117,3 +117,48 @@ def test_both_predicates_share_one_round_trip(runtime, monkeypatch):
     assert runtime.is_podman() is True
     assert runtime.is_podman_rootless() is True
     assert len(calls) == 1
+
+
+# ---- oci_runtime(): the OCI runtime name, second field of the combined probe --
+
+
+def test_oci_runtime_runc(runtime, monkeypatch):
+    """Rootless podman on runc: probe prints '<rootless> runc'."""
+    _stub(monkeypatch, runtime, returncode=0, stdout="true runc\n")
+    assert runtime.oci_runtime() == "runc"
+    # ...and the rootless bool is still read from the FIRST field.
+    assert runtime.is_podman_rootless() is True
+
+
+def test_oci_runtime_crun(runtime, monkeypatch):
+    """Podman on crun: probe prints '<rootless> crun'."""
+    _stub(monkeypatch, runtime, returncode=0, stdout="true crun\n")
+    assert runtime.oci_runtime() == "crun"
+
+
+def test_oci_runtime_rootful_runc(runtime, monkeypatch):
+    """Rootful podman on runc: first field 'false', runtime still parsed."""
+    _stub(monkeypatch, runtime, returncode=0, stdout="false runc\n")
+    assert runtime.oci_runtime() == "runc"
+    assert runtime.is_podman_rootless() is False
+
+
+def test_oci_runtime_docker_template_error_is_none(runtime, monkeypatch):
+    """Real Docker: the template errors (non-zero exit) -> no runtime name."""
+    _stub(monkeypatch, runtime, returncode=1, stdout="")
+    assert runtime.oci_runtime() is None
+
+
+def test_oci_runtime_probe_failure_is_none(runtime, monkeypatch):
+    """A probe failure (no binary/timeout) -> None."""
+    _stub(monkeypatch, runtime, raises=FileNotFoundError())
+    assert runtime.oci_runtime() is None
+
+
+def test_oci_runtime_missing_second_field_is_none(runtime, monkeypatch):
+    """An older podman that leaves the runtime field blank -> None (only the
+    rootless bool is present)."""
+    _stub(monkeypatch, runtime, returncode=0, stdout="true\n")
+    assert runtime.oci_runtime() is None
+    # The rootless predicate is unaffected -- it reads the first field.
+    assert runtime.is_podman_rootless() is True

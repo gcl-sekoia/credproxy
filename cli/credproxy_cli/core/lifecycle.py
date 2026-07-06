@@ -360,6 +360,64 @@ def _host_user_run_flags(cfg: dict) -> list[str]:
     return [f"--userns=keep-id:uid={_mapped_uid(cfg)},gid={os.getgid()}"]
 
 
+def _run_flags_override_userns(cfg: dict) -> bool:
+    """True iff the user hand-rolled their own `--userns` in `run_flags`. Those
+    are applied AFTER credproxy's keep-id (docker last-wins), so the user's
+    choice is what actually takes effect -- meaning credproxy's keep-id is NOT
+    in force and the runc `sysfs` gotcha (#50) is the user's to own, not ours."""
+    run_flags = cfg.get("run_flags") or []
+    return any(f == "--userns" or f.startswith("--userns=") for f in run_flags)
+
+
+def emits_keep_id(cfg: dict) -> bool:
+    """True iff THIS run gets credproxy's `--userns=keep-id` in effect: credproxy
+    owns the mapping (`map_host_user` + non-root user) on rootless podman AND the
+    user hasn't overridden it with a `--userns` in `run_flags`.
+
+    This is the exact combination that -- together with the always-present netns
+    join (`--network container:`) -- trips the runc `sysfs` mount limitation
+    (#50). Shared by the post-failure error enrichment and doctor's predictive
+    check so they can never disagree on what credproxy emitted."""
+    return bool(_host_user_run_flags(cfg)) and not _run_flags_override_userns(cfg)
+
+
+# The runc `sysfs` failure signature (#50): runc refuses a fresh read-only sysfs
+# mount when the mounter's userns (keep-id) doesn't own the joined netns. We
+# require BOTH the `sysfs` token and a permission-denied phrase so an unrelated
+# docker-run failure is never misattributed to this cause.
+_RUNC_SYSFS_HINT = (
+    "This is the known runc limitation on rootless podman: mounting a fresh "
+    "sysfs at /sys requires the mounter's user namespace to own the network "
+    "namespace, but --userns=keep-id (from map_host_user) puts the workspace in "
+    "a different userns than the proxy's shared netns. crun handles this case; "
+    "runc does not.\n"
+    "Fix it either way:\n"
+    "  - switch podman to crun (per-user default) by adding to\n"
+    "    ~/.config/containers/containers.conf:\n"
+    "        [engine]\n"
+    '        runtime = "crun"\n'
+    "  - or set `map_host_user = false` in this workspace's TOML "
+    "(the non-root user then can't own bind mounts on rootless podman).\n"
+    "See docs/troubleshooting.md "
+    '("Workspace fails to start with a sysfs mount error (rootless podman + runc)").'
+)
+
+
+def _enrich_ws_run_error(e: DockerError, cfg: dict) -> DockerError:
+    """Augment a WORKSPACE-container `docker run` failure with an actionable hint
+    when it matches the runc `sysfs` signature AND credproxy emitted keep-id for
+    this run (#50). Otherwise the original error passes through untouched -- the
+    raw OCI text is always preserved (prepended to the hint) so it stays
+    greppable/googlable."""
+    msg = str(e)
+    low = msg.lower()
+    sysfs_signature = "sysfs" in low and (
+        "operation not permitted" in low or "oci permission denied" in low)
+    if sysfs_signature and emits_keep_id(cfg):
+        return DockerError(f"{msg}\n\n{_RUNC_SYSFS_HINT}")
+    return e
+
+
 def _mount_parent_dirs(cfg: dict) -> list[str]:
     """Directories the runtime fabricates (as container-root) for mount targets
     nested under a managed *volume* -- the intermediate path components between
@@ -761,7 +819,13 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
             status = None
     if status is None:
         notify("starting workspace container...")
-        create_ws_container(ws, cfg, spec_hash, proxy_id=proxy_id)
+        try:
+            create_ws_container(ws, cfg, spec_hash, proxy_id=proxy_id)
+        except DockerError as e:
+            # A runc-on-rootless-podman `sysfs` failure surfaces here as a raw
+            # OCI mount error; enrich it with the two remedies when we recognize
+            # it (#50). Non-matching failures re-raise unchanged.
+            raise _enrich_ws_run_error(e, cfg)
     elif status != "running":
         docker.docker(["start", ws.ws_container])
 

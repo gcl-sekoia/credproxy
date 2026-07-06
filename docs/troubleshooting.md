@@ -94,6 +94,47 @@ being relabeled or mutated. This is a no-op on non-SELinux hosts. If you still
 hit a denial, the [workspace reference](reference/workspace.md) documents the
 split-labeling model in full.
 
+## Workspace fails to start with a sysfs mount error (rootless podman + runc)
+
+On **rootless podman using the `runc` OCI runtime**, the workspace container dies
+at init while the proxy container starts fine:
+
+```
+[credproxy] docker run failed: Error: runc: runc create failed: unable to start
+container process: error during container init: error mounting "sysfs" to rootfs
+at "/sys": mount src=sysfs, dst=/sys, flags=MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC:
+operation not permitted: OCI permission denied
+```
+
+This is a known **runc** limitation, not a credproxy bug. The workspace joins the
+proxy's network namespace (`--network container:`), and the default template's
+`map_host_user = true` adds `--userns=keep-id` so a non-root user owns your bind
+mounts. keep-id puts the workspace in a **new** user namespace, but a fresh
+read-only `sysfs` mount requires the mounter's userns to own the network
+namespace — and the proxy's netns is owned by a different one. `runc` refuses the
+mount; **`crun` bind-mounts `/sys` instead and works**. `credproxy doctor` flags
+this combination, and `start` rewrites the raw OCI error with the two fixes below.
+
+Fix it either way:
+
+**Switch podman to `crun`** (its default on Fedora; the recommended fix). Add to
+`~/.config/containers/containers.conf`:
+
+```toml
+[engine]
+runtime = "crun"
+```
+
+**Or turn off the user-mapping** in the workspace's TOML — simplest if you don't
+need a non-root user to own the bind mounts:
+
+```toml
+map_host_user = false
+```
+
+credproxy deliberately does **not** auto-select `--runtime crun` or flip the
+`map_host_user` default; the runtime is your host's choice.
+
 ## "proxy source changed since the image was built"
 
 You are running from a repo checkout, and the proxy source has changed since you
