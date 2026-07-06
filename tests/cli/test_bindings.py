@@ -852,6 +852,151 @@ def test_wire_config_binding_env_overrides_injector(xdg, workspaces_dir):
     assert result["bindings"][0]["env"] == "MY_CUSTOM_TOKEN"
 
 
+# ---- env = false (suppress the injector's env hint) --------------------------
+
+
+def test_parse_env_false_suppresses(xdg):
+    from credproxy_cli.core.bindings import _parse_bindings
+
+    raw = {"binding": [{"injector": "bearer", "provider": "env", "secret": "X",
+                        "hosts": ["h.io"], "env": False}]}
+    b = _parse_bindings(raw, "test")[0]
+    assert b.env is None
+    assert b.env_suppressed is True
+
+
+def test_parse_env_empty_string_rejected(xdg):
+    from credproxy_cli.core.bindings import _parse_bindings
+    from credproxy_cli.core.errors import ConfigError
+
+    raw = {"binding": [{"injector": "bearer", "provider": "env", "secret": "X",
+                        "hosts": ["h.io"], "env": ""}]}
+    with pytest.raises(ConfigError, match="non-empty string"):
+        _parse_bindings(raw, "test")
+
+
+def test_parse_env_true_rejected(xdg):
+    from credproxy_cli.core.bindings import _parse_bindings
+    from credproxy_cli.core.errors import ConfigError
+
+    raw = {"binding": [{"injector": "bearer", "provider": "env", "secret": "X",
+                        "hosts": ["h.io"], "env": True}]}
+    with pytest.raises(ConfigError, match="`true` is not valid"):
+        _parse_bindings(raw, "test")
+
+
+def test_parse_env_non_identifier_rejected(xdg):
+    """The env NAME lands unquoted in /exports.sh's `export NAME=...`, so a
+    non-identifier (space, dash, leading digit) is rejected at parse."""
+    from credproxy_cli.core.bindings import _parse_bindings
+    from credproxy_cli.core.errors import ConfigError
+
+    # "FOO\n" (expressible in TOML as an escaped string) is the sharp case: a
+    # `$`-anchored .match() accepts it, injecting a literal newline into the
+    # export line -- only .fullmatch() rejects it.
+    for bad in ("MY TOKEN", "MY-TOKEN", "1TOKEN", "FOO\n"):
+        raw = {"binding": [{"injector": "bearer", "provider": "env",
+                            "secret": "X", "hosts": ["h.io"], "env": bad}]}
+        with pytest.raises(ConfigError, match="valid shell/env identifier"):
+            _parse_bindings(raw, "test")
+
+
+def test_validate_env_non_identifier_rejected(xdg, workspaces_dir):
+    """validate() re-checks env (the constructed-Binding `binding add --env`
+    path), so a bad --env fails at add time, not on the next load."""
+    from credproxy_cli.core.bindings import Binding, validate
+    from credproxy_cli.core.errors import ConfigError
+
+    b = Binding(name="b", injector="bearer", provider="env", secret="X",
+                hosts=("h.io",), placeholder="p", env="MY TOKEN")
+    with pytest.raises(ConfigError, match="valid shell/env identifier"):
+        validate([b], "test")
+
+
+def test_injector_env_hint_non_identifier_rejected(xdg, workspaces_dir):
+    """An injector manifest's `env` hint is held to the same identifier rule."""
+    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.errors import InjectorError
+
+    _write_injector(xdg, "bad-env", 'scheme = "bearer"\nenv = "MY TOKEN"\n')
+    with pytest.raises(InjectorError, match="valid shell/env identifier"):
+        find_injector("bad-env")
+
+
+def test_wire_config_env_false_omits_env_despite_injector_hint(xdg, workspaces_dir):
+    """`env = false` suppresses the injector's suggested env: the wire entry has
+    no `env` key even though the injector supplies one."""
+    from credproxy_cli.core.bindings import Binding, wire_config
+    _write_injector(xdg, "inj-hint", 'scheme = "bearer"\nenv = "HINT_TOKEN"\n')
+
+    inherit = Binding(name="a", injector="inj-hint", provider="env", secret="X",
+                      hosts=("h",), placeholder="PH", env=None)
+    assert wire_config([inherit], fetch_many=lambda p, r: {x: "v" for x in r}
+                       )["bindings"][0]["env"] == "HINT_TOKEN"
+
+    suppressed = Binding(name="a", injector="inj-hint", provider="env",
+                         secret="X", hosts=("h",), placeholder="PH",
+                         env=None, env_suppressed=True)
+    entry = wire_config([suppressed],
+                        fetch_many=lambda p, r: {x: "v" for x in r})["bindings"][0]
+    assert "env" not in entry
+
+
+def test_fingerprint_changes_when_env_suppressed(xdg, workspaces_dir):
+    """Toggling `env = false` changes the EFFECTIVE env (hint -> None), so the
+    fingerprint changes and the config re-pushes."""
+    from credproxy_cli.core.bindings import Binding, config_fingerprint
+    _write_injector(xdg, "inj-hint", 'scheme = "bearer"\nenv = "HINT_TOKEN"\n')
+    inherit = Binding(name="b", injector="inj-hint", provider="env", secret="X",
+                      hosts=("h",), placeholder="PH", env=None)
+    suppressed = Binding(name="b", injector="inj-hint", provider="env",
+                         secret="X", hosts=("h",), placeholder="PH",
+                         env=None, env_suppressed=True)
+    assert config_fingerprint([inherit]) != config_fingerprint([suppressed])
+
+
+def test_render_binding_block_writes_env_false(xdg):
+    """The TOML writer emits `env = false` for a suppressed binding (round-trips
+    back through the parser as suppression)."""
+    from credproxy_cli.core.bindings import (
+        Binding, _render_binding_block, _parse_bindings)
+    import tomllib
+
+    b = Binding(name="b", injector="bearer", provider="env", secret="X",
+                hosts=("h.io",), placeholder="p", env=None, env_suppressed=True)
+    block = _render_binding_block(b)
+    assert "env      = false" in block
+    parsed = _parse_bindings(tomllib.loads(block), "test")[0]
+    assert parsed.env_suppressed is True and parsed.env is None
+
+
+def test_binding_add_no_env_writes_env_false(xdg, workspaces_dir):
+    """`binding add --no-env` records `env = false` in the TOML."""
+    from test_porcelain import _run
+    _write_ws(workspaces_dir, "m", 'image = "x"\n')
+    ec, out, err = _run(["workspace", "m", "binding", "add",
+                         "--injector", "bearer", "--provider", "env",
+                         "--secret", "T", "--host", "api.github.com", "--no-env"])
+    assert ec == 0, err
+    text = (workspaces_dir / "m.toml").read_text()
+    assert "env      = false" in text
+    from credproxy_cli.core.bindings import _parse_bindings
+    import tomllib
+    b = _parse_bindings(tomllib.loads(text), "m")[0]
+    assert b.env_suppressed is True and b.env is None
+
+
+def test_binding_add_env_and_no_env_mutually_exclusive(xdg, workspaces_dir):
+    from test_porcelain import _run
+    _write_ws(workspaces_dir, "m", 'image = "x"\n')
+    ec, out, err = _run(["workspace", "m", "binding", "add",
+                         "--injector", "bearer", "--provider", "env",
+                         "--secret", "T", "--host", "api.github.com",
+                         "--env", "FOO", "--no-env"])
+    assert ec != 0
+    assert "not allowed with" in (out + err) or "--no-env" in (out + err)
+
+
 def test_wire_config_missing_placeholder_raises(xdg):
     from credproxy_cli.core.bindings import Binding, wire_config
     from credproxy_cli.core.errors import ConfigError

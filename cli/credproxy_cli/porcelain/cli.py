@@ -911,7 +911,15 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
             placeholder = a.placeholder or injector.placeholder.generate()
         else:
             placeholder = a.placeholder
-        env = a.env or injector.env
+        # `--no-env` writes `env = false` (suppress the injector's hint); else
+        # bake the effective env (explicit override, or the injector's hint) so
+        # the file records the concrete choice.
+        if a.no_env:
+            env = None
+            env_suppressed = True
+        else:
+            env = a.env or injector.env
+            env_suppressed = False
 
         binding = Binding(
             name=bname,
@@ -921,6 +929,7 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
             hosts=tuple(a.host),
             placeholder=placeholder,
             env=env,
+            env_suppressed=env_suppressed,
         )
         core_bindings.validate(existing + [binding], str(ws.config_path))
         core_bindings.append_binding(ws, binding)
@@ -1623,7 +1632,11 @@ def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     p.add_argument("--host", action="append", metavar="HOST|GLOB")
     p.add_argument("--name", dest="binding_name", default=None)
     p.add_argument("--placeholder", default=None)
-    p.add_argument("--env", default=None)
+    # --env overrides the injector's suggested env; --no-env suppresses it
+    # (writes `env = false`), so the placeholder is exposed under no env var.
+    env_group = p.add_mutually_exclusive_group()
+    env_group.add_argument("--env", default=None)
+    env_group.add_argument("--no-env", action="store_true")
 
     p = parent.add_parser("remove")
     p.add_argument("binding_name", metavar="NAME")
@@ -1917,7 +1930,10 @@ _BINDING_ADD_HELP = (
     "  --name NAME       binding name (auto: <injector>-<provider>[-N]).\n"
     "  --placeholder PH  inert sentinel swapped for the real value at egress\n"
     "                    (auto-generated for substitute schemes).\n"
-    "  --env VAR         env var name exposed to the workspace via /setup.\n"
+    "  --env VAR         env var name exposed to the workspace via /setup and\n"
+    "                    /exports.sh (defaults to the injector's suggested env).\n"
+    "  --no-env          suppress the injector's suggested env (writes\n"
+    "                    `env = false`); mutually exclusive with --env.\n"
 )
 
 _PRESET_ADD_HELP = (

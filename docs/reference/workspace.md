@@ -79,8 +79,8 @@ non-loopback interface; in practice this never matters.
 
 `/admin/*` routes on the HTTP API require a bearer token the workspace
 does not have; they return 401 to the workspace. Bootstrap routes
-(`/health`, `/ca.crt`, `/bootstrap.sh`, `/env.sh`, `/setup`,
-`/llms.txt`) are open by design.
+(`/health`, `/ca.crt`, `/bootstrap.sh`, `/env.sh`, `/exports.sh`,
+`/setup`, `/llms.txt`) are open by design.
 
 ## Bootstrap
 
@@ -91,23 +91,36 @@ curl -sSL http://proxy.local/bootstrap.sh | sh
 ```
 
 This fetches the CA, installs it system-wide (if `update-ca-certificates`
-is available), and writes `/etc/profile.d/credproxy.sh` with the env
-vars that tools like Python requests (certifi), Node, Cargo, and AWS SDKs
-need to trust the CA.
+is available), and writes `/etc/profile.d/credproxy.sh`. That file has two
+parts: a **snapshot** of the CA-trust env vars that tools like Python
+requests (certifi), Node, Cargo, and AWS SDKs need to trust the CA (static
+per proxy lifetime), plus a **dynamic** line that re-fetches the binding
+placeholder exports (`/exports.sh`) on every new login shell — so a binding
+added after bootstrap still lands its placeholder in the environment,
+degrading to a silent no-op if the proxy is unreachable.
 
-After bootstrap, fetch the credential bindings to wire up your tools:
+After bootstrap, fetch the credential bindings to wire up your tools.
+`bindings` is a JSON **object keyed by binding name**; iterate with
+`to_entries` (the key is the name):
 
 ```sh
-curl -s http://proxy.local/setup | jq .bindings
+curl -s http://proxy.local/setup | jq '.bindings | to_entries[]'
 ```
 
-Each binding entry exposes: `name`, `placeholder` (the inert sentinel to
-use as the credential value, may be null for sign-family schemes), `env`
-(suggested env var, may be null), `scheme` (how the proxy injects:
+Each binding value exposes: `placeholder` (the inert sentinel to use as the
+credential value, may be null for sign-family schemes), `env` (suggested
+env var, may be null), `scheme` (how the proxy injects:
 bearer/basic/body/sigv4/oauth2-reseal/script), `params` (scheme-specific
 settings, e.g. `{"header": "Authorization"}`), and `hosts` (the hostnames
-for which injection is active). The real credential is never exposed
-here. Use `http://169.254.1.1` directly if `proxy.local` does not resolve.
+for which injection is active). The binding's name is the object key, not a
+field. The real credential is never exposed here. Use `http://169.254.1.1`
+directly if `proxy.local` does not resolve.
+
+For a binding that has both an `env` and a placeholder, a login shell
+already exports the placeholder under that env var name (via the profile.d
+snippet above). To pull the current exports into a non-login shell,
+`eval "$(curl -s http://proxy.local/exports.sh)"`. `/setup`'s top-level
+`ca_env` field lists the CA-trust env vars (renamed from `env`).
 
 The `/setup` response also includes a top-level `workspace` field — the
 workspace's own name (or `null` if unknown) — handy for self-identification
