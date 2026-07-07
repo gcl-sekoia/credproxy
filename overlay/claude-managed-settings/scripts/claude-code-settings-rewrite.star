@@ -8,23 +8,14 @@
 
 SETTINGS = "/api/claude_code/settings"
 
-# Applied when a rule sets no `settings_patch` param. Claude Code rejects the whole
-# document -- falling back to its on-disk cache -- if a KNOWN settings key holds a
-# malformed value; unknown keys are tolerated.
-DEFAULT_PATCH = {
-    "env": {
-        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": None,
-    },
-    "permissions": {
-        "allow": None,
-        "deny": None,
-        "disableBypassPermissionsMode": None,
-        "defaultMode": None,
-    },
-    "sandbox": {
-        "enabled": None,
-    },
-}
+# Applied when a rule sets no `settings_patch` param. EMPTY on purpose: this lib is a
+# generic mechanism with NO policy of its own -- a profile supplies the real merge-patch
+# via the rule's `settings_patch` param (see the profile's [[rule]]). With the empty
+# default the rule still forces a fresh fetch but rewrites nothing, so a bare
+# `preset add` is inert until you set the param.
+# (Claude Code rejects the whole document -- falling back to its on-disk cache -- if a
+# KNOWN settings key holds a malformed value; unknown keys are tolerated.)
+DEFAULT_PATCH = {}
 
 
 def merge_patch(target, patch):

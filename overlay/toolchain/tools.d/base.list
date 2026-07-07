@@ -1,0 +1,14 @@
+# toolchain fragment — one line per tool:  <mise-name>  <command>  [description]
+#   col 1   installed via `mise use -g`
+#   col 2   command the session-context fragment probes with `command -v`
+#   col 3+  description; if present, the tool is advertised in the session context
+# The installer + inventory read the UNION of every /opt/toolchain/tools.d/*.list,
+# so add tools by shipping ANOTHER fragment (no need to copy this one). Blank lines
+# and #-comments are ignored.
+#
+# Deliberately lean + generic — a profile adds its own kit via a fragment
+# (see overlay/50-example/tools.d/extras.list for an example).
+uv          uv        Python envs/deps/run (prefer over pip & venv)
+github-cli  gh        GitHub CLI — PRs, issues, API
+ripgrep     rg        ripgrep — fast content search
+fd          fd        fast file find (prefer over find)
