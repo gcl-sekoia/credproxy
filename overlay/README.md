@@ -9,14 +9,31 @@ upstream defaults:
 user ($XDG_CONFIG_HOME/credproxy)  →  overlays (subdirs here)  →  builtin (upstream)
 ```
 
-It's how an **org or fork customizes credproxy without touching engine code**.
-Everything here is data; upstream ships this container empty (just this README),
-so a fork only ever *adds* directories and never conflicts on
-`git merge upstream`. Your entire diff against upstream lives here:
+It's how an **org or fork customizes credproxy without touching engine code** —
+everything here is data. **Upstream ships this container empty (just this README)**; a
+fork adds directories here, and since its whole diff lives in `overlay/`, it never
+conflicts on `git merge upstream`:
 
 ```sh
 mkdir overlay/acme-corp        # active immediately, labeled overlay:acme-corp
 ```
+
+**This repo is such a fork** — the overlays listed below are its additions. To build on
+them without editing them (staying merge-clean against *this* fork), **layer instead of
+edit**: give your overlay a higher priority (earlier basename) and ship a same-named
+asset to **shadow** just the piece you want — exactly what `50-example` does to
+`claude-setup`'s empty default.
+
+## What's here
+
+This fork populates the container with reusable pieces to compose, layer over, or fork:
+
+- **Lib overlays** — composable, single-purpose, inert building blocks, each with its own
+  README: `setup-runner`, `toolchain`, `git-signing`, `github-auth`, `claude-setup`,
+  `claude-managed-settings`, `claude-session-context`.
+- **`50-example`** — an opinionated worked profile that *composes* the libs; its
+  `workspace.template.toml` is what `credproxy create` stamps. A fork-me starting point
+  that also demonstrates each override style (additive fragment, file shadow, rule param).
 
 ## Layout — inside your named overlay
 

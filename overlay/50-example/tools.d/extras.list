@@ -1,0 +1,10 @@
+# Example profile's toolchain additions — merged with toolchain's base.list via the
+# union of /opt/toolchain/tools.d/*.list. Same columns: <mise-name> <command> [desc].
+# More illustration-of-the-add-pattern than necessity — trim or extend freely.
+claude      claude
+ast-grep    ast-grep  structural, syntax-aware code search & rewrite
+bat         bat       syntax-highlighted file viewer
+delta       delta     nicer git diff pager
+gron        gron      flatten JSON to greppable lines (gron|rg; gron -u reverses)
+yq          yq        query/edit YAML, JSON, TOML
+eza         eza       modern ls

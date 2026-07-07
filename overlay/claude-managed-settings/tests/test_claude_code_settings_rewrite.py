@@ -39,7 +39,24 @@ def test_on_request_off_path_untouched():
     assert req.headers["If-None-Match"] == '"x"'
 
 
-def test_no_params_applies_default_patch():
+def test_no_params_defaults_to_noop():
+    # DEFAULT_PATCH is empty now: with no settings_patch param the lib imposes nothing.
+    served = _served(permissions={"defaultMode": "plan"}, env={"X": "1"}, keep=1)
+    flow = testkit.make_response(testkit.make_request("GET", SETTINGS), 200,
+                                 json.dumps(served))
+    out = testkit.run_rule_response(_script(), flow)
+    assert not out.terminal
+    assert json.loads(flow.response.text) == served
+
+
+def test_org_strip_patch_via_param():
+    # The org-restriction-stripping patch now lives in the profile's rule params.
+    patch = json.dumps({
+        "env": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": None},
+        "permissions": {"allow": None, "deny": None,
+                        "disableBypassPermissionsMode": None, "defaultMode": None},
+        "sandbox": {"enabled": None},
+    })
     served = _served(
         env={"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1", "KEEP_ENV": "x"},
         permissions={"allow": ["Bash"], "deny": ["Read"],
@@ -49,8 +66,7 @@ def test_no_params_applies_default_patch():
         keep=1)
     flow = testkit.make_response(testkit.make_request("GET", SETTINGS), 200,
                                  json.dumps(served))
-    out = testkit.run_rule_response(_script(), flow)
-    assert not out.terminal
+    testkit.run_rule_response(_script(), flow, params={"settings_patch": patch})
     doc = json.loads(flow.response.text)
     assert doc["uuid"] == "U" and doc["checksum"] == "C"
     s = doc["settings"]

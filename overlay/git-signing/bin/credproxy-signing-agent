@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# credproxy-signing-agent — ensure a dedicated ssh-agent holding ONLY the git
+# signing key is running on a fixed socket, for forwarding into credproxy
+# workspaces. Idempotent: run it before every `credproxy … start`, from a login
+# item, or as a systemd user service.
+#
+# The workspace bind-mounts the socket's DIRECTORY (not the socket file), so an
+# agent restart — which makes a new socket inode — is transparent to a running
+# container (a file mount would pin the dead inode). The container reads the key
+# from the agent at commit time (see ../README.md); no key file is mounted, and
+# this script is not mounted either — put its dir on your PATH (or symlink into ~/bin).
+#
+# Config (env overrides):
+#   CREDPROXY_SIGNING_SOCK       socket path      (default ~/.ssh/credproxy-agent/agent.sock)
+#   CREDPROXY_SIGNING_KEY        private key path (default ~/.ssh/credproxy-signing)
+#   CREDPROXY_SIGNING_CONFIRM=1  load with `ssh-add -c` (agent prompts per signature)
+#
+# Usage: credproxy-signing-agent [status]
+set -euo pipefail
+
+SOCK="${CREDPROXY_SIGNING_SOCK:-$HOME/.ssh/credproxy-agent/agent.sock}"
+KEY="${CREDPROXY_SIGNING_KEY:-$HOME/.ssh/credproxy-signing}"
+SOCKDIR="$(dirname "$SOCK")"
+
+die() { echo "credproxy-signing-agent: $*" >&2; exit 1; }
+
+# Sets global `rc` from `ssh-add -l`: 0 = has keys, 1 = agent up but empty,
+# 2 = cannot connect (no agent).
+probe() { rc=0; SSH_AUTH_SOCK="$SOCK" ssh-add -l >/dev/null 2>&1 || rc=$?; }
+
+if [ "${1:-}" = status ]; then
+    probe
+    case "$rc" in
+        0) echo "up at $SOCK; loaded:"; SSH_AUTH_SOCK="$SOCK" ssh-add -l ;;
+        1) echo "up at $SOCK but holds no key (run without 'status' to load it)" ;;
+        *) echo "no agent at $SOCK" ;;
+    esac
+    exit 0
+fi
+
+[ -f "$KEY" ] || die "signing key not found: $KEY — generate it with: ssh-keygen -t ed25519 -f \"$KEY\""
+
+# The container bind-mounts SOCKDIR; it must exist (agent restarts then just swap
+# the socket inode inside it, which the container follows without a recreate).
+mkdir -p "$SOCKDIR" && chmod 700 "$SOCKDIR"
+
+# (Re)start the agent only if the socket is dead.
+probe
+if [ "$rc" -eq 2 ]; then
+    rm -f "$SOCK"
+    ssh-agent -a "$SOCK" >/dev/null || die "failed to start ssh-agent at $SOCK"
+fi
+
+# Load the key once — skip if its fingerprint is already present.
+pub="$KEY.pub"; [ -f "$pub" ] || pub="$KEY"
+fp=$(ssh-keygen -lf "$pub" | awk '{print $2}')
+if ! SSH_AUTH_SOCK="$SOCK" ssh-add -l 2>/dev/null | grep -q -- "$fp"; then
+    if [ "${CREDPROXY_SIGNING_CONFIRM:-}" = 1 ]; then
+        SSH_AUTH_SOCK="$SOCK" ssh-add -c "$KEY"
+    else
+        SSH_AUTH_SOCK="$SOCK" ssh-add "$KEY"
+    fi
+fi
+
+disp="${SOCKDIR/#$HOME/~}"
+echo "credproxy-signing-agent: ready — agent socket at $SOCK"
+echo "  workspace mounts the DIR: { bind = \"$disp\", target = \"/ssh-agent\" }  +  [env] SSH_AUTH_SOCK = \"/ssh-agent/agent.sock\""

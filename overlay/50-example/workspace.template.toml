@@ -1,0 +1,140 @@
+# Example-profile workspace template — the config `credproxy create` stamps.
+# A complete, opinionated starting point; edit freely (or shadow assets from a
+# higher-priority overlay). Mirrors the credproxy dogfood workspace, minus its
+# self-referential /workspace-config mount (that bind exists only so the dogfood
+# agent can edit its own config; a normal workspace doesn't want it).
+
+# Optional: host directory for loose-surface cwd-addressing (`cd here && credp enter`).
+# Left unset; `credproxy create --here/--dir` or `bind-dir` records it per workspace.
+# directory = "/absolute/path/to/project"
+
+auto_stop = true
+
+image = "mcr.microsoft.com/devcontainers/base:ubuntu"
+user = "vscode"
+user_uid = 1000
+map_host_user = true
+
+shell = ["zsh", "--login"]
+
+workdir = "/workdir"
+mounts = [
+  # Mounts are grouped by lib — each block is one overlay (see its README) and can
+  # be commented out to disable that lib. Setup steps land in /opt/setup.d/ and run
+  # in NN-prefix order; the NN encodes dependencies (toolchain @10 installs the
+  # gh/jq later steps use). The lib groups below are ordered by that setup NN.
+
+  # ── base (this profile) ─────────────────────────────────────────────────
+  # The project to work on. EDIT THIS before `start`: point `bind` at your
+  # project's absolute host path (`~` expands). The placeholder path does not
+  # exist on purpose, so `start` fails loudly until you set a real one.
+  { bind    = "/EDIT-ME/absolute/path/to/your/project", target = "/workdir" },
+  # zsh drop-in, sourced by the image's stock oh-my-zsh (no ~/.zshrc override).
+  { overlay = "omz-custom/profile.zsh", target = "/home/vscode/.oh-my-zsh/custom/profile.zsh" },
+  # Durable data that survives recreates: Claude config (/persist/claude, set via
+  # CLAUDE_CONFIG_DIR) and zsh history (/persist/zsh_history, via HISTFILE).
+  { volume  = "persist", target = "/persist" },
+
+  # ── setup-runner ── overlay/setup-runner/README.md ──
+  # The orchestrator: drops to $CREDPROXY_USER and runs /opt/setup.d/* in order.
+  { overlay = "setup.sh", target = "/opt/workspace-setup.sh" },
+
+  # ── toolchain ── overlay/toolchain/README.md ──
+  { overlay = "setup.d/toolchain.sh",       target = "/opt/setup.d/10-toolchain.sh" },         # installs CLI tools via mise
+  { overlay = "tools.d/base.list",          target = "/opt/toolchain/tools.d/10-base.list" },  # lean generic default (toolchain)
+  { overlay = "tools.d/extras.list",           target = "/opt/toolchain/tools.d/20-extras.list" },   # this profile's kit (50-example) — union-merged
+  { overlay = "session-context.d/tools.sh", target = "/opt/session-context.d/20-tools.sh" },   # "tools available" session note
+
+  # ── claude-setup ── overlay/claude-setup/README.md ──
+  { overlay = "setup.d/claude-setup.sh", target = "/opt/setup.d/20-claude-setup.sh" },          # onboarding-skip + settings merge
+  { overlay = "claude-settings-defaults.json", target = "/opt/claude-setup/settings-defaults.json" }, # the defaults it merges
+
+  # ── claude-managed-settings ── overlay/claude-managed-settings/README.md ──
+  # Clears the cached server settings; the rewrite rule itself is stamped via `preset add`.
+  { overlay = "setup.d/claude-managed-settings.sh", target = "/opt/setup.d/30-claude-managed-settings.sh" },
+
+  # ── git-signing (opt-in) ── overlay/git-signing/README.md ──
+  # Uncomment both, uncomment SSH_AUTH_SOCK in [env], and create the agent-socket
+  # dir on the host before `start`.
+  # { bind    = "~/.ssh/credproxy-agent", target = "/ssh-agent" },
+  # { overlay = "setup.d/git-signing.sh", target = "/opt/setup.d/40-git-signing.sh" },
+
+  # ── github-auth ── overlay/github-auth/README.md ──
+  # Wires gh + git-over-HTTPS to the github-api/github-git bindings (below).
+  { overlay = "setup.d/github-auth.sh", target = "/opt/setup.d/45-github-auth.sh" },
+
+  # ── claude-session-context ── overlay/claude-session-context/README.md ──
+  { overlay = "session-context.sh",                target = "/opt/session-context.sh" },                  # the SessionStart runner
+  { overlay = "setup.d/claude-session-context.sh", target = "/opt/setup.d/50-claude-session-context.sh" }, # registers the hook
+  { overlay = "session-context.d/credproxy.sh",    target = "/opt/session-context.d/10-credproxy.sh" },   # base fragment
+  # add profile context: edit session-context.d/example.sh, then uncomment its mount (NN = order):
+  # { overlay = "session-context.d/example.sh", target = "/opt/session-context.d/30-example.sh" },
+]
+
+setup = [
+  "curl -fsSL http://proxy.local/bootstrap.sh | sh",
+  "chown \"$CREDPROXY_USER:\" /persist",   # root-owned managed volume -> user-owned (colon = owner+primary group) pre-setup
+  "bash /opt/workspace-setup.sh",
+]
+
+[env]
+CLAUDE_CONFIG_DIR = "/persist/claude"   # on the persist volume
+HISTFILE = "/persist/zsh_history"        # zsh history survives recreates (oh-my-zsh honors a preset HISTFILE)
+LANG = "C.UTF-8"          # image defaults to POSIX; UTF-8 fixes prompt-glyph width + unicode tools
+COLORTERM = "truecolor"   # 24-bit color for Claude Code (its launch env) + tools
+# SSH_AUTH_SOCK = "/ssh-agent/agent.sock"   # git commit signing; see README.md
+
+[[binding]]
+name        = "claude-code"
+injector    = "bearer"
+provider    = "bw"
+secret      = "claude-code-oauth-token"
+hosts       = ["api.anthropic.com"]
+placeholder = "sk-ant-oat01-credproxy-1c52fa544e79be82b"
+env         = "CLAUDE_CODE_OAUTH_TOKEN"
+
+# GitHub auth — the github-auth lib provides the setup step (git credential helper
+# + identity). A token from the host's `gh` login (needs `gh auth login` there),
+# injected on the wire so the real token never enters the container: bearer on the
+# API, HTTP basic on git-over-HTTPS. The two bindings SHARE one placeholder — gh
+# hands github-api's $GITHUB_TOKEN to git for github.com, so github-git must swap
+# the same value. (This is the builtin `github` preset minus the ghcr part.)
+[[binding]]
+name        = "github-api"
+injector    = "bearer"
+provider    = "gh-cli"
+secret      = "github.com"
+hosts       = ["api.github.com"]
+placeholder = "ghp_vpR7Yz3Q96BdJaSucQvytSfQHEjRzjWeKIaq"
+env         = "GITHUB_TOKEN"
+
+[[binding]]
+name        = "github-git"
+injector    = "basic"
+provider    = "gh-cli"
+secret      = "github.com"
+hosts       = ["github.com"]
+placeholder = "ghp_vpR7Yz3Q96BdJaSucQvytSfQHEjRzjWeKIaq"
+
+[[rule]]
+name   = "claude-code-settings"
+hosts  = ["api.anthropic.com"]
+path   = "/api/claude_code/settings"
+action = "script"
+script = "claude-code-settings-rewrite"
+# The rewrite script ships NO policy (empty default) — the patch lives here, in the
+# profile. RFC 7386 merge-patch (JSON string; null deletes a key): strip the org-pushed
+# env-scrub + permission/sandbox gates so the workspace's own client settings win.
+[rule.params]
+settings_patch = '''
+{
+  "env": { "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": null },
+  "permissions": {
+    "allow": null,
+    "deny": null,
+    "disableBypassPermissionsMode": null,
+    "defaultMode": null
+  },
+  "sandbox": { "enabled": null }
+}
+'''
