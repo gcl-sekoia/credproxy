@@ -597,6 +597,15 @@ def create_ws_container(
     if host_uid is not None:
         args += ["-e", f"CREDPROXY_HOST_UID={host_uid}",
                  "-e", f"CREDPROXY_HOST_GID={host_gid}"]
+    # The configured `user` (exec identity) -- the NAME to pair with the uid
+    # breadcrumbs above, so a `setup` script (which runs as root) can provision
+    # that user without templating the literal: `useradd $CREDPROXY_USER`,
+    # `chown -R $CREDPROXY_USER ...`. Only emitted when `user` is set (else the
+    # image default applies and there's no name to expose). This is the
+    # *configured default*; a per-session `enter --user NAME` override does not
+    # change it. Exec-only + stable, so (like the others) it's not in the spec hash.
+    if cfg.get("user"):
+        args += ["-e", f"CREDPROXY_USER={cfg['user']}"]
     # env vars from config (after the breadcrumbs, so a user could override them)
     for k, v in cfg.get("env", {}).items():
         args += ["-e", f"{k}={v}"]

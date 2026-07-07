@@ -129,6 +129,31 @@ def test_workspace_name_injected_into_workspace_env(xdg, ws_factory, monkeypatch
     assert f"CREDPROXY_WORKSPACE={ws.name}" in args
 
 
+def test_user_injected_into_workspace_env_when_set(xdg, ws_factory, monkeypatch):
+    """A configured `user` is exposed as CREDPROXY_USER so a root `setup` script
+    can provision that user (useradd/chown) without templating the literal."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "user": "vscode"}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    assert "CREDPROXY_USER=vscode" in calls[-1]
+
+
+def test_user_not_injected_when_unset(xdg, ws_factory, monkeypatch):
+    """No `user` -> no CREDPROXY_USER (the image default applies, no name to
+    expose)."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": []}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    assert not any(a.startswith("CREDPROXY_USER=") for a in calls[-1])
+
+
 def test_config_env_overrides_host_uid_breadcrumb(xdg, ws_factory, monkeypatch):
     """A user's `env` is applied after the breadcrumbs, so it wins (last -e)."""
     from credproxy_cli.core import lifecycle

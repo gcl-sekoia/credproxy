@@ -216,6 +216,7 @@ last, so a key you set there shadows the breadcrumb of the same name.
 | `CREDPROXY_SETUP` | `http://proxy.local/llms.txt` — where a tenant (e.g. an agent) reads its own setup guidance. `proxy.local` resolves via `/etc/hosts`; `/setup` serves the machine-readable least-disclosure binding shape. |
 | `CREDPROXY_WORKSPACE` | The workspace's own name — so a setup script or prompt label can read it instead of templating the literal name (also available via `/setup`). |
 | `CREDPROXY_HOST_UID` / `CREDPROXY_HOST_GID` | The uid/gid the CLI runs as, i.e. the owner of your bind-mounted project dirs. The value to match a `setup`-created user to (`useradd -u $CREDPROXY_HOST_UID`) — see *Non-root user & mount ownership* below. |
+| `CREDPROXY_USER` | The configured `user` (exec identity) — the name to pair with `CREDPROXY_HOST_UID` so a root `setup` script can provision it without templating the literal (`useradd -u $CREDPROXY_HOST_UID $CREDPROXY_USER`, `chown -R $CREDPROXY_USER …`). Only set when `user` is; a per-session `enter --user NAME` override does **not** change it. |
 
 ### Non-root user & mount ownership
 
