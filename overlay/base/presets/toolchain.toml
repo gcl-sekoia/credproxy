@@ -5,9 +5,11 @@
 # ANOTHER fragment (this pack ships the lean base; the example template adds
 # tools.d/extras.list). Change the toolset by editing/adding fragments.
 #
-# The installed tools are advertised to Claude Code's session context by the
-# claude-code pack (its tools.sh fragment reads these same lists) — so the note
-# can't drift from what's installed, and toolchain stays free of that coupling.
+# These lists are the workspace's tool INVENTORY (col1 = install source, col3 = an
+# optional agent-facing note; format in base.list). The claude-code pack's tools.sh
+# renders the advertised subset (rows with a note that pass `command -v`) into the
+# session context — so the note can't drift from what's present, and toolchain stays
+# free of that coupling.
 
 [[mount]]
 overlay = "setup.d/toolchain.sh"
@@ -31,4 +33,4 @@ order = 10                                            # first: later steps use t
 
 [env]
 LANG = "C.UTF-8"          # image defaults to POSIX; UTF-8 fixes prompt-glyph width + unicode tools
-COLORTERM = "truecolor"   # 24-bit color for the CLIs (bat/delta/…) + Claude Code's launch env
+COLORTERM = "truecolor"   # 24-bit color for color-aware CLIs (bat, …) + Claude Code's launch env
