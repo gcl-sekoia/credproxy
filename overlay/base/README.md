@@ -20,6 +20,7 @@ parameters. `preset add`/`create` stamp them as ordinary config (expansion, not 
 |------|-------------|--------------|
 | **proxy-ca** | — | Installs the proxy's TLS CA into the trust store (one root setup step, `order 0`). A BYO image doesn't trust it out of the box; the credproxy default image auto-bootstraps, so this is opt-in per template. |
 | **toolchain** | — | Installs a dev CLI toolchain via [mise](https://mise.jdx.dev) (setup `order 10`). Data-driven: the installer reads the union of `/opt/toolchain/tools.d/*.list`, so a profile adds tools on top of the lean `base.list` by mounting another fragment. Also ships a mise-activation zsh drop-in (CLIs on the interactive PATH) and `[env]` `LANG`/`COLORTERM` for correct glyphs + truecolor. |
+| **cache** | — | A `/cache` managed volume for **regenerable** toolchain state — points `XDG_CACHE_HOME` (the XDG-honoring cache tier: mise/uv/pip) plus the DATA-tier install dirs (`MISE_DATA_DIR`, uv pythons/tools) at it, so a recreate skips re-installing the toolchain. Pre-setup chown (`order 5`), then the `toolchain` install (`order 10`) populates it. The discardable sibling of `persist`: `recreate --reset-volume cache` is safe because that recreate re-runs the `toolchain` setup step, repopulating the volume. Opt-in (left out of the base template). |
 | **claude-code** | *(you choose)* | **Umbrella pack — everything to run Claude Code as a client:** the Anthropic OAuth token (`bearer` on `api.anthropic.com`; the container sees only a token-shaped `$CLAUDE_CODE_OAUTH_TOKEN` placeholder), onboarding-skip + client-`settings.json` merge (setup `order 20`, merges a JSON *if mounted* at `/opt/claude-code/settings-defaults.json`), a SessionStart orientation hook (`order 50`; ships the credproxy + installed-tools notes, extensible via `/opt/session-context.d/*.sh`), and `MISE_MINIMUM_RELEASE_AGE_EXCLUDES=claude`. Assumes the `claude` CLI is installed (a toolchain tool). **Neutral** — no default vault, so `preset add claude-code --provider … --secret …` (or a template `[[preset]]`) supplies the token source. |
 | **github-auth** | `gh-cli` | Makes `gh` **and** `git push` (HTTPS) work off one GitHub token — `bearer` on `api.github.com`, HTTP `basic` on `github.com`, sharing one placeholder. Setup step (`order 45`) bridges git's credential helper to `gh` and derives the git identity. `[[requires]]` a host `gh` login. |
 | **git-signing** | — | Signs commits with an ssh key held in a **forwarded** ssh-agent (setup `order 40`). Only the agent socket dir is bind-mounted — the key never enters the container. Opt-in; the host socket dir is an `[[option]]` (`sock_dir`). |
@@ -34,8 +35,9 @@ org's `disableBypassPermissionsMode`.)*
 
 `workspace.template.toml` is a **neutral scaffold**: the devcontainer base image, a
 project bind mount (**edit before `start`**), and the generic packs as `[[preset]]`
-entries (`proxy-ca`, `toolchain`, `github-auth`). `claude-code` and `git-signing` are left
-commented — Claude Code is opt-in (it needs the `claude` CLI + a token source), and
+entries (`proxy-ca`, `toolchain`, `github-auth`). `cache`, `claude-code`, and `git-signing`
+are left commented — `cache` trades disk for faster recreates (a persistent volume, so
+off by default), Claude Code is opt-in (it needs the `claude` CLI + a token source), and
 signing needs a host socket dir. All setup steps and env come from the packs — the
 template itself carries no `setup`/`[env]`.
 

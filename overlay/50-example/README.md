@@ -16,8 +16,9 @@ singleton — the highest-priority overlay's wins). The rest of what it ships ar
 
 - **`workspace.template.toml`** — base's neutral scaffold **plus** opinions, expressed as
   `[[preset]]` entries: the `claude-code` pack wired to Bitwarden (`provider = "bw"`), the
-  `claude-managed-settings` pack turned on, the `persist` pack below, and the profile
-  mounts below. It carries no `setup`/`[env]` of its own — all of that comes from packs.
+  `claude-managed-settings` pack turned on, base's `cache` pack (opt-in there, activated
+  here for faster recreates), the `persist` pack below, and the profile mounts below. It
+  carries no `setup`/`[env]` of its own — all of that comes from packs.
 - **`presets/persist.toml`** — a pack this overlay defines: a durable `/persist` volume +
   its pre-setup chown + the `CLAUDE_CONFIG_DIR`/`HISTFILE` env, so Claude config and shell
   history survive recreates.
