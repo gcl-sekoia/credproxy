@@ -1221,6 +1221,162 @@ def test_run_setup_failure_raises(xdg, ws_factory, monkeypatch):
                             notify=lambda *_: None)
 
 
+# ---- typed `setup` entries: exec argv, ordering, env, HOME (issue #55) --------
+
+
+def _fake_run_typed(calls, home="/home/vscode", user_exists=True, code=0):
+    """A subprocess.run fake that answers BOTH the in-container HOME lookup
+    (getent, capture_output=True) and the step exec. Home lookups return a
+    passwd line (or empty when the user doesn't exist); step execs record the
+    argv and return `code`."""
+    import subprocess as _sp
+
+    def run(cmd, **kw):
+        # HOME resolution: `sh -c '<getent script>' _ <user>`.
+        if len(cmd) > 7 and cmd[5:7] == ["sh", "-c"] and "getent" in cmd[7]:
+            calls.append(("home", cmd))
+            out = f"vscode:x:1000:1000::{home}:/bin/bash\n" if user_exists else ""
+            return _sp.CompletedProcess(cmd, 0, stdout=out, stderr="")
+        calls.append(("exec", cmd))
+
+        class _R:
+            returncode = code
+        return _R()
+    return run
+
+
+def _bearer_binding():
+    from credproxy_cli.core.bindings import Binding
+    return Binding(name="gh", injector="bearer", provider="env", secret="TOK",
+                   hosts=("api.github.com",), placeholder="ghp_x", env="GH_TOKEN")
+
+
+def _exec_calls(calls):
+    return [c for kind, c in calls if kind == "exec"]
+
+
+def test_run_setup_string_entry_unchanged_argv(xdg, ws_factory, monkeypatch):
+    """A string entry is byte-for-byte today's argv: `-u 0`, no `-e`, `sh -lc`,
+    even when bindings are present (strings get no injected env)."""
+    from credproxy_cli.core import lifecycle
+    calls = []
+    monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run_typed(calls))
+    ws = ws_factory("a")
+    lifecycle.run_setup(ws, {"setup": ["echo hi"], "user": "vscode"},
+                        bindings=[_bearer_binding()])
+    argv = _exec_calls(calls)[0]
+    assert argv == ["docker", "exec", "-u", "0", ws.ws_container,
+                    "sh", "-lc", "echo hi"]
+    assert "-e" not in argv  # string entries get no binding env
+
+
+def test_run_setup_workspace_user_argv(xdg, ws_factory, monkeypatch):
+    """A `user="workspace"` table runs as the config user with `-e HOME=<home>`
+    (resolved in-container) and the binding env; `sh -lc`."""
+    from credproxy_cli.core import lifecycle
+    calls = []
+    monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run_typed(calls))
+    ws = ws_factory("a")
+    lifecycle.run_setup(
+        ws,
+        {"setup": [{"run": "bash x.sh", "user": "workspace", "order": 0}],
+         "user": "vscode"},
+        bindings=[_bearer_binding()])
+    argv = _exec_calls(calls)[0]
+    assert argv[:4] == ["docker", "exec", "-u", "vscode"]
+    assert "-e" in argv and "HOME=/home/vscode" in argv
+    assert "GH_TOKEN=ghp_x" in argv
+    assert argv[-3:] == ["sh", "-lc", "bash x.sh"]
+    # the container name comes after all -e flags, before `sh`
+    assert argv[argv.index(ws.ws_container) + 1] == "sh"
+
+
+def test_run_setup_root_table_gets_env_no_home(xdg, ws_factory, monkeypatch):
+    """A `user="root"` table runs as `-u 0` with the binding env but NO HOME
+    lookup (root inherits the image default) -- distinct from a string, which
+    gets no env at all."""
+    from credproxy_cli.core import lifecycle
+    calls = []
+    monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run_typed(calls))
+    ws = ws_factory("a")
+    lifecycle.run_setup(
+        ws,
+        {"setup": [{"run": "apt-get update", "user": "root", "order": 0}],
+         "user": "vscode"},
+        bindings=[_bearer_binding()])
+    assert not any(k == "home" for k, _ in calls)  # no HOME resolution for root
+    argv = _exec_calls(calls)[0]
+    assert argv[:4] == ["docker", "exec", "-u", "0"]
+    assert "GH_TOKEN=ghp_x" in argv
+    assert "HOME=/home/vscode" not in argv
+
+
+def test_run_setup_workspace_user_falls_back_to_root(xdg, ws_factory, monkeypatch):
+    """`user="workspace"` with NO config `user` resolves to root (`-u 0`, no
+    HOME lookup) -- the "unset/root -> run as-is" mirror -- but still a table, so
+    it gets the binding env."""
+    from credproxy_cli.core import lifecycle
+    calls = []
+    monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run_typed(calls))
+    ws = ws_factory("a")
+    lifecycle.run_setup(
+        ws,
+        {"setup": [{"run": "id", "user": "workspace", "order": 0}]},  # no user
+        bindings=[_bearer_binding()])
+    assert not any(k == "home" for k, _ in calls)
+    argv = _exec_calls(calls)[0]
+    assert argv[:4] == ["docker", "exec", "-u", "0"]
+    assert "GH_TOKEN=ghp_x" in argv
+
+
+def test_run_setup_execution_order(xdg, ws_factory, monkeypatch):
+    """Steps run in (order, declaration index) order via a STABLE sort: lower
+    `order` first regardless of position, equal orders keep declaration order,
+    strings sort as order 0."""
+    from credproxy_cli.core import lifecycle
+    calls = []
+    monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run_typed(calls))
+    ws = ws_factory("a")
+    setup = [
+        {"run": "late", "user": "root", "order": 45},
+        {"run": "early", "user": "root", "order": 10},
+        "string0",                                        # implicit order 0
+        {"run": "alsozero", "user": "root", "order": 0},  # equal order, later idx
+    ]
+    lifecycle.run_setup(ws, {"setup": setup, "user": "vscode"})
+    ran = [c[-1] for c in _exec_calls(calls)]  # the last argv token is the CMD
+    assert ran == ["string0", "alsozero", "early", "late"]
+
+
+def test_run_setup_missing_user_errors(xdg, ws_factory, monkeypatch):
+    """A workspace-user step whose user doesn't exist in the container fails
+    with a precise, actionable error naming the step index."""
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.errors import DockerError
+    calls = []
+    monkeypatch.setattr(lifecycle.subprocess, "run",
+                        _fake_run_typed(calls, user_exists=False))
+    ws = ws_factory("a")
+    with pytest.raises(DockerError, match=r"'vscode' does not exist .* setup\[0\] runs"):
+        lifecycle.run_setup(
+            ws,
+            {"setup": [{"run": "x", "user": "workspace", "order": 0}],
+             "user": "vscode"})
+
+
+def test_binding_env_map_skip_rule(xdg):
+    """binding_env_map applies the /exports.sh skip rule: only bindings with
+    BOTH an effective env AND a placeholder are included."""
+    from credproxy_cli.core.bindings import Binding, binding_env_map
+    have = Binding(name="a", injector="bearer", provider="env", secret="T",
+                   hosts=("h",), placeholder="ph", env="TOK")
+    no_ph = Binding(name="b", injector="bearer", provider="env", secret="T",
+                    hosts=("h",), placeholder=None, env="TOK")
+    no_env = Binding(name="c", injector="bearer", provider="env", secret="T",
+                     hosts=("h",), placeholder="ph2", env=None)
+    assert binding_env_map([have, no_ph, no_env]) == {"TOK": "ph"}
+
+
 # ---- smart push: fingerprint, decision, status, enter --push -----------------
 
 

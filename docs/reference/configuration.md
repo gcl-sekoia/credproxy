@@ -82,9 +82,14 @@ mounts = [
 # Environment variables set in the workspace container.
 env = { GH_DEBUG = "1", TZ = "UTC" }
 
-# Commands run once, after the container is (re)created.
+# Commands run once, after the container is (re)created. A mixed array: a plain
+# string runs as root via `sh -lc` with no injected env (unchanged); a table
+# runs as the workspace `user` (or root) in `(order, position)` order, with the
+# binding env (each binding's placeholder under its env var) and correct HOME.
 setup = [
-  "npm ci",
+  "curl -fsSL http://proxy.local/bootstrap.sh | sh",       # string: root, as today
+  { run = "apt-get install -y build-essential", user = "root", order = 10 },
+  { run = "gh auth setup-git", order = 45 },               # workspace user (default)
 ]
 
 # Stop the workspace when the last `enter` session exits. Off by default.
@@ -118,7 +123,7 @@ hosts    = ["sts.amazonaws.com"]
 | `home` | string | _(none)_ | Sugar for a managed volume named `home` mounted at this (absolute) path — the persistent, image-seeded home. **Optional**: omit it for an ephemeral home (the image's, lost on recreate). The volume survives stop/start and recreate; wiped by `recreate --reset-volume home` or `delete`. Also the default `workdir`. |
 | `mounts` | list | `[]` | Things mounted into the workspace. A **string** is a host **bind** (`"SRC:DST[:ro]"`; `~` expanded on `SRC`, which must be an existing absolute path; `DST` absolute). A **table** is a typed mount with exactly one of: `{ bind = "SRC", target = "/dst", readonly = false }` (host bind), `{ volume = "NAME", target = "/dst" }` (a managed named volume — persistent, image-seeded, ownership-clean; namespaced per workspace; great for caches), or `{ overlay = "REL", target = "/dst" }` (a path **relative to an overlay dir**, searched in declared order and confined within the winning overlay, read-only by default — for static files shipped with a fork; see [overlays.md](../advanced/overlays.md)). No two mounts may share a `target`; no two volumes a name (`home` is reserved for the home sugar). Managed volumes can also be added with `credproxy workspace NAME mount add --volume VOL --target PATH [--ro] [--preserve]` (a surgical TOML edit; `--volume home` writes the home sugar) — see *Adding a volume, keeping existing data* below. |
 | `env` | table (string → string) | `{}` | Passed to the container as `-e KEY=VALUE`. Both keys and values must be strings. |
-| `setup` | list of strings | `[]` | Shell commands run **once**, right after the container is (re)created, via `sh -lc`. A failing command stops `start` and leaves the container in place for debugging. Re-run only happens when the container is recreated (see drift below), not on every `start`. |
+| `setup` | mixed list (strings + tables) | `[]` | Steps run **once**, right after the container is (re)created. A failing step stops `start` and leaves the container in place for debugging; re-run only happens on recreate (see drift below), not on every `start`. Two entry shapes — see *Typed `setup` steps* below. |
 | `run_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the workspace `docker run`. credproxy's structural flags (`--name`, labels, `--network`, the home volume) are applied **after** these and win on conflict, so `run_flags` can't detach the netns or rename the container; additive flags (`--userns`, an extra `--mount`/`-v`, `--security-opt`) take effect. The main use is runtime-specific uid mapping (see *Non-root user & mount ownership* below). |
 | `map_host_user` | bool | `false` | Make the non-root `user` own your bind mounts without changing host ownership. credproxy picks the runtime-appropriate lever automatically (`--userns=keep-id` on rootless podman; a no-op on Docker, where the matching uid does it). **Requires `user`** (error otherwise). The managed alternative to a hand-written `--userns` in `run_flags` — and if you set both, the `run_flags` one wins (escape hatch overrides the knob). See *Non-root user & mount ownership* below. |
 | `user_uid` | int | host uid | The in-container uid of `user` — the uid `map_host_user`'s keep-id maps your host uid **onto** (rootless podman). Host uid and this need not be equal; keep-id maps across them. Defaults to your host uid (correct for a `setup`-provisioned user made as `$CREDPROXY_HOST_UID`); set it to a baked user's uid (the default image's `vscode` is `1000`, which the scaffold fills in). **Requires `user`** (error otherwise). Only consumed with `map_host_user` on rootless podman. |
@@ -135,6 +140,48 @@ Changing `image`, `home`, `mounts`, `env`, `setup`, `run_flags`, or
 `map_host_user` is **container-spec drift**: it requires recreating the
 workspace container, which happens on the next `start` (the home volume is
 preserved). Editing bindings does **not** require a recreate — see below.
+
+#### Typed `setup` steps
+
+`setup` is a **mixed array**: each entry is either a plain command **string** or
+a **table**.
+
+- A **string** runs exactly as it always has: as **root** (`-u 0`), via
+  `sh -lc`, with **no** injected env. This is the escape hatch — its behavior is
+  unchanged, and an all-string `setup` is byte-for-byte equivalent to before
+  typed entries existed.
+- A **table** `{ run = "CMD", user = "workspace"|"root", order = N }` gives you
+  two levers:
+  - **`user`** (default `"workspace"`) — `"workspace"` runs the step as the
+    config [`user`](#exec-settings) with that user's correct `HOME` (resolved
+    inside the container at step time, since `docker exec -u` doesn't set it);
+    `"root"` runs it as root. When the config declares no `user`, `"workspace"`
+    resolves to root. A literal username is **not** accepted in v1 — only the two
+    keywords.
+  - **`order`** (default `0`) — an integer sort key. Steps run in **stable
+    `(order, position)` order**: lower `order` first regardless of where it's
+    written, and equal orders keep declaration order. Strings have implicit
+    `order = 0`.
+
+  Table steps additionally receive the **binding env** — every binding's
+  effective env var set to its **placeholder** (the same set `/exports.sh`
+  serves a login shell), so a step can `export`-free reference e.g.
+  `$GITHUB_TOKEN` and get the inert placeholder the workspace always sees.
+  (Strings get no injected env.)
+
+A workspace-user step whose user doesn't exist yet fails with a precise error
+(`user 'vscode' does not exist … create it in an earlier root step or set
+user = "root"`) — so provision the user in an earlier `order` root step (or bake
+it into the image). Editing any of a table's `run`/`user`/`order` is spec drift
+(recreate on next `start`), same as changing a string.
+
+```toml
+setup = [
+  "curl -fsSL http://proxy.local/bootstrap.sh | sh",       # root, no env
+  { run = "useradd -m -u $CREDPROXY_HOST_UID dev", user = "root", order = 10 },
+  { run = "gh auth setup-git", order = 45 },                # runs as `dev`, has HOME + binding env
+]
+```
 
 #### Adding a volume, keeping existing data
 
@@ -171,8 +218,10 @@ These shape how `enter` runs commands in the container; they are **exec-only**
 | `enter_prelude` | string | source the CA-env file | A shell snippet run before the enter command, via `sh -c '<prelude>; exec "$@"'`. The default sources the proxy's bootstrap-written env file (`/etc/profile.d/credproxy.sh`) so the HTTPS-CA env vars reach an interactive shell, `enter -- cmd`, **and** subprocesses — `docker exec` is a bare `execve`, so without this the env only loads in a login shell. `exec "$@"` keeps it transparent (no extra PID; signals/TTY/exit code/argv pass through). Set to `""` to skip wrapping (direct `execve`, no `/bin/sh` dependency). |
 | `exec_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the `docker exec` for `enter` (e.g. `["--workdir", "/srv"]`, `["--env", "FOO=bar"]`). credproxy keeps ownership of the session-control flags (`-i`/`-t`/`-d`), so these can't detach the session or break auto-stop. |
 
-`setup` runs as root regardless of `user`, so it is the place to provision a
-non-root user (create it, grant sudo, chown its home).
+A **string** `setup` step runs as root regardless of `user`, so it is the place
+to provision a non-root user (create it, grant sudo, chown its home). A **table**
+step can opt into running as that `user` instead — see *Typed `setup` steps*
+above.
 
 ### Directory association (cwd resolution)
 

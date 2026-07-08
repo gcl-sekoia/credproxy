@@ -68,6 +68,28 @@ def effective_env(binding: Binding, injector: Injector) -> str | None:
     return injector.env
 
 
+def binding_env_map(bindings: list[Binding]) -> dict[str, str]:
+    """Map of effective-env VAR -> placeholder for every binding that has BOTH
+    an effective env name AND a placeholder -- the SAME skip rule /exports.sh
+    (proxy `bootstrap.exports_body`) applies, so a typed `setup` step sees the
+    same binding env a login shell would `eval` from /exports.sh.
+
+    Computed host-side (the placeholder is already known at push time), so a
+    setup step needs no in-container curl. Non-identifier env names are skipped
+    defensively (they could not be a valid `docker exec -e VAR`), mirroring
+    exports_body -- though binding validation already forbids them."""
+    out: dict[str, str] = {}
+    for b in bindings:
+        injector = find_injector(b.injector)
+        name = effective_env(b, injector)
+        if not name or b.placeholder is None:
+            continue
+        if not ENV_NAME_RE.fullmatch(name):
+            continue
+        out[name] = b.placeholder
+    return out
+
+
 def secret_refs(binding: Binding) -> dict[str, str]:
     """Normalize a binding's `secret` to a slot->ref map. A bare string is the
     single-slot `value` sugar; a table is taken verbatim."""

@@ -9,7 +9,8 @@ Schema:
   home   = "/root"                     # str, optional (default applied)
   mounts = ["~/src:/src"]              # list[str] "SRC:DST" or "SRC:DST:ro"
   env    = { KEY = "value" }           # table, optional; passed as -e to ws
-  setup  = ["npm ci"]                  # list[str], optional; run once on create
+  setup  = ["npm ci",                  # mixed list of strings and typed tables;
+            {run="…", user="workspace", order=45}]  #   run once on create
   run_flags = ["--userns=keep-id"]     # list[str], optional; spliced into docker run
   map_host_user = true                 # bool, optional; non-root `user` owns mounts
   user_uid = 1000                      # int, optional; in-container uid of `user`
@@ -238,6 +239,57 @@ def _parse_mount(m, where: str) -> dict:
             "target": target, "readonly": True if ro is None else bool(ro)}
 
 
+# The only keys a typed `setup` table may carry. `user` is limited to the two
+# literals "workspace"/"root" in v1 (no arbitrary username), `order` to a
+# non-negative int -- see _parse_setup.
+_SETUP_KEYS = {"run", "user", "order"}
+
+
+def _parse_setup(raw_setup, config_path) -> list:
+    """Normalize the `setup` array to its canonical in-memory form.
+
+    `setup` is a MIXED array: plain command strings AND typed step tables.
+
+      - A plain STRING keeps EXACTLY today's semantics (root, `sh -lc`, no
+        injected env -- the escape hatch, unchanged) and stays a `str` here.
+      - A TABLE `{run, user, order}` is normalized to a dict with every default
+        filled: `{"run": str, "user": "workspace"|"root", "order": int}`
+        (`user` -> "workspace", `order` -> 0).
+
+    Normalizing tables at load time is what makes the spec hash deterministic:
+    `{run="x"}` and `{run="x", user="workspace", order=0}` collapse to the
+    identical dict, so they hash the same (see workspace_spec_hash). Strings are
+    left as strings -- an all-string config is byte-identical to before this
+    feature, and hashes/behaves exactly as today."""
+    if not isinstance(raw_setup, list):
+        raise ConfigError(f"{config_path}: `setup` must be an array")
+    out: list = []
+    for i, entry in enumerate(raw_setup):
+        where = f"{config_path}: setup[{i}]"
+        if isinstance(entry, str):
+            out.append(entry)
+            continue
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be a string or a table")
+        extra = set(entry) - _SETUP_KEYS
+        if extra:
+            raise ConfigError(f"{where} unknown key(s): {', '.join(sorted(extra))}")
+        run = entry.get("run")
+        if not isinstance(run, str) or not run:
+            raise ConfigError(
+                f"{where} `run` is required and must be a non-empty string")
+        user = entry.get("user", "workspace")
+        if user not in ("workspace", "root"):
+            raise ConfigError(
+                f'{where} `user` must be "workspace" or "root", got {user!r}')
+        order = entry.get("order", 0)
+        # bool is an int subclass -- reject `order = true` explicitly.
+        if isinstance(order, bool) or not isinstance(order, int) or order < 0:
+            raise ConfigError(f"{where} `order` must be an integer >= 0")
+        out.append({"run": run, "user": user, "order": order})
+    return out
+
+
 
 def load_config(ws: Workspace) -> dict:
     """Parse and validate the container-side settings of <name>.toml into a
@@ -340,15 +392,11 @@ def load_config(ws: Workspace) -> dict:
                 f"{ws.config_path}: env.{k} must be a string, got {type(v).__name__}"
             )
 
-    # setup: list of shell command strings
-    setup = raw.get("setup") or []
-    if not isinstance(setup, list):
-        raise ConfigError(f"{ws.config_path}: `setup` must be an array")
-    for i, cmd in enumerate(setup):
-        if not isinstance(cmd, str):
-            raise ConfigError(
-                f"{ws.config_path}: setup[{i}] must be a string"
-            )
+    # setup: a mixed array of shell command STRINGS and typed step TABLES,
+    # normalized to a canonical form (strings stay strings; tables become
+    # {"run", "user", "order"} dicts with defaults filled) so the spec hash is
+    # deterministic. See _parse_setup.
+    setup = _parse_setup(raw.get("setup") or [], ws.config_path)
 
     # user: optional user that `enter` execs as (docker exec -u). Exec-only, so
     # NOT part of the spec hash -- changing it never recreates the container; it
@@ -713,7 +761,13 @@ def workspace_spec_hash(cfg: dict, proxy_id: str | None, hostname: str | None = 
     not config- or environment-derived. Like `map_host_user`, it rides the hash
     on every runtime even though the `--hostname` argv itself is only emitted on
     podman: the hash carries the deterministic intent, not the runtime probe, so
-    switching runtimes doesn't recreate (mirroring `map_host_user`/keep-id)."""
+    switching runtimes doesn't recreate (mirroring `map_host_user`/keep-id).
+
+    `setup` is already normalized by _parse_setup (strings stay strings; every
+    table is a `{"run", "user", "order"}` dict with defaults filled), so a
+    table's default-equivalent spellings hash identically and editing any of
+    `run`/`user`/`order` changes the hash. `sort_keys=True` makes the dict-key
+    order irrelevant."""
     spec = json.dumps(
         {
             "image": cfg["image"],

@@ -1196,3 +1196,156 @@ def test_auto_stop_not_in_spec_hash(xdg, workspaces_dir):
     h_on = workspace_spec_hash(load_config(Workspace("a")), "proxy1")
     h_off = workspace_spec_hash(load_config(Workspace("b")), "proxy1")
     assert h_on == h_off
+
+
+# ---- typed `setup` entries (issue #55) ---------------------------------------
+
+
+def test_setup_string_entries_stay_strings(xdg, workspaces_dir):
+    """A plain-string setup array is left byte-identical -- strings stay strings,
+    the escape hatch preserved exactly as before typed entries."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "s", 'image = "x"\nsetup = ["echo a", "echo b"]\n')
+    assert load_config(Workspace("s"))["setup"] == ["echo a", "echo b"]
+
+
+def test_setup_table_normalized_with_defaults(xdg, workspaces_dir):
+    """A bare `{run="…"}` table is normalized to the canonical dict with every
+    default filled: user -> "workspace", order -> 0."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "t", 'image = "x"\nsetup = [{ run = "echo hi" }]\n')
+    assert load_config(Workspace("t"))["setup"] == [
+        {"run": "echo hi", "user": "workspace", "order": 0}
+    ]
+
+
+def test_setup_table_explicit_fields(xdg, workspaces_dir):
+    """Explicit user/order are carried through verbatim."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "t", 'image = "x"\n'
+           'setup = [{ run = "apt-get update", user = "root", order = 10 }]\n')
+    assert load_config(Workspace("t"))["setup"] == [
+        {"run": "apt-get update", "user": "root", "order": 10}
+    ]
+
+
+def test_setup_mixed_array(xdg, workspaces_dir):
+    """Strings and tables coexist in one array; strings stay strings, tables
+    normalize."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "m", 'image = "x"\n'
+           'setup = ["curl x", { run = "b", order = 5 }]\n')
+    assert load_config(Workspace("m"))["setup"] == [
+        "curl x",
+        {"run": "b", "user": "workspace", "order": 5},
+    ]
+
+
+def test_setup_rejects_non_string_non_table(xdg, workspaces_dir):
+    """A number (or any non-string/non-table) is rejected, index-named."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "x"\nsetup = ["ok", 42]\n')
+    with pytest.raises(ConfigError, match=r"setup\[1\] must be a string or a table"):
+        load_config(Workspace("b"))
+
+
+def test_setup_table_unknown_key_rejected(xdg, workspaces_dir):
+    """An unknown table key is rejected, naming the index (mirrors _parse_mount)."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "x"\n'
+           'setup = [{ run = "x", shell = "zsh" }]\n')
+    with pytest.raises(ConfigError, match=r"setup\[0\] unknown key\(s\): shell"):
+        load_config(Workspace("b"))
+
+
+def test_setup_table_run_required(xdg, workspaces_dir):
+    """`run` is required and must be a non-empty string."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "x"\nsetup = [{ user = "root" }]\n')
+    with pytest.raises(ConfigError, match=r"setup\[0\] `run` is required"):
+        load_config(Workspace("b"))
+
+    _write(workspaces_dir, "b2", 'image = "x"\nsetup = [{ run = "" }]\n')
+    with pytest.raises(ConfigError, match=r"setup\[0\] `run` is required"):
+        load_config(Workspace("b2"))
+
+
+def test_setup_table_user_literal_rejected(xdg, workspaces_dir):
+    """`user` accepts only "workspace"/"root" in v1 -- a literal username is
+    rejected."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "x"\n'
+           'setup = [{ run = "x", user = "vscode" }]\n')
+    with pytest.raises(ConfigError, match=r'setup\[0\] `user` must be "workspace" or "root"'):
+        load_config(Workspace("b"))
+
+
+def test_setup_table_order_must_be_nonneg_int(xdg, workspaces_dir):
+    """`order` must be an int >= 0 -- a negative, a float, and a bool are all
+    rejected (bool is an int subclass, guarded explicitly)."""
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.workspace import Workspace
+
+    for val in ("-1", "1.5", "true"):
+        _write(workspaces_dir, "b", 'image = "x"\n'
+               f'setup = [{{ run = "x", order = {val} }}]\n')
+        with pytest.raises(ConfigError, match=r"setup\[0\] `order` must be an integer"):
+            load_config(Workspace("b"))
+
+
+# ---- typed `setup` and the spec hash -----------------------------------------
+
+
+def _spec(workspaces_dir, name, setup_toml):
+    from credproxy_cli.core.config import load_config, workspace_spec_hash
+    from credproxy_cli.core.workspace import Workspace
+    _write(workspaces_dir, name, f'image = "x"\nsetup = {setup_toml}\n')
+    return workspace_spec_hash(load_config(Workspace(name)), "proxy1")
+
+
+def test_setup_hash_default_forms_equal(xdg, workspaces_dir):
+    """`{run="x"}` and its fully-spelled default-equivalent hash identically --
+    normalization collapses them to the same canonical dict."""
+    a = _spec(workspaces_dir, "a", '[{ run = "x" }]')
+    b = _spec(workspaces_dir, "b", '[{ run = "x", user = "workspace", order = 0 }]')
+    assert a == b
+
+
+def test_setup_hash_all_string_unchanged(xdg, workspaces_dir):
+    """An all-string setup hashes the same as it always did (strings stay
+    strings in the canonical form) -- no drift for a pre-feature config."""
+    a = _spec(workspaces_dir, "a", '["echo a", "echo b"]')
+    b = _spec(workspaces_dir, "b", '["echo a", "echo b"]')
+    assert a == b
+
+
+def test_setup_hash_changes_on_any_table_field(xdg, workspaces_dir):
+    """Editing run/user/order each changes the hash (drift -> recreate)."""
+    base = _spec(workspaces_dir, "base", '[{ run = "x", user = "workspace", order = 0 }]')
+    diff_run = _spec(workspaces_dir, "r", '[{ run = "y", user = "workspace", order = 0 }]')
+    diff_user = _spec(workspaces_dir, "u", '[{ run = "x", user = "root", order = 0 }]')
+    diff_order = _spec(workspaces_dir, "o", '[{ run = "x", user = "workspace", order = 5 }]')
+    assert base != diff_run
+    assert base != diff_user
+    assert base != diff_order

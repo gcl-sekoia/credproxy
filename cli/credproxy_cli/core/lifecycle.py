@@ -636,41 +636,152 @@ def _setup_needed(marker: str | None, container_id: str) -> bool:
     return bool(container_id) and marker != container_id
 
 
-def run_setup(ws: Workspace, cfg: dict, notify: Notify) -> None:
-    """Run the `setup` commands in the workspace container, as root (`-u 0`) via
-    `docker exec`. Called from start_workspace when the container hasn't recorded
-    a completed setup (see `_setup_needed`): a fresh container, or a prior
-    attempt that failed. A failing command raises DockerError and leaves the
-    container running for debugging -- and, since the success marker isn't
-    written, the next `start` retries setup.
+def _setup_order(entry) -> int:
+    """The sort key `order` of a setup entry: 0 for a plain string (today's
+    implicit order), the table's normalized `order` otherwise."""
+    return 0 if isinstance(entry, str) else entry["order"]
 
-    Root is pinned with `-u 0` rather than inherited from the image default,
-    because the container's default run-user is not always root: `map_host_user`
-    adds `--userns=keep-id`, under which podman runs the container as the mapped
-    (non-root) uid, and a user could bake `USER dev` into their image. setup is
-    the place to provision (useradd, apt, chown the home volume), so it must be
-    root regardless; uid 0 is root-in-namespace even under keep-id (where it maps
-    to a subuid). `enter` pins its own `-u <user>`, so the two never collide.
 
-    Setup commands should be idempotent: a container recreate (spec drift or a
-    manual `docker rm`) re-runs them, while the persistent home volume
-    survives -- so writable-layer work (apt, useradd) is re-provisioned and
-    home-volume work just needs to be cheap to repeat."""
+def _setup_execution_order(setup: list) -> list[tuple[int, object]]:
+    """`(declaration_index, entry)` pairs in execution order: a STABLE sort by
+    `(order, declaration index)`. Strings carry an implicit `order = 0`, so an
+    all-string (or all-default) config keeps its declaration order -- exactly
+    today's behavior -- and equal orders preserve declaration order. The
+    declaration index rides along so notify/error text names the entry by its
+    position in the TOML, not its shuffled runtime slot."""
+    return sorted(enumerate(setup), key=lambda p: (_setup_order(p[1]), p[0]))
+
+
+def _resolve_container_home(ws: Workspace, user: str) -> str | None:
+    """The home directory of `user` as it exists IN the container right now, or
+    None if the user doesn't exist. `docker exec -u <user>` does NOT reliably
+    set HOME (it inherits the image's env, e.g. /root), so a workspace-user
+    setup step must be told its own HOME -- resolved here by name in-container
+    (mirroring chown_user_owned_volumes' by-name approach, sidestepping
+    host/userns uid math). Resolved PER STEP, not once up front, because an
+    earlier root step may `useradd` the user.
+
+    Portable across images: `getent` when present, falling back to a raw
+    /etc/passwd scan (busybox/distroless may lack getent). Field 6 of the passwd
+    line is the home dir."""
+    r = subprocess.run(
+        ["docker", "exec", "-u", "0", ws.ws_container, "sh", "-c",
+         'getent passwd "$1" 2>/dev/null || grep "^$1:" /etc/passwd 2>/dev/null',
+         "_", user],
+        capture_output=True, text=True, check=False,
+    )
+    if r.returncode != 0:
+        return None
+    lines = (r.stdout or "").strip().splitlines()
+    if not lines:
+        return None
+    fields = lines[0].split(":")
+    if len(fields) < 6 or not fields[5]:
+        return None
+    return fields[5]
+
+
+def run_setup(ws: Workspace, cfg: dict, notify: Notify = _noop,
+              bindings: list | None = None) -> None:
+    """Run the `setup` steps in the workspace container via `docker exec`.
+    Called from start_workspace when the container hasn't recorded a completed
+    setup (see `_setup_needed`): a fresh container, or a prior attempt that
+    failed. Steps run in `(order, declaration index)` order (stable sort). A
+    failing step raises DockerError and leaves the container running for
+    debugging -- and, since the success marker isn't written, the next `start`
+    retries all of setup.
+
+    Two entry shapes (normalized by `config._parse_setup`):
+
+    - A plain STRING runs EXACTLY as before -- root (`-u 0`), `sh -lc`, NO
+      injected env. Root is pinned rather than inherited because the container's
+      default run-user isn't always root (`map_host_user`'s keep-id runs podman
+      as the mapped non-root uid; an image can bake `USER dev`), and setup is
+      the place to provision (useradd, apt, chown the home volume). uid 0 is
+      root-in-namespace even under keep-id.
+    - A TABLE `{run, user, order}` runs as the workspace `user` (`user =
+      "workspace"`, the default; falls back to root when config has no `user`)
+      or root (`user = "root"`), and additionally receives the BINDING ENV --
+      each binding's effective env var set to its placeholder, the same set
+      /exports.sh serves (computed host-side, no in-container curl). A
+      workspace-user step also gets `-e HOME=<home>` resolved in-container per
+      step (see _resolve_container_home).
+
+    `enter` pins its own `-u <user>`, so setup and enter never collide. Setup
+    steps should be idempotent: a container recreate re-runs them while the
+    persistent home volume survives, so writable-layer work is re-provisioned
+    and home-volume work just needs to be cheap to repeat."""
+    from .bindings import binding_env_map
     setup = cfg.get("setup") or []
     if not setup:
         return
+    # Binding env (VAR=placeholder) injected into TABLE entries only; strings
+    # get nothing (their unchanged escape-hatch semantics). Computed once.
+    env_map = binding_env_map(bindings or [])
+    ws_user = cfg.get("user")  # config user; None -> root
+
     notify(f"running {len(setup)} setup command(s)...")
-    for i, cmd in enumerate(setup):
-        notify(f"  setup[{i}]: {cmd}")
-        r = subprocess.run(
-            ["docker", "exec", "-u", "0", ws.ws_container, "sh", "-lc", cmd],
-            check=False,
-        )
+    for idx, entry in _setup_execution_order(setup):
+        run, argv, user_label, order = _build_setup_exec(
+            ws, entry, idx, ws_user, env_map)
+        notify(f"  setup[{idx}] (user={user_label}, order={order}): {run}")
+        r = subprocess.run(argv, check=False)
         if r.returncode != 0:
             raise DockerError(
-                f"setup command failed (exit {r.returncode}): {cmd!r}\n"
+                f"setup command failed (exit {r.returncode}): {run!r}\n"
                 f"The workspace container is left running for debugging."
             )
+
+
+def _build_setup_exec(
+    ws: Workspace, entry, idx: int, ws_user: str | None,
+    env_map: dict[str, str],
+) -> tuple[str, list[str], str, int]:
+    """Build the `docker exec` argv for one setup entry, returning
+    `(run_cmd, argv, user_label, order)` for both execution and the notify line.
+
+    A string is today's argv verbatim: `-u 0`, no env, `sh -lc CMD`. A table
+    resolves its `user` (workspace -> config user, or root), gets the binding
+    env, and -- when non-root -- resolves + passes `-e HOME=<home>` (failing
+    with a precise error if the user doesn't exist yet)."""
+    if isinstance(entry, str):
+        return (entry,
+                ["docker", "exec", "-u", "0", ws.ws_container,
+                 "sh", "-lc", entry],
+                "root", 0)
+
+    run = entry["run"]
+    order = entry["order"]
+    # user = "workspace" -> the config `user` (None -> root, per the spec's
+    # "unset/root -> run as-is" mirror); user = "root" -> root.
+    resolved = ws_user if entry["user"] == "workspace" else None
+    is_root = (not resolved) or resolved.split(":", 1)[0] in ("root", "0")
+
+    env_flags: list[str] = []
+    if is_root:
+        for k, v in env_map.items():
+            env_flags += ["-e", f"{k}={v}"]
+        return (run,
+                ["docker", "exec", "-u", "0", *env_flags, ws.ws_container,
+                 "sh", "-lc", run],
+                "root", order)
+
+    # Non-root workspace user: resolve HOME per step (an earlier root step may
+    # have created the user), then pass it plus the binding env.
+    home = _resolve_container_home(ws, resolved.split(":", 1)[0])
+    if home is None:
+        raise DockerError(
+            f"user {resolved!r} does not exist in the container when "
+            f"setup[{idx}] runs -- create it in an earlier root step or set "
+            f'user = "root"'
+        )
+    env_flags = ["-e", f"HOME={home}"]
+    for k, v in env_map.items():
+        env_flags += ["-e", f"{k}={v}"]
+    return (run,
+            ["docker", "exec", "-u", resolved, *env_flags, ws.ws_container,
+             "sh", "-lc", run],
+            resolved, order)
 
 
 def stop_workspace(ws: Workspace) -> None:
@@ -850,7 +961,9 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
         # cadence as setup: runs once per fresh/recreated container (the
         # fabricated parents live in the home volume, so idempotent thereafter).
         chown_mount_parents(ws, cfg, notify)
-        run_setup(ws, cfg, notify)
+        # `bindings` (materialized above) supplies the binding env for typed
+        # setup steps -- placeholders are known post-push, so no in-container curl.
+        run_setup(ws, cfg, notify, bindings=bindings)
         # After setup: the `user` may have been provisioned by it, and must
         # exist before we chown user-owned volumes to it by name.
         chown_user_owned_volumes(ws, cfg, notify)
