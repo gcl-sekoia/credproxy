@@ -1,0 +1,54 @@
+# preset: github-auth — make `gh` AND `git push` (over HTTPS) work off a GitHub
+# token injected on the wire, without the real token ever entering the container.
+#
+# One token, two hosts, two schemes (like the builtin `github` preset, minus the
+# ghcr part): bearer on api.github.com, HTTP basic on github.com. Both parts SHARE
+# one generated placeholder — `gh` hands api's $GITHUB_TOKEN to git for github.com,
+# so the git part must carry the same value to swap it. The setup step points
+# git's credential helper at gh's and derives the git identity from the account.
+#
+# Flagless off the host's `gh` login (gh-cli provider). --provider/--secret (or the
+# template's [[preset]] fields) read the token from another vault.
+
+default_provider = "gh-cli"
+default_secret   = "github.com"
+
+# ghp_credproxy- marker + 26 alnum = 40 chars (classic PAT length, recognizable as
+# a credproxy sentinel). The placeholder never reaches GitHub — the proxy swaps it —
+# and neither gh nor git format-checks it, so the marker prefix is safe.
+[placeholder]
+prefix  = "ghp_credproxy-"
+length  = 40
+charset = "alnumeric"
+
+[[part]]
+suffix   = "api"                                      # -> binding github-auth-api
+injector = "bearer"
+hosts    = ["api.github.com"]
+env      = "GITHUB_TOKEN"
+
+[[part]]
+suffix   = "git"                                      # -> binding github-auth-git
+injector = "basic"
+hosts    = ["github.com"]
+
+[[mount]]
+overlay = "setup.d/github-auth.sh"
+target  = "/opt/github-auth.sh"
+
+[[setup]]
+run   = "bash /opt/github-auth.sh"
+user  = "workspace"
+order = 45                                            # after the toolchain installs `gh`
+
+# The host's `gh` must be installed + authenticated (the gh-cli provider reads its
+# login). Advisory at add/create, authoritative at `doctor`.
+[[requires]]
+kind    = "command"
+command = "gh"
+hint    = "install the GitHub CLI: https://cli.github.com"
+
+[[requires]]
+kind  = "provider"
+fetch = true                                          # test-fetch under `doctor NAME --fetch`
+hint  = "authenticate the host CLI: gh auth login"

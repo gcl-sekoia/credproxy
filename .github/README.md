@@ -11,19 +11,23 @@ unchanged from upstream.
 
 ## What this fork adds
 
-Everything lives in [`overlay/`](../overlay/README.md) — a library of small, composable
-**lib overlays** plus one **opinionated example profile** that wires them together:
+Everything lives in [`overlay/`](../overlay/README.md), as three layered overlays:
 
-- **Lib overlays** — `setup-runner`, `toolchain`, `git-signing`, `github-auth`,
-  `claude-setup`, `claude-managed-settings`, `claude-session-context`. Each is
-  single-purpose, safe by default, and documented by its own README.
-- **[`50-example`](../overlay/50-example/README.md)** — a complete worked profile that
-  composes the libs (its `workspace.template.toml` is what `credproxy create` stamps) and
-  demonstrates each override style: an additive tool list, a settings file-shadow, and a
-  rule param.
+- **[`base`](../overlay/base/README.md)** — a neutral, reusable library of
+  [preset](../docs/guide/06-presets.md) packs (`proxy-ca`, `toolchain`, `claude-code`,
+  `github-auth`, `git-signing`), each carrying the bindings/rules/mounts/env/setup/requires
+  it needs (`claude-code` is an umbrella: token + client config + session hook), plus a
+  neutral workspace template.
+- **[`claude-managed-settings`](../overlay/claude-managed-settings/README.md)** — a
+  standalone opinionated policy pack: a hidden rule that rewrites Claude Code's
+  server-managed settings on the wire.
+- **[`50-example`](../overlay/50-example/README.md)** — an opinionated profile that
+  composes the other two (its `workspace.template.toml` is what `credproxy create` stamps)
+  and adds glue: a persist volume, a fuller tool kit, opinionated Claude defaults.
 
-Build your own on top by adding a higher-priority overlay that *shadows* just the pieces
-you want to change — [`overlay/README.md`](../overlay/README.md) explains the fork/layer model.
+Apply any pack à la carte with `credproxy workspace NAME preset add PACK`, or build your
+own on top by adding a higher-priority overlay that *shadows* just the pieces you want —
+[`overlay/README.md`](../overlay/README.md) explains the fork/layer model.
 
 ## Quickstart
 

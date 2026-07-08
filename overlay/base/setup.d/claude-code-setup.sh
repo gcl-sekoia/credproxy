@@ -1,12 +1,13 @@
 #!/bin/bash
-# Claude Code client config (claude-setup lib):
+# Claude Code client config (part of the claude-code pack):
 #   1. skip interactive onboarding when a non-interactive token is present, and
-#   2. apply baseline settings defaults (from $CLAUDE_SETUP_DEFAULTS).
-# The defaults are a data file (edit/shadow it to change policy — no logic here).
-# Idempotent; called by a profile's setup.sh. Runs as the workspace user.
+#   2. apply baseline settings defaults (from $CLAUDE_CODE_DEFAULTS).
+# The defaults are a data file (a profile mounts one — edit/shadow it to change
+# policy; no logic here). Idempotent; run by the claude-code preset's [[setup]]
+# step, as the workspace user.
 set -euo pipefail
 
-DEFAULTS_FILE="${CLAUDE_SETUP_DEFAULTS:-/opt/claude-setup/settings-defaults.json}"
+DEFAULTS_FILE="${CLAUDE_CODE_DEFAULTS:-/opt/claude-code/settings-defaults.json}"
 
 # CLAUDE_CONFIG_DIR may point at a not-yet-created dir (e.g. a subdir on a persistent
 # volume), and the ~/.claude fallback can be absent too; ensure it exists before we
@@ -30,5 +31,5 @@ if [ -f "$DEFAULTS_FILE" ]; then
     tmp="$(mktemp)"
     printf '%s\n' "$settings" | jq --slurpfile d "$DEFAULTS_FILE" '$d[0] * .' > "$tmp" \
         && mv "$tmp" "$settings_file" \
-        || { rm -f "$tmp"; echo "claude-setup: failed to write $settings_file" >&2; exit 1; }
+        || { rm -f "$tmp"; echo "claude-code: failed to write $settings_file" >&2; exit 1; }
 fi

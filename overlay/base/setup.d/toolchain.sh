@@ -3,7 +3,7 @@
 # the union of every /opt/toolchain/tools.d/*.list (column 1 = mise name) is
 # installed, so a profile adds tools by mounting another fragment — no need to copy
 # the base list. Change the toolset by editing/adding fragments, not this script.
-# Runs as the workspace user (setup-runner re-execs before calling this).
+# Run by the toolchain preset's [[setup]] step, as the workspace user.
 set -euo pipefail
 
 TOOLS_DIR="${TOOLCHAIN_TOOLS_DIR:-/opt/toolchain/tools.d}"

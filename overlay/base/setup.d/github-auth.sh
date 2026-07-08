@@ -1,8 +1,7 @@
 #!/bin/bash
-# github-auth lib: make `gh` AND `git push` (over HTTPS) work off the injected
-# GitHub token, without the real token ever entering the container. Pairs with the
-# `github-api` (bearer, exports GITHUB_TOKEN) + `github-git` (basic, github.com)
-# bindings, which SHARE one placeholder.
+# github-auth pack: make `gh` AND `git push` (over HTTPS) work off the injected
+# GitHub token, without the real token ever entering the container. The pack's two
+# parts (github-auth-api bearer / -git basic) SHARE one placeholder.
 #
 #   * gh needs nothing configured — it honors $GITHUB_TOKEN directly.
 #   * git cannot read $GITHUB_TOKEN, so point its credential helper at gh's:
@@ -11,7 +10,8 @@
 #     then swaps for the real token on the wire.
 #   * git identity comes from the authenticated account (noreply email for privacy).
 #
-# Runs as the workspace user (setup-runner re-execs before calling this).
+# Runs as the workspace user, with the binding env injected (so $GITHUB_TOKEN is
+# already set — no need to pull /exports.sh).
 set -euo pipefail
 
 # mise shims aren't on PATH in a non-login setup step; add them so `gh` resolves.
@@ -23,12 +23,10 @@ export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
 git config --global credential."https://github.com".helper '!gh auth git-credential'
 git config --global credential."https://gist.github.com".helper '!gh auth git-credential'
 
-# git identity from the authenticated account. `gh api user` needs $GITHUB_TOKEN
-# in the env — the binding exports it into login shells but not into this setup
-# step, so pull the binding env from the proxy first. Best-effort: a workspace
-# without the github bindings (or host gh login) still gets the helper above and
-# just skips identity, rather than failing the whole setup.
-eval "$(curl -fsS http://proxy.local/exports.sh || true)"
+# git identity from the authenticated account (`gh api user`, which reads the
+# injected $GITHUB_TOKEN). Best-effort: a workspace without the github parts (or a
+# host without a `gh` login) still gets the helper above and just skips identity,
+# rather than failing the whole setup.
 if [ -n "${GITHUB_TOKEN:-}" ] && u="$(gh api user 2>/dev/null)"; then
     git config --global user.name  "$(printf '%s' "$u" | jq -r '.name // .login')"
     git config --global user.email "$(printf '%s' "$u" | jq -r '(.id|tostring) + "+" + .login + "@users.noreply.github.com"')"

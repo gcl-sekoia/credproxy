@@ -1,9 +1,6 @@
-# Example profile's oh-my-zsh custom drop-in. oh-my-zsh sources every *.zsh in $ZSH_CUSTOM
-# (~/.oh-my-zsh/custom) during startup — BEFORE it loads the theme — so this
-# extends the image's stock oh-my-zsh config with NO edit to ~/.zshrc.
-
-eval "$(mise activate zsh)"
-
+# Example profile's prompt tweak — an oh-my-zsh custom drop-in (sourced from
+# $ZSH_CUSTOM alongside base's mise.zsh, no ~/.zshrc edit).
+#
 # The devcontainers theme shows the username (%n = "vscode", not useful here).
 # Keep the theme but swap the username for the short hostname (%m = the workspace
 # name). Custom files are sourced before the theme sets PROMPT, so defer the swap
