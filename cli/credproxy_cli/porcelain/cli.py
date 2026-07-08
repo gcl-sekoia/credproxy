@@ -429,6 +429,12 @@ def _expand_template_presets(base_text: str, source: str):
         exp = build_preset(entry.name, provider, secret)
         text, announce = _expand_preset_into_text(
             text, exp, entry.name, source, context="create")
+        # Host-prerequisite checks (#58): advisory -- the stamp is durable and
+        # host state is fixable afterward, so create never fails on a bad check.
+        # `do_fetch=True` here (create is interactive, like `preset add`).
+        from ..core import prereqs
+        announce["requires"] = [prereqs.summary(r) for r in prereqs.evaluate(
+            spec.requires, provider=provider, secret=secret, do_fetch=True)]
         announces.append(announce)
 
     # Post-strip safety net (backstops findings 1/2): the composed config must
@@ -1328,13 +1334,20 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
                 core_docker.container_status(ws.ws_container) is not None
         except CredproxyError:
             container_exists = False
+    # Host-prerequisite checks (#58): advisory here -- the stamp already landed
+    # (durable config), so a failing check reports + hints but never fails the
+    # add. `do_fetch=True` (a `fetch=true` provider check is an interactive user
+    # action, like `binding test`). Report ALL, not fail-first.
+    from ..core import prereqs
+    requires = [prereqs.summary(r) for r in prereqs.evaluate(
+        spec.requires, provider=provider, secret=secret, do_fetch=True)]
     render.OUT.preset_applied(
         ws.name, announce["preset"], announce["bindings"], announce["rules"],
         announce["newly_intercepted"], mounts=announce["mounts"],
         env=announce["env"], skipped_env=announce["skipped_env"],
         setup=announce["setup"],
         recreate=(container_exists and stamped_container_half),
-        attached=attached)
+        attached=attached, requires=requires)
 
 
 def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:

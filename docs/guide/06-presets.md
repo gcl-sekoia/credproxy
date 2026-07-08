@@ -136,6 +136,72 @@ Files a pack ships (that `setup.d/github-auth.sh`) live in the same layered
 registry as the pack itself and are resolved from the pack's own tier →
 [Overlays](../advanced/overlays.md).
 
+## Declaring host prerequisites
+
+Some things a pack needs live on the **host**, not in the container: the `gh` CLI
+must be installed, a signing key's socket dir must exist, a provider must be able
+to actually serve the secret. A pack can **declare** those with `[[requires]]`
+blocks so the tooling checks them and tells you exactly what to fix.
+
+```toml
+[[requires]]
+kind = "command"           # found on the host PATH (looked up, never run)
+command = "gh"
+hint = "install the GitHub CLI: https://cli.github.com"
+
+[[requires]]
+kind = "path"              # host path exists (~ and $VARS expanded)
+path = "~/.ssh/credproxy-agent"
+hint = "run credproxy-signing-agent to create the socket dir"
+
+[[requires]]
+kind = "env"               # host env var set and non-empty
+var = "SOME_VAR"
+hint = "export SOME_VAR before start"
+
+[[requires]]
+kind = "provider"          # the provider chosen for this pack resolves
+fetch = true               # (optional) also test-fetch the secret
+hint = "authenticate: gh auth login"
+```
+
+The four kinds — `command`, `path`, `env`, `provider` — are **the whole set**,
+implemented by credproxy itself. A pack **never supplies a script to run** on the
+host: declaring a prerequisite is safe even from a freshly cloned overlay,
+because nothing pack-authored executes. The one sanctioned host-executable is a
+[provider](../reference/providers.md), reached only through the normal provider
+protocol for the `provider` kind (and `fetch = true`, like `binding test`, may
+prompt or unlock a vault).
+
+Checks are **advisory** at `preset add` / `create` time and **authoritative** at
+`doctor` time:
+
+```console
+$ credp preset add git-signing
+applied preset 'git-signing' to workspace 'myproject': 1 binding(s), 0 rule(s)
+  binding git-signing-key   ...
+unmet prerequisite (path): /home/you/.ssh/credproxy-agent does not exist -- run credproxy-signing-agent to create the socket dir
+1 unmet prerequisite(s) above -- fix them, then `credproxy doctor myproject` to re-check
+```
+
+The pack still **stamps** — the config is durable and the host state is fixable
+afterward, so failing checks warn but never block the add (it exits 0). Once you
+fix the prerequisite, `credproxy doctor myproject` goes green:
+
+```console
+$ credproxy doctor myproject
+✗ [myproject] preset 'git-signing' requires (path): /home/you/.ssh/credproxy-agent does not exist  → run credproxy-signing-agent ...
+$ credproxy-signing-agent            # create the socket dir
+$ credproxy doctor myproject
+✓ [myproject] preset 'git-signing' requires (path): /home/you/.ssh/credproxy-agent exists
+```
+
+`doctor` discovers which packs a workspace uses from the provenance comments the
+stamp left behind, so it re-checks exactly the packs you applied. A
+`fetch = true` provider check runs only under `doctor NAME --fetch` (it resolves
+a secret, which can prompt) — a plain `doctor` degrades it to a resolve-only
+provider check and never fetches.
+
 > [!WARNING]
 > Notice the `newly intercepted` line in the output. Adding a binding (or a rule)
 > for a host tells the proxy to open TLS to it. A workspace that has not

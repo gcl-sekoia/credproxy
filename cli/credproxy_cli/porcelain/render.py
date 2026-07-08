@@ -179,7 +179,7 @@ class Renderer:
             self._preset_summary(
                 name, p["preset"], p["bindings"], p["rules"],
                 p["newly_intercepted"], p["mounts"], p["env"],
-                p["skipped_env"], p["setup"])
+                p["skipped_env"], p["setup"], p.get("requires"))
         # An ATTACHED workspace has no `start` (its containers are external);
         # the follow-up there is a config push.
         verb = "push" if attached else "start"
@@ -616,7 +616,8 @@ class Renderer:
     def _preset_summary(self, ws: str, preset: str, bindings: list[dict],
                         rules: list[dict], newly_intercepted: list[str],
                         mounts: list[dict], env: list[dict],
-                        skipped_env: list[str], setup: list[dict]) -> None:
+                        skipped_env: list[str], setup: list[dict],
+                        requires: list[dict] | None = None) -> None:
         """The per-preset stamp summary (header + item lines + skipped-env /
         newly-intercepted advisories), shared by `preset_applied` and `create`'s
         per-entry announcement. No push hint / recreate warning -- those are the
@@ -653,6 +654,18 @@ class Renderer:
                 + ", ".join(newly_intercepted)
                 + " -- a workspace that hasn't bootstrapped the CA will see a "
                   "cert error there until it does")
+        # Host-prerequisite checks (#58): advisory here (the stamp landed), so
+        # print only the UNMET ones with their remedy. `doctor NAME` re-checks
+        # them authoritatively.
+        unmet = [rq for rq in (requires or []) if not rq.get("ok")]
+        for rq in unmet:
+            line = f"unmet prerequisite ({rq['kind']}): {rq['detail']}"
+            if rq.get("hint"):
+                line += f" -- {rq['hint']}"
+            say(line)
+        if unmet:
+            say(f"{len(unmet)} unmet prerequisite(s) above -- fix them, then "
+                f"`credproxy doctor {ws}` to re-check")
 
     def preset_applied(self, ws: str, preset: str, bindings: list[dict],
                        rules: list[dict], newly_intercepted: list[str],
@@ -661,9 +674,11 @@ class Renderer:
                        skipped_env: list[str] | None = None,
                        setup: list[dict] | None = None,
                        recreate: bool = False,
-                       attached: bool = False) -> None:
+                       attached: bool = False,
+                       requires: list[dict] | None = None) -> None:
         self._preset_summary(ws, preset, bindings, rules, newly_intercepted,
-                             mounts or [], env or [], skipped_env or [], setup or [])
+                             mounts or [], env or [], skipped_env or [],
+                             setup or [], requires or [])
         if recreate:
             say("container-half config changed the workspace spec -- "
                 f"restart to apply: credproxy workspace {ws} start")
@@ -822,12 +837,13 @@ class JsonRenderer(Renderer):
                        skipped_env: list[str] | None = None,
                        setup: list[dict] | None = None,
                        recreate: bool = False,
-                       attached: bool = False) -> None:
+                       attached: bool = False,
+                       requires: list[dict] | None = None) -> None:
         self._emit({"workspace": ws, "preset": preset, "bindings": bindings,
                     "rules": rules, "newly_intercepted": newly_intercepted,
                     "mounts": mounts or [], "env": env or [],
                     "skipped_env": skipped_env or [], "setup": setup or [],
-                    "recreate": recreate})
+                    "recreate": recreate, "requires": requires or []})
 
     def provider_show(self, info: dict) -> None:
         self._emit(info)

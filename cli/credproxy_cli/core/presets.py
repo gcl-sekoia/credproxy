@@ -45,6 +45,25 @@ class _PresetRule:
     rule: "core_rules.Rule"  # a validated Rule with name=None (filled at build)
 
 
+# The prerequisite check kinds a pack may DECLARE. Each is implemented by core
+# (host-side, read-only) -- a pack never supplies shell (`core/prereqs.py`).
+_REQUIRE_KINDS = ("path", "command", "env", "provider")
+
+
+@dataclass(frozen=True)
+class _Require:
+    """One declarative `[[requires]]` host-prerequisite check. `kind` selects the
+    check; exactly one of the per-kind payload fields is set (`path`/`command`/
+    `var`); `fetch` is provider-only (test-fetch the secret, not just resolve the
+    provider). `hint` is the operator remedy shown on failure."""
+    kind: str
+    path: str | None = None       # kind == "path"
+    command: str | None = None    # kind == "command"
+    var: str | None = None        # kind == "env"
+    fetch: bool = False           # kind == "provider"
+    hint: str | None = None
+
+
 @dataclass(frozen=True)
 class _PresetMount:
     """One preset `[[mount]]`, in stamp-ready form. `value` is what gets stamped
@@ -87,6 +106,10 @@ class PresetSpec:
     mounts: tuple[_PresetMount, ...] = ()
     env: tuple[tuple[str, str], ...] = ()      # ordered (key, value) pairs
     setup: tuple[dict, ...] = ()               # {"run", "user", "order"} dicts
+    # Declarative host-prerequisite checks (#58): NOT stamped into the workspace
+    # (host state, not config) -- checked (advisory) at `preset add`/`create` and
+    # (authoritative) at `doctor` time. Ordered as declared.
+    requires: tuple[_Require, ...] = ()
     # first-12-hex of sha256 over the preset DEFINITION FILE bytes, for the
     # provenance marker (`rev=`); the pack files are pinned to a tier, this pins
     # the stamp to a pack revision.
@@ -150,6 +173,7 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
     mounts_raw = raw.get("mount") or []
     env_raw = raw.get("env") or {}
     setup_raw = raw.get("setup") or []
+    requires_raw = raw.get("requires") or []
     if not isinstance(parts_raw, list):
         raise ConfigError(f"{src}: [[part]] must be an array of tables")
     if not isinstance(rules_raw, list):
@@ -160,7 +184,11 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
         raise ConfigError(f"{src}: [env] must be a table")
     if not isinstance(setup_raw, list):
         raise ConfigError(f"{src}: [[setup]] must be an array of tables")
+    if not isinstance(requires_raw, list):
+        raise ConfigError(f"{src}: [[requires]] must be an array of tables")
     if not (parts_raw or rules_raw or mounts_raw or env_raw or setup_raw):
+        # `[[requires]]` alone is not a pack -- there'd be nothing to stamp, so
+        # the checks would guard config that was never written.
         raise ConfigError(
             f"{src}: needs at least one [[part]], [[rule]], [[mount]], [env], "
             f"or [[setup]]")
@@ -210,6 +238,8 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
               for i, m in enumerate(mounts_raw)]
     env = _parse_preset_env(env_raw, src)
     setup = [_parse_preset_setup(s, i, src) for i, s in enumerate(setup_raw)]
+    requires = [_parse_preset_require(r, i, src, has_parts=bool(parts_raw))
+                for i, r in enumerate(requires_raw)]
 
     return PresetSpec(
         name=name,
@@ -219,10 +249,71 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
         mounts=tuple(mounts),
         env=tuple(env),
         setup=tuple(setup),
+        requires=tuple(requires),
         rev=rev,
         default_provider=raw.get("default_provider"),
         default_secret=raw.get("default_secret"),
     )
+
+
+def _parse_preset_require(r, i: int, src: str, *, has_parts: bool) -> _Require:
+    """One preset `[[requires]]` entry -> a `_Require`. `kind` selects the check
+    and dictates which single payload field is required; unknown keys are
+    rejected (mirroring the other per-section validators). A `provider` check on
+    a pack with no `[[part]]` bindings is a definition error (nothing to fetch),
+    and `fetch` is provider-only."""
+    where = f"{src} requires[{i}]"
+    if not isinstance(r, dict):
+        raise ConfigError(f"{where}: must be a table")
+    kind = r.get("kind")
+    if kind not in _REQUIRE_KINDS:
+        raise ConfigError(
+            f"{where}: 'kind' must be one of {', '.join(_REQUIRE_KINDS)}, "
+            f"got {kind!r}")
+
+    # Per-kind required payload field + the full allowed-key set for this kind.
+    field_by_kind = {"path": "path", "command": "command", "env": "var"}
+    allowed = {"kind", "hint"}
+    payload = {"path": None, "command": None, "var": None}
+    fetch = False
+
+    if kind == "provider":
+        if not has_parts:
+            raise ConfigError(
+                f"{where}: a 'provider' check needs the pack to have [[part]] "
+                f"bindings (there is nothing to resolve/fetch otherwise)")
+        allowed.add("fetch")
+        f = r.get("fetch", False)
+        if not isinstance(f, bool):
+            raise ConfigError(f"{where}: 'fetch' must be a boolean")
+        fetch = f
+    else:
+        field = field_by_kind[kind]
+        allowed.add(field)
+        # `fetch` is provider-only -- a misplaced `fetch` on another kind is a
+        # definition error (it would silently do nothing).
+        if "fetch" in r:
+            raise ConfigError(
+                f"{where}: 'fetch' applies only to a 'provider' check, not "
+                f"{kind!r}")
+        val = r.get(field)
+        if not isinstance(val, str) or not val:
+            raise ConfigError(
+                f"{where}: a {kind!r} check needs a non-empty '{field}' string")
+        payload[field] = val
+
+    hint = r.get("hint")
+    if hint is not None and (not isinstance(hint, str) or not hint):
+        raise ConfigError(f"{where}: 'hint' must be a non-empty string or absent")
+
+    extra = sorted(set(r) - allowed)
+    if extra:
+        raise ConfigError(
+            f"{where}: unknown key(s): {', '.join(extra)} "
+            f"(allowed for kind={kind!r}: {', '.join(sorted(allowed))})")
+
+    return _Require(kind=kind, path=payload["path"], command=payload["command"],
+                    var=payload["var"], fetch=fetch, hint=hint)
 
 
 def _parse_preset_mount(m, i: int, src: str, tier: str) -> _PresetMount:
@@ -407,9 +498,26 @@ def describe_presets() -> list[dict]:
             ],
             "env": [{"key": k, "value": v} for k, v in spec.env],
             "setup": [dict(s) for s in spec.setup],
+            "requires": [require_summary(rq) for rq in spec.requires],
         }
         for spec in sorted(load_presets().values(), key=lambda s: s.name)
     ]
+
+
+def require_summary(rq: _Require) -> dict:
+    """A JSON-clean summary of one `[[requires]]` check (for `preset list` and
+    the requires-result rendering). Only the payload field for its kind is
+    carried, plus `fetch` for a provider check."""
+    out: dict = {"kind": rq.kind, "hint": rq.hint}
+    if rq.kind == "path":
+        out["path"] = rq.path
+    elif rq.kind == "command":
+        out["command"] = rq.command
+    elif rq.kind == "env":
+        out["var"] = rq.var
+    elif rq.kind == "provider":
+        out["fetch"] = rq.fetch
+    return out
 
 
 @dataclass(frozen=True)

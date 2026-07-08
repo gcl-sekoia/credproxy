@@ -129,6 +129,26 @@ def _line_comment(line: str) -> str:
     return ""
 
 
+def applied_preset_names(text: str) -> list[str]:
+    """Every preset name that has a provenance marker in `text`, in first-seen
+    order, deduped. The diagnostics read (#58 `doctor`) that discovers which
+    packs a workspace uses -- the loader never reads comments, but doctor may.
+    Only real comments count (a `#` outside any string), matching
+    `already_applied`, so a marker-looking substring inside a string VALUE can't
+    inject a phantom pack name."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        comment = _line_comment(line)
+        if not comment:
+            continue
+        m = _MARKER_RE.search(comment)
+        if m and m.group(1) not in seen:
+            seen.add(m.group(1))
+            out.append(m.group(1))
+    return out
+
+
 def already_applied(text: str, name: str) -> bool:
     """True iff `text` already carries a provenance marker for preset `name` --
     the double-add guard (protects pure-container packs, which have no

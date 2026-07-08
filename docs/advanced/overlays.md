@@ -166,6 +166,40 @@ as literal v1 defaults, existence-checked when the workspace starts. Each stampe
 block carries an inert `# credproxy:preset …` provenance comment, so re-applying
 the same pack is refused rather than duplicated.
 
+**Declare your pack's host prerequisites.** A pack often needs host state its
+container half can't provide — the `gh` CLI installed, a signing-agent socket
+dir, a set env var, a provider that can serve the secret. Declare each with a
+`[[requires]]` block so `preset add`/`create` check it (advisory — the pack still
+stamps) and `doctor` re-checks it (authoritative):
+
+```toml
+[[requires]]
+kind = "command"           # on the host PATH (shutil.which — looked up, never run)
+command = "gh"
+hint = "install the GitHub CLI: https://cli.github.com"
+
+[[requires]]
+kind = "path"              # host path exists (~ / $VARS expanded)
+path = "~/.ssh/credproxy-agent"
+
+[[requires]]
+kind = "env"               # host env var set and non-empty
+var = "SOME_VAR"
+
+[[requires]]
+kind = "provider"          # the provider chosen for this pack resolves
+fetch = true               # (optional) also test-fetch the secret; needs [[part]]
+hint = "authenticate: gh auth login"
+```
+
+The four kinds — `command` / `path` / `env` / `provider` — are the **whole set**,
+implemented by credproxy. **A pack never supplies a script to run** on the host,
+so activating an overlay from a fresh clone can't execute pack-authored code; the
+only host-executable is a [provider](../reference/providers.md), reached through
+the normal protocol for the `provider` kind. `doctor` finds which packs a
+workspace uses from the stamped provenance comments; a `fetch = true` check runs
+only under `doctor NAME --fetch`. See [the preset guide](../guide/06-presets.md#declaring-host-prerequisites).
+
 **A template can *declare* presets.** Instead of inlining literal `[[binding]]`
 blocks (which bypass preset machinery), a `workspace.template.toml` /
 `workspace.attach.template.toml` may carry `[[preset]]` entries that `create`

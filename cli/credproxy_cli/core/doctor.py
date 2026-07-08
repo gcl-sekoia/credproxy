@@ -160,6 +160,7 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
     out += _binding_checks(ws, fetch=fetch)
     out += _script_compile_checks(ws)
     out += _rule_checks(ws)
+    out += _preset_requires_checks(ws, fetch=fetch)
     return out
 
 
@@ -322,6 +323,95 @@ def _probe_bindings_raw(ws: Workspace, bindings: list, out: list[Check]) -> None
                     err = hostmatch.validate_pattern(h)
                     if err:
                         out.append(_fail(f"{bid}:host[{j}]", f"[{ws.name}] {label}: {err}"))
+
+
+def _preset_requires_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
+    """Re-run each stamped preset's declarative `[[requires]]` host-prereq checks
+    (#58) -- the authoritative side (`preset add`/`create` are advisory).
+
+    Discovery is via the provenance markers the stamp left behind (a diagnostics
+    read; the loader never reads comments): scan the config text for pack names,
+    then for each still-resolvable pack re-run its checks. A marker naming a pack
+    that no longer resolves in the registry is a skip-with-note (`ok=True`) -- the
+    stamped config still works; the pack just isn't around to describe its
+    prerequisites.
+
+    The `provider` kind checks the provider CHOSEN at stamp time, recovered from
+    the pack's stamped bindings (`<pack>-<suffix>` carry ordinary provider/secret
+    fields) -- not a pack default, so no side-channel state is needed. A
+    `fetch=true` check runs only under `doctor NAME --fetch` (the `fetch` gate);
+    without it, it degrades to a resolve-only provider check -- so a nameless
+    `doctor` scan-all never invokes a provider."""
+    from . import prereqs
+    from .preset_stamp import applied_preset_names
+    from .presets import load_presets
+
+    try:
+        text = ws.config_path.read_text()
+    except OSError:
+        return []
+    names = applied_preset_names(text)
+    if not names:
+        return []
+
+    presets = load_presets()
+
+    # Map each stamped binding name -> (provider, secret), so a pack's provider
+    # check can recover the credential actually chosen at stamp time. Best-effort:
+    # an invalid config (already flagged by :bindings) just yields no mapping, so
+    # provider checks report "could not determine provider".
+    from .bindings import load_bindings
+    binding_cred: dict[str, tuple[str | None, object]] = {}
+    try:
+        for b in load_bindings(ws):
+            binding_cred[b.name] = (b.provider, b.secret)
+    except (CredproxyError, tomllib.TOMLDecodeError, OSError):
+        pass
+
+    out: list[Check] = []
+    for pack in names:
+        spec = presets.get(pack)
+        if spec is None:
+            out.append(Check(
+                f"ws:{ws.name}:preset:{pack}", True,
+                f"[{ws.name}] preset '{pack}' is stamped but no longer resolves "
+                f"in the registry -- prerequisite checks skipped",
+                "the stamped config still works; reinstall the pack to re-check "
+                "its prerequisites"))
+            continue
+        if not spec.requires:
+            continue
+        provider, secret = _pack_credential(spec, binding_cred)
+        results = prereqs.evaluate(spec.requires, provider=provider,
+                                   secret=_secret_ref(secret), do_fetch=fetch)
+        for i, r in enumerate(results):
+            cid = f"ws:{ws.name}:preset:{pack}:requires[{i}]"
+            msg = f"[{ws.name}] preset '{pack}' requires ({r.kind}): {r.detail}"
+            out.append(_ok(cid, msg) if r.ok else Check(cid, False, msg, r.hint))
+    return out
+
+
+def _pack_credential(spec, binding_cred: dict) -> tuple[str | None, object]:
+    """Recover the (provider, secret) a pack's bindings were stamped with, by
+    matching its expected `<pack>-<suffix>` names against the loaded bindings.
+    All parts of a pack share one provider/secret, so the first match wins.
+    Returns (None, None) for a pack with no bindings or none found."""
+    for part in spec.parts:
+        cred = binding_cred.get(f"{spec.name}-{part.suffix}")
+        if cred is not None:
+            return cred
+    return None, None
+
+
+def _secret_ref(secret) -> str | None:
+    """A single secret ref for a provider test-fetch. A binding's secret is a
+    bare ref (str) or a {slot: ref} map; the provider check just needs one ref to
+    prove the provider serves the credential, so pick the first."""
+    if isinstance(secret, str):
+        return secret
+    if isinstance(secret, dict) and secret:
+        return next(iter(secret.values()))
+    return None
 
 
 def _rule_checks(ws: Workspace) -> list[Check]:
