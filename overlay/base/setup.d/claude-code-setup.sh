@@ -1,10 +1,12 @@
 #!/bin/bash
 # Claude Code client config (part of the claude-code pack):
-#   1. skip interactive onboarding when a non-interactive token is present, and
-#   2. apply baseline settings defaults (from $CLAUDE_CODE_DEFAULTS).
-# The defaults are a data file (a profile mounts one — edit/shadow it to change
-# policy; no logic here). Idempotent; run by the claude-code preset's [[setup]]
-# step, as the workspace user.
+#   1. skip interactive onboarding when a non-interactive token is present,
+#   2. apply baseline settings defaults (from $CLAUDE_CODE_DEFAULTS), and
+#   3. install shipped agent manifests (from $CLAUDE_CODE_AGENTS_DIR) into the
+#      config's agents/ dir.
+# Both the defaults and the agents are data (a profile mounts them — edit/shadow
+# to change policy; no logic here); base ships neither, only this mechanism.
+# Idempotent; run by the claude-code preset's [[setup]] step, as the workspace user.
 set -euo pipefail
 
 DEFAULTS_FILE="${CLAUDE_CODE_DEFAULTS:-/opt/claude-code/settings-defaults.json}"
@@ -32,4 +34,19 @@ if [ -f "$DEFAULTS_FILE" ]; then
     printf '%s\n' "$settings" | jq --slurpfile d "$DEFAULTS_FILE" '$d[0] * .' > "$tmp" \
         && mv "$tmp" "$settings_file" \
         || { rm -f "$tmp"; echo "claude-code: failed to write $settings_file" >&2; exit 1; }
+fi
+
+# 3. Agent manifests: copy every shipped agent def into the config's agents/ dir.
+#    Mounted read-only (a profile ships them), so copy to land editable, config-dir-
+#    resolved files. Only shipped names are (re)written each run -- the overlay is the
+#    source of truth for those; user-authored agents of other names are left untouched.
+AGENTS_DIR="${CLAUDE_CODE_AGENTS_DIR:-/opt/claude-code/agents.d}"
+if [ -d "$AGENTS_DIR" ]; then
+    agents_dest="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/agents"
+    mkdir -p "$agents_dest"
+    for a in "$AGENTS_DIR"/*.md; do
+        [ -e "$a" ] || continue                        # empty dir -> nothing shipped
+        cp "$a" "$agents_dest/" \
+            || { echo "claude-code: failed to install agent $(basename "$a")" >&2; exit 1; }
+    done
 fi
