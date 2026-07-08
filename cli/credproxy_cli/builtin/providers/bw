@@ -44,68 +44,66 @@ class BwError(Exception):
     """A backend failure (bw missing, locked-and-can't-unlock, crash) -> exit 1."""
 
 
-# Cached for the lifetime of one invocation: (by_id, by_name, session). The
-# whole point of the batch protocol -- `bw list items` runs at most once even
-# when many refs are requested.
+# Cached for the lifetime of one invocation: (by_id, by_name). The whole point
+# of the batch protocol -- `bw list items` runs at most once even when many refs
+# are requested.
 _VAULT = None
 
 
-def _bw(args, session=None):
-    """Run `bw <args>`, threading a session key when we have one. stderr is
-    captured so a failure message can be surfaced cleanly."""
-    env = dict(os.environ)
-    if session:
-        env["BW_SESSION"] = session
-    return subprocess.run(["bw", *args], capture_output=True, text=True, env=env)
+def _bw(args):
+    """Run `bw <args>` and capture stdout (the JSON payload). When a controlling
+    terminal is available, wire `bw`'s stdin+stderr to it so it can prompt for
+    the master password itself when the vault is locked -- a no-op when it's
+    already unlocked via an ambient BW_SESSION. Without a terminal (CI, a
+    `credproxy push` in a pipeline) run non-interactively, so a locked vault
+    fails fast with guidance rather than hanging on a prompt nothing can answer.
 
+    Letting `bw` prompt directly means one call both unlocks AND reads -- no
+    separate `bw status`/`bw unlock` round-trips (each its own ~1s process
+    startup + vault decrypt). The parent CLI snapshots+restores tty echo around
+    the whole fetch, so a `bw` killed mid-prompt can't leave the shell echo-off.
 
-def _status():
-    r = _bw(["status"])
-    if r.returncode != 0:
-        raise BwError(f"`bw status` failed: {r.stderr.strip() or 'is bw installed?'}")
+    stdin and stderr get SEPARATE `/dev/tty` handles (mirroring a shell's
+    `</dev/tty 2>/dev/tty`); one shared read+write handle wedges bw's password
+    prompt (it bails without reading and leaks a stray newline onto stdout)."""
+    tty_in = tty_err = None
     try:
-        return json.loads(r.stdout)
-    except ValueError as e:
-        raise BwError(f"`bw status` returned non-JSON: {e}")
-
-
-def _ensure_unlocked():
-    """Return a session key for vault calls, unlocking exactly once if needed.
-    Only ever reached from the get path -- never from describe/help, so listing
-    providers never pops an unlock prompt."""
-    st = _status().get("status")
-    if st == "unlocked":
-        return os.environ.get("BW_SESSION")  # ambient session is valid
-    if st == "unauthenticated":
-        raise BwError("Bitwarden is logged out; run `bw login` first")
-    # locked -> prompt once for the master password. getpass reads /dev/tty, so
-    # it doesn't collide with our stdin (which carries the protocol request).
-    import getpass
+        tty_in = open("/dev/tty", "r")
+        tty_err = open("/dev/tty", "w")
+    except OSError:
+        if tty_in is not None:
+            tty_in.close()
+        tty_in = tty_err = None
     try:
-        pw = getpass.getpass("Bitwarden master password: ", stream=sys.stderr)
-    except (EOFError, OSError):
-        raise BwError("vault is locked and no terminal is available to unlock it "
-                      "(unlock with `bw unlock` and export BW_SESSION)")
-    # Pass the password via the environment (--passwordenv), keeping it out of
-    # argv / the process list.
-    env = dict(os.environ, BW_MASTERPW=pw)
-    r = subprocess.run(["bw", "unlock", "--passwordenv", "BW_MASTERPW", "--raw"],
-                       capture_output=True, text=True, env=env)
-    if r.returncode != 0 or not r.stdout.strip():
-        raise BwError(f"`bw unlock` failed: {r.stderr.strip() or 'wrong password?'}")
-    return r.stdout.strip()
+        if tty_in is not None:
+            return subprocess.run(["bw", *args], stdin=tty_in, stderr=tty_err,
+                                  stdout=subprocess.PIPE, text=True)
+        return subprocess.run(["bw", *args], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True)
+    finally:
+        for f in (tty_in, tty_err):
+            if f is not None:
+                f.close()
 
 
 def _load_vault():
-    """Fetch + index the vault once per invocation: one `bw list items` decrypt
-    for the entire batch. Returns (by_id, by_name, session)."""
+    """Fetch + index the vault once per invocation with a single `bw list items`
+    -- one decrypt for the whole batch. `bw` prompts for the master password
+    itself (on the terminal) when the vault is locked, so this one call unlocks
+    AND reads. Returns (by_id, by_name)."""
     global _VAULT
     if _VAULT is not None:
         return _VAULT
-    session = _ensure_unlocked()
-    r = _bw(["list", "items"], session)
+    r = _bw(["list", "items"])
     if r.returncode != 0:
-        raise BwError(f"`bw list items` failed: {r.stderr.strip()}")
+        # stderr is only captured on the no-tty path (on a tty it went to the
+        # terminal the user is looking at); fall back to guidance when we have
+        # nothing to quote.
+        detail = (r.stderr or "").strip()
+        raise BwError("`bw list items` failed" + (f": {detail}" if detail else
+                      " (vault locked with no terminal to unlock it, or logged "
+                      "out -- unlock with `bw unlock` and export BW_SESSION, or "
+                      "run `bw login`)"))
     try:
         items = json.loads(r.stdout)
     except ValueError as e:
@@ -114,11 +112,11 @@ def _load_vault():
     for it in items:
         by_id[it["id"]] = it
         by_name.setdefault(it["name"], []).append(it)
-    _VAULT = (by_id, by_name, session)
+    _VAULT = (by_id, by_name)
     return _VAULT
 
 
-def _extract(item, field, session):
+def _extract(item, field):
     login = item.get("login") or {}
     if field == "password":
         v = login.get("password")
@@ -131,8 +129,10 @@ def _extract(item, field, session):
         v = item.get("notes")
     elif field == "totp":
         # A TOTP is generated, not stored, so it needs its own `bw get totp`
-        # (only refs that actually ask for totp pay this extra call).
-        r = _bw(["get", "totp", item["id"]], session)
+        # (only refs that actually ask for totp pay this second call). If the
+        # list-items call above unlocked interactively (no persisted session), a
+        # locked vault re-prompts here -- rare enough for totp refs to accept.
+        r = _bw(["get", "totp", item["id"]])
         if r.returncode != 0 or not r.stdout.strip():
             raise NotFound(f"item {item['name']!r} has no TOTP")
         return r.stdout.strip()
@@ -152,7 +152,7 @@ def get(ref):
     field = field if sep else "password"
     if not item_ref:
         raise NotFound(f"empty item in ref {ref!r}")
-    by_id, by_name, session = _load_vault()
+    by_id, by_name = _load_vault()
     item = by_id.get(item_ref)
     if item is None:
         matches = by_name.get(item_ref, [])
@@ -163,7 +163,7 @@ def get(ref):
         item = matches[0] if matches else None
     if item is None:
         raise NotFound(f"no Bitwarden item {item_ref!r}")
-    return _extract(item, field, session)
+    return _extract(item, field)
 
 
 # ════ protocol footer (identical for every provider — skip on a scan) ═
