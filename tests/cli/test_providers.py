@@ -318,6 +318,9 @@ def test_builtin_bw_provider_batches_and_extracts(xdg, monkeypatch, tmp_path):
     }
     # The whole batch -> a single vault read, however many refs were requested.
     assert calls.read_text().splitlines().count("list items") == 1
+    # ...and NO `bw status` round-trip: the read is optimistic (one process that
+    # lets `bw` itself prompt when the vault is locked), not status+unlock+list.
+    assert "status" not in calls.read_text()
 
 
 def test_builtin_bw_provider_missing_item_exit2(xdg, monkeypatch, tmp_path):
