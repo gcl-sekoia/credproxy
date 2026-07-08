@@ -319,16 +319,35 @@ _PRESET_BLOCK_RE = re.compile(r"^\s*\[\[\s*preset\s*\]\]\s*(#.*)?$")
 def _strip_preset_blocks(text: str) -> str:
     """Remove every `[[preset]]` block from `text` via surgical span removal (the
     same `_block_spans` machinery `remove_binding` uses), so a template's expanded
-    entries never survive into the stamped `<name>.toml`. Also drops one preceding
-    blank separator line per block so no blank runs accumulate."""
+    entries never survive into the stamped `<name>.toml`. Also folds in an
+    immediately-adjacent run of comment-only lines above the header (a `# label`
+    that belongs to the block) plus one preceding blank separator, so a labelled
+    block leaves no orphan and no blank runs accumulate.
+
+    Line-based, NOT multiline-string aware: a `[[preset]]`-lookalike inside a
+    `\"\"\"...\"\"\"` value would be mis-stripped. This is the reason
+    `_expand_template_presets` re-parses the composed text afterward and fails
+    closed on the resulting invalid/`preset`-bearing TOML rather than writing it.
+    The comment fold is deliberately conservative (only lines DIRECTLY above the
+    header, no intervening blank), which can in a rare shape absorb a preceding
+    block's trailing comment -- an acceptable edge for the common labelled-block
+    case."""
     from ..core.bindings import _block_spans
 
     lines = text.splitlines(keepends=True)
     for start, end in reversed(_block_spans(text, _PRESET_BLOCK_RE)):
+        while start > 0 and lines[start - 1].lstrip().startswith("#"):
+            start -= 1
         if start > 0 and lines[start - 1].strip() == "":
             start -= 1
         del lines[start:end]
     return "".join(lines)
+
+
+# A `[[preset]]` header OR an inline `preset =` assignment, for detecting preset
+# references in a template we can't fully parse (finding 5) and (via the block
+# regex above) counting the block form.
+_PRESET_REF_RE = re.compile(r"^\s*(\[\[\s*preset\s*\]\]|preset\s*=)", re.M)
 
 
 def _expand_template_presets(base_text: str, source: str):
@@ -342,6 +361,7 @@ def _expand_template_presets(base_text: str, source: str):
     expanded in declaration order and each is validated against the accumulating
     text (prior stamps + the template's literal config), so cross-entry and
     entry-vs-literal collisions fail here."""
+    from ..core.bindings import _block_spans
     from ..core.errors import PresetTemplateError
     from ..core.presets import (
         build_preset, get_preset, parse_template_presets,
@@ -351,14 +371,41 @@ def _expand_template_presets(base_text: str, source: str):
 
     try:
         raw = tomllib.loads(base_text)
-    except tomllib.TOMLDecodeError:
-        # A malformed template can't be inspected for presets; preserve the
+    except tomllib.TOMLDecodeError as e:
+        # A malformed template can't be inspected for presets. If it textually
+        # references presets, its entries can't be expanded -- fail create rather
+        # than silently writing a broken workspace with unexpanded preset text
+        # (finding 5). A malformed template with NO preset reference keeps the
         # historical write-verbatim behavior (the parse error surfaces at `start`).
+        if _PRESET_REF_RE.search(base_text):
+            fail(f"{source}: template is malformed TOML ({e}); its preset "
+                 f"entries can't be expanded -- fix the template's `[[preset]]` "
+                 f"syntax")
+        return base_text, []
+
+    # Gate on the KEY'S PRESENCE, not on entries being non-empty: any `preset`
+    # key must be stripped/rejected here so it never survives into the stamped
+    # config (where every later command would reject it with a misleading
+    # "use preset add" remedy -- findings 1/2).
+    if "preset" not in raw:
         return base_text, []
 
     entries = parse_template_presets(raw, source)   # ConfigError on a bad entry
+
+    # Require the documented `[[preset]]` array-of-tables block form (finding 2,
+    # option b). The surgical stripper only removes `[[preset]]` HEADER blocks, so
+    # an inline `preset = [...]`/`preset = {...}` would survive strip. Each block
+    # yields exactly one entry, so a count mismatch means an inline spelling.
+    n_blocks = len(_block_spans(base_text, _PRESET_BLOCK_RE))
+    if n_blocks != len(entries):
+        fail(f"{source}: declare template presets as `[[preset]]` blocks, not an "
+             f"inline `preset = [...]` array/table")
     if not entries:
-        return base_text, []
+        # `preset = []` (or an empty inline form): key present, zero blocks --
+        # nothing to expand, but the inline key can't be surgically stripped and
+        # must not survive. Reject at create with the block-form remedy.
+        fail(f"{source}: the `preset` key is empty; remove it, or declare "
+             f"template presets as `[[preset]]` blocks")
 
     text = _strip_preset_blocks(base_text)
     announces: list[dict] = []
@@ -380,8 +427,20 @@ def _expand_template_presets(base_text: str, source: str):
                  f"bindings -- it needs no provider/secret; remove those fields "
                  f"from its `[[preset]]` entry")
         exp = build_preset(entry.name, provider, secret)
-        text, announce = _expand_preset_into_text(text, exp, entry.name, source)
+        text, announce = _expand_preset_into_text(
+            text, exp, entry.name, source, context="create")
         announces.append(announce)
+
+    # Post-strip safety net (backstops findings 1/2): the composed config must
+    # carry no top-level `preset` key. The stripper is line-based, so re-parse and
+    # fail closed (no write) if a `preset` key somehow survived -- a credproxy bug.
+    try:
+        recheck = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        recheck = {}
+    if "preset" in recheck:
+        fail(f"{source}: internal error -- a `preset` key survived template "
+             f"expansion (credproxy bug); nothing was written")
     return text, announces
 
 
@@ -1064,7 +1123,8 @@ def _newly_intercepted(existing_hosts, new_hosts) -> list[str]:
     return out
 
 
-def _expand_preset_into_text(text: str, exp, preset_name: str, source: str):
+def _expand_preset_into_text(text: str, exp, preset_name: str, source: str,
+                             context: str = "add"):
     """Shared preset expand-validate-compose core used by BOTH `preset add` and
     `create`'s template-declared `[[preset]]` expansion (#57): validate a
     `PresetExpansion` against the CURRENT TOML `text` (attach/container-half,
@@ -1077,12 +1137,21 @@ def _expand_preset_into_text(text: str, exp, preset_name: str, source: str):
     Existing state is derived from `text` itself (parsed bindings/rules with
     auto-names filled + the normalized container config), so `create` can feed the
     ACCUMULATING text across multiple template entries and each is validated
-    against every prior stamp + the literal template config."""
+    against every prior stamp + the literal template config.
+
+    `context` (`"add"` | `"create"`) only flavors the duplicate-pack remedy: at
+    `preset add` the fix is to remove the stamped blocks; at `create` (template
+    `[[preset]]`) it's to remove the duplicate template entry."""
     from ..core import bindings as core_bindings
     from ..core import config as core_config
     from ..core import preset_stamp
     from ..core import rules as core_rules
     from ..core.presets import mount_table
+
+    dup_remedy = (
+        "remove the duplicate `[[preset]]` entry from the template"
+        if context == "create"
+        else "remove the stamped blocks first to re-apply")
 
     # Normalized container config from the current text; attach detection rides it
     # (attached -> empty mounts/env, so the container-half loops below are no-ops).
@@ -1101,7 +1170,7 @@ def _expand_preset_into_text(text: str, exp, preset_name: str, source: str):
     # (protects pure-container packs, which have no binding-name clash to trip).
     if preset_stamp.already_applied(text, preset_name):
         fail(f"preset '{preset_name}' is already applied here (its provenance "
-             f"marker is in the config; remove the stamped blocks first to re-apply)")
+             f"marker is in the config; {dup_remedy})")
 
     raw = tomllib.loads(text)
     existing_b = core_bindings._with_auto_names(
@@ -1155,11 +1224,12 @@ def _expand_preset_into_text(text: str, exp, preset_name: str, source: str):
         env_to_stamp.append((k, v))
 
     # Full semantic validation on the combined binding/rule sets (cross-binding
-    # /rule collisions, script resolution) before writing.
-    if new_b:
-        core_bindings.validate(existing_b + new_b, source)
-    if new_r:
-        core_rules.validate(existing_r + new_r, source)
+    # /rule collisions, script resolution) before writing. Run UNCONDITIONALLY --
+    # even a pack that adds no bindings/rules must still validate the EXISTING set
+    # standalone, so a pre-existing invalidity (e.g. a duplicate binding name)
+    # surfaces here at `preset add`/`create`, not deferred to `start` (finding 7).
+    core_bindings.validate(existing_b + new_b, source)
+    core_rules.validate(existing_r + new_r, source)
 
     existing_hosts = [h for b in existing_b for h in b.hosts] \
         + [h for r in existing_r for h in r.hosts]

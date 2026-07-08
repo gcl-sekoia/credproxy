@@ -328,3 +328,205 @@ def test_newly_intercepted_in_json(xdg):
     obj = json.loads(_run(["--json", "workspace", "create", "proj"])[1])
     assert set(obj["presets"][0]["newly_intercepted"]) == {
         "api.github.com", "github.com", "ghcr.io"}
+
+
+# ---- empty / inline / malformed preset keys (findings 1, 2, 5) ---------------
+
+
+@pytest.mark.parametrize("body", [
+    "preset = []\n",                       # empty inline array
+    "\npreset = [\n]\n",                   # empty inline array, multiline
+])
+def test_empty_preset_key_rejected_nothing_written(xdg, body):
+    """A `preset = []` (or any zero-entry inline form) must NOT survive into the
+    stamped config (finding 1); create fails with the block-form remedy, not a
+    downstream "use preset add" mismatch."""
+    _template(_MIN + body)
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 1
+    assert "`preset` key is empty" in err and "[[preset]]" in err
+    _assert_no_workspace("proj")
+
+
+def test_inline_preset_array_rejected(xdg):
+    """An inline `preset = [{...}]` parses to entries but the surgical stripper
+    only removes `[[preset]]` header blocks, so it would survive -- reject at
+    create naming the block-form remedy (finding 2, option b)."""
+    _template(_MIN + '\npreset = [{ name = "github" }]\n')
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 1
+    assert "declare template presets as `[[preset]]` blocks" in err
+    _assert_no_workspace("proj")
+
+
+def test_inline_preset_table_rejected(xdg):
+    """`preset = { name = "x" }` (inline table, not array) is caught by the array
+    validator with its own message; still nothing is written."""
+    _template(_MIN + '\npreset = { name = "github" }\n')
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 1
+    assert "array of tables" in err
+    _assert_no_workspace("proj")
+
+
+def test_malformed_template_with_preset_ref_fails(xdg):
+    """A template that fails to parse AND references presets can't be expanded --
+    fail create rather than write a broken config with unexpanded preset text
+    (finding 5)."""
+    _template('image = "x"\nuser = \n[[preset]]\nname = "github"\n')  # bad TOML
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 1
+    assert "malformed" in err and "[[preset]]" in err
+    _assert_no_workspace("proj")
+
+
+def test_malformed_template_without_preset_ref_writes_verbatim(xdg):
+    """A malformed template with NO preset reference keeps the historical
+    write-verbatim behavior (the parse error surfaces later, at start)."""
+    _template('image = "x"\nuser = \n')          # bad TOML, no preset
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 0
+    # It was written verbatim (broken TOML and all); create doesn't validate.
+    assert "user =" in _config_text("proj")
+
+
+# ---- multi-entry templates (finding 3) ---------------------------------------
+
+
+def test_two_entries_expand_in_declaration_order(xdg):
+    """Two `[[preset]]` entries expand IN ORDER; the first pack's blocks precede
+    the second's in the stamped text and in the announcement."""
+    _preset("svc", _NODEFAULT)
+    _template(_MIN + '\n[[preset]]\nname = "github"\n\n'
+              '[[preset]]\nname = "svc"\nprovider = "env"\nsecret = "T"\n')
+    code, out, err = _run(["--json", "workspace", "create", "proj"])
+    assert code == 0, out + err
+    obj = json.loads(out)
+    assert [p["preset"] for p in obj["presets"]] == ["github", "svc"]
+    text = _config_text("proj")
+    assert "[[preset]]" not in text
+    # github's 3 parts + svc's 1 part, github first.
+    assert text.count("[[binding]]") == 4
+    assert text.index("github-api") < text.index("svc-api")
+
+
+def test_two_entries_env_collision_aborts(xdg):
+    """Two entries stamping a conflicting env key (different value) fail the whole
+    create; nothing is written."""
+    _preset("ca", '[env]\nFOO = "a"\n')
+    _preset("cb", '[env]\nFOO = "b"\n')
+    _template(_MIN + '\n[[preset]]\nname = "ca"\n\n[[preset]]\nname = "cb"\n')
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 1
+    assert "FOO" in err and "already set" in err
+    _assert_no_workspace("proj")
+
+
+def test_two_entries_same_pack_double_add_aborts(xdg):
+    """Two entries naming the SAME pack trip the double-add guard, and at create
+    the remedy names the duplicate template entry (finding 4)."""
+    _template(_MIN + '\n[[preset]]\nname = "github"\n\n[[preset]]\nname = "github"\n')
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 1
+    assert "already applied" in err
+    assert "duplicate `[[preset]]` entry" in err
+    assert "remove the stamped blocks" not in err     # add-flavored wording gone
+    _assert_no_workspace("proj")
+
+
+def test_two_entries_mount_clash_aborts(xdg):
+    """Two entries mounting at the same target fail; nothing is written."""
+    _preset("ma", '[[mount]]\nvolume = "va"\ntarget = "/cache"\n')
+    _preset("mb", '[[mount]]\nvolume = "vb"\ntarget = "/cache"\n')
+    _template(_MIN + '\n[[preset]]\nname = "ma"\n\n[[preset]]\nname = "mb"\n')
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 1
+    assert "already mounted" in err
+    _assert_no_workspace("proj")
+
+
+# ---- container-half pack at create -------------------------------------------
+
+
+_CONTAINER = (
+    '[env]\nFOO = "bar"\n'
+    '[[mount]]\nvolume = "cache"\ntarget = "/cache"\n'
+    '[[setup]]\nrun = "echo hi"\norder = 30\n'
+)
+
+
+def test_container_half_pack_stamps_at_create(xdg):
+    """A pure-container pack (mounts/env/setup) expands at create on a managed
+    template and the stamped config loads with all three sections present."""
+    _preset("cont", _CONTAINER)
+    _template(_MIN + '\n[[preset]]\nname = "cont"\n')
+    assert _run(["workspace", "create", "proj"])[0] == 0
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+    cfg = load_config(Workspace("proj"))
+    assert cfg["env"] == {"FOO": "bar"}
+    assert {m["target"] for m in cfg["mounts"]} == {"/cache"}
+    assert cfg["setup"][-1]["run"] == "echo hi"
+    assert "[[preset]]" not in _config_text("proj")
+
+
+def test_textual_identity_container_half_create_vs_add(xdg):
+    """A container-half pack expanded at create is BYTE-IDENTICAL to create
+    (plain) + `preset add` (no placeholder, so no pinning needed)."""
+    _preset("cont", _CONTAINER)
+    _template(_MIN + '\n[[preset]]\nname = "cont"\n')
+    assert _run(["workspace", "create", "viatemplate"])[0] == 0
+
+    _template(_MIN)                              # plain template, no preset
+    assert _run(["workspace", "create", "viaadd"])[0] == 0
+    assert _run(["workspace", "viaadd", "preset", "add", "cont"])[0] == 0
+
+    assert _config_text("viatemplate") == _config_text("viaadd")
+
+
+# ---- existing-set validation (finding 7) -------------------------------------
+
+
+def test_pure_rule_pack_still_validates_existing_bindings(xdg):
+    """A pack that adds NO bindings must still validate the EXISTING binding set
+    standalone, so a pre-existing duplicate surfaces at create (finding 7)."""
+    _preset("policy", '[[rule]]\nsuffix = "block"\naction = "block"\n'
+            'hosts = ["evil.example.com"]\n')
+    _template(_MIN + textwrap.dedent('''
+        [[binding]]
+        name = "dup"
+        injector = "bearer"
+        provider = "env"
+        secret = "T"
+        hosts = ["a.example.com"]
+
+        [[binding]]
+        name = "dup"
+        injector = "bearer"
+        provider = "env"
+        secret = "T2"
+        hosts = ["b.example.com"]
+
+        [[preset]]
+        name = "policy"
+    '''))
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 1
+    assert "dup" in err                          # the pre-existing collision
+    _assert_no_workspace("proj")
+
+
+# ---- loader rejection on an attached config (finding 3) ----------------------
+
+
+def test_loader_rejects_preset_in_attached_config(xdg):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.paths import workspaces_config_dir
+    from credproxy_cli.core.workspace import Workspace
+    d = workspaces_config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "att.toml").write_text(
+        'attach = { container = "foo" }\n[[preset]]\nname = "github"\n')
+    with pytest.raises(ConfigError, match="template-only key"):
+        load_config(Workspace("att"))
