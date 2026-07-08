@@ -1,7 +1,7 @@
 # credproxy — gcl-sekoia fork
 
-A fork of **[credproxy](https://github.com/gregclermont/credproxy)** with an opinionated,
-batteries-included overlay setup layered on top.
+A fork of **[credproxy](https://github.com/gregclermont/credproxy)** with an opinionated
+overlay setup layered on top.
 
 credproxy keeps your real credentials out of a dev container: your tools send a
 *placeholder*, and a proxy swaps in the real secret on the way out, so the secret never
