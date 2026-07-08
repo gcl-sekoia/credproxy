@@ -4,8 +4,9 @@ A preset is **expansion, not a link**: `preset add` writes plain
 `[[binding]]`/`[[rule]]` blocks AND container-half config (`mounts`/`setup`
 elements, `[env]` keys) into the workspace file, then forgets. Nothing here is
 ever read back by the load path (tomllib drops comments), so the provenance
-comments this module writes are inert -- they exist for a future `preset`
-refresh / doctor (#58) and for the v1 double-add guard (`already_applied`).
+comments this module writes are inert -- they exist for `doctor`'s prereq re-run
+(#58), `preset refresh`'s per-block re-expansion (#59, `preset_refresh.py`
+recomputes the same `rev`/`sha`), and the double-add guard (`already_applied`).
 
 The hard part is TOML surgery that touches ONLY the intended spans:
 

@@ -136,6 +136,40 @@ Files a pack ships (that `setup.d/github-auth.sh`) live in the same layered
 registry as the pack itself and are resolved from the pack's own tier →
 [Overlays](../advanced/overlays.md).
 
+## Refreshing a stamped pack
+
+A preset is expansion, **not a link**: once `preset add` stamps its blocks, they
+are ordinary config that never re-reads the definition. When a pack's definition
+changes upstream (a new host, an added rule, a dropped part), re-expand the
+stamped blocks on your own clock with `preset refresh`:
+
+```
+$ credp preset refresh github          # one pack; omit NAME for every applied pack
+```
+
+It compares each stamped block against what the current definition would write,
+using the two provenance hashes the stamp recorded, and classifies per block:
+
+- **up to date** — the block already matches; nothing written.
+- **updated** — the definition changed and the block is untouched since stamping
+  → the block is replaced (and its provenance marker refreshed).
+- **skipped (hand-edited)** — you edited the block since it was stamped → it is
+  **never** overwritten; refresh prints a diff of what it *would* write so you can
+  reconcile by hand (or delete it and re-run).
+- **added** — the definition gained a block → it is stamped additively, reusing
+  the pack's existing shared placeholder and provider/secret.
+- **vanished** — a stamped block whose definition counterpart is gone → reported
+  only; pass `--prune` to delete it (a destructive action, so on the loose
+  surface an implicit default workspace asks first).
+
+The shared placeholder and the provider/secret are **preserved** (read back from
+the stamped bindings, never regenerated — rotating the placeholder would break
+placeholder-consuming state and cross-binding sharing). The write is
+all-or-nothing. There is no merge: a hand-edited block is yours to resolve. A
+pack that no longer resolves in the registry errors for an explicit
+`refresh NAME` and is skipped-with-a-note when refreshing all; an attached
+workspace refuses a container-half refresh (same as `preset add`).
+
 ## Declaring host prerequisites
 
 Some things a pack needs live on the **host**, not in the container: the `gh` CLI

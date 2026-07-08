@@ -684,6 +684,54 @@ class Renderer:
                 f"restart to apply: credproxy workspace {ws} start")
         _say_push_hint(ws, attached)
 
+    # -- preset refresh --
+    def preset_refreshed(self, ws: str, results: list[dict], *,
+                         newly_intercepted: list[str], container_changed: bool,
+                         attached: bool, skipped_unresolved: list[str]) -> None:
+        # Human-readable action verbs (the JSON keeps the terse kebab forms).
+        verb = {"up-to-date": "up to date", "updated": "updated",
+                "skipped-edited": "skipped (hand-edited)", "added": "added",
+                "prunable": "vanished (use --prune to remove)",
+                "pruned": "pruned"}
+        any_change = False
+        for r in results:
+            acts = r["actions"]
+            tally: dict[str, int] = {}
+            for a in acts:
+                tally[a["action"]] = tally.get(a["action"], 0) + 1
+            summary = ", ".join(
+                f"{tally[k]} {verb[k]}" for k in
+                ("updated", "added", "pruned", "skipped-edited",
+                 "prunable", "up-to-date") if k in tally)
+            if r["changed"]:
+                any_change = True
+            print(f"refreshed preset '{r['preset']}' in workspace '{ws}': "
+                  f"{summary or 'nothing to do'}")
+            for a in acts:
+                mark = verb[a["action"]]
+                print(f"  {a['kind']:<8} {a['target']:<16} {mark}")
+            for a in acts:
+                if a["action"] == "skipped-edited" and a.get("diff"):
+                    print(f"  --- diff for {a['kind']} {a['target']} "
+                          f"(hand-edited; not overwritten) ---")
+                    for ln in a["diff"].splitlines():
+                        print(f"  {ln}")
+        for name in skipped_unresolved:
+            say(f"preset '{name}' is no longer in the registry -- skipped "
+                f"(its stamped blocks are left as-is)")
+        if newly_intercepted:
+            say("newly intercepted (TLS-terminated) host(s): "
+                + ", ".join(newly_intercepted)
+                + " -- a workspace that hasn't bootstrapped the CA will see a "
+                  "cert error there until it does")
+        if not any_change:
+            say("already up to date -- nothing written")
+            return
+        if container_changed:
+            say("container-half config changed the workspace spec -- "
+                f"restart to apply: credproxy workspace {ws} start")
+        _say_push_hint(ws, attached)
+
 
 class JsonRenderer(Renderer):
     """Emits one JSON object/array per command result on stdout. Progress
@@ -844,6 +892,14 @@ class JsonRenderer(Renderer):
                     "mounts": mounts or [], "env": env or [],
                     "skipped_env": skipped_env or [], "setup": setup or [],
                     "recreate": recreate, "requires": requires or []})
+
+    def preset_refreshed(self, ws: str, results: list[dict], *,
+                         newly_intercepted: list[str], container_changed: bool,
+                         attached: bool, skipped_unresolved: list[str]) -> None:
+        self._emit({"workspace": ws, "presets": results,
+                    "newly_intercepted": newly_intercepted,
+                    "container_changed": container_changed,
+                    "skipped_unresolved": skipped_unresolved})
 
     def provider_show(self, info: dict) -> None:
         self._emit(info)
