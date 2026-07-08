@@ -1,10 +1,22 @@
-# toolchain fragment — one line per tool:  <mise-name>  <command>  [description]
-#   col 1   installed via `mise use -g`
-#   col 2   command the session-context fragment probes with `command -v`
-#   col 3+  description; if present, the tool is advertised in the session context
-# The installer + inventory read the UNION of every /opt/toolchain/tools.d/*.list,
-# so add tools by shipping ANOTHER fragment (no need to copy this one). Blank lines
-# and #-comments are ignored.
+# Workspace tool INVENTORY — one row per tool:  <source>  <command>  [agent note]
+#   col 1   install source: a mise package name (installed via `mise use -g`), or `-`
+#           for a tool present by other means (base image, another setup step) — a `-`
+#           row is NOT installed, only (optionally) advertised.
+#   col 2   command name; advertised only if it passes `command -v`, so the note can
+#           never claim an absent tool.
+#   col 3+  agent-facing note. PRESENT => advertised as a bullet in the session context;
+#           ABSENT => silent (installed/present but not worth agent context, e.g. a
+#           human-only tool). The installer never reads this column.
+# The two axes are independent: col1 decides install, col3 decides advertisement — so a
+# base-image tool advertises without installing (`- docker  Docker CLI …`) and a
+# human-only tool installs without advertising (`bat  bat`, no note).
+#
+# The installer + advertiser read the UNION of every /opt/toolchain/tools.d/*.list, so
+# add tools by shipping ANOTHER fragment (no need to copy this one); blank lines and
+# #-comments are ignored. If one command appears in two fragments with different col1,
+# the advertiser keeps the first-seen note and the installer still installs any mise row.
+# A pack that provisions tools outside mise either adds `-` rows here or ships its own
+# session-context.d fragment.
 #
 # Deliberately lean + generic — a profile adds its own kit via a fragment
 # (see overlay/50-example/tools.d/extras.list for an example).

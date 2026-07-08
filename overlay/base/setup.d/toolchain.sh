@@ -9,12 +9,14 @@ set -euo pipefail
 TOOLS_DIR="${TOOLCHAIN_TOOLS_DIR:-/opt/toolchain/tools.d}"
 [ -d "$TOOLS_DIR" ] || { echo "toolchain: tools dir $TOOLS_DIR not found — nothing to install, aborting" >&2; exit 1; }
 
-# Column 1 (mise names) across all fragments, skipping blanks and #-comments.
+# Column 1 (install source) across all fragments: a mise package name to install.
+# Skip blanks, #-comments, and `-` (a tool present by other means -- base image or
+# another setup step -- that we advertise but don't install; see base.list).
 names=()
 for lf in "$TOOLS_DIR"/*.list; do
     [ -e "$lf" ] || continue
     while read -r mise _rest; do
-        case "${mise:-}" in ''|'#'*) continue;; esac
+        case "${mise:-}" in ''|'#'*|'-') continue;; esac
         names+=("$mise")
     done < "$lf"
 done
