@@ -3,7 +3,22 @@
 leaves as a no-op). Resolved off the mounted overlay chain and expanded the way
 `preset add` / `create` do.
 """
+import tomllib
+
+from credproxy_cli.core.config import _overlay_source
+from credproxy_cli.core.paths import resolve_singleton
 from credproxy_cli.core.presets import build_preset, load_preset_sources
+
+
+def test_oracle_agent_ships_via_the_profile_template():
+    # The profile's template mounts the oracle agent def where claude-code-setup.sh
+    # installs it ($CLAUDE_CONFIG_DIR/agents/); base ships no agents, only the mechanism.
+    data = tomllib.loads(resolve_singleton("workspace.template.toml").read_text())
+    sources = [m.get("overlay") for m in data.get("mounts", [])]
+    assert "agents/oracle.md" in sources
+    # And the source resolves through the overlay search to a real oracle manifest.
+    text = open(_overlay_source("agents/oracle.md", "test")).read()
+    assert "name: oracle" in text and "model: fable" in text
 
 
 def test_persist_resolves_from_this_overlay():
