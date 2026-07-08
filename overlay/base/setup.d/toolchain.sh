@@ -7,7 +7,7 @@
 set -euo pipefail
 
 TOOLS_DIR="${TOOLCHAIN_TOOLS_DIR:-/opt/toolchain/tools.d}"
-[ -d "$TOOLS_DIR" ] || { echo "toolchain: no tools dir: $TOOLS_DIR" >&2; exit 1; }
+[ -d "$TOOLS_DIR" ] || { echo "toolchain: tools dir $TOOLS_DIR not found — nothing to install, aborting" >&2; exit 1; }
 
 # Column 1 (mise names) across all fragments, skipping blanks and #-comments.
 names=()
@@ -18,7 +18,7 @@ for lf in "$TOOLS_DIR"/*.list; do
         names+=("$mise")
     done < "$lf"
 done
-[ "${#names[@]}" -gt 0 ] || { echo "toolchain: no tools in $TOOLS_DIR/*.list" >&2; exit 1; }
+[ "${#names[@]}" -gt 0 ] || { echo "toolchain: no tools listed in $TOOLS_DIR/*.list — nothing to install, aborting" >&2; exit 1; }
 mapfile -t names < <(printf '%s\n' "${names[@]}" | awk '!seen[$0]++')   # dedup, keep first-seen order
 
 curl -fsSL https://mise.run | sh
