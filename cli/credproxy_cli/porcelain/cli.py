@@ -1001,8 +1001,13 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
             fail("`preset add` needs a single --secret REF")
         find_provider(provider)
     elif a.provider or a.secret:
-        fail(f"preset '{a.preset}' is a pure-rule pack (no bindings) -- "
-             f"--provider/--secret don't apply")
+        # No bindings -> needs no credential. Name the pack's actual shape so the
+        # message is accurate for a pure-CONTAINER (mounts/env/setup) or
+        # pure-rule pack, not just a rule pack.
+        shape = "container-only (mounts/env/setup)" if spec.has_container_half \
+            else "pure-rule"
+        fail(f"preset '{a.preset}' is a {shape} pack with no bindings -- it "
+             f"needs no credential, so --provider/--secret don't apply")
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
@@ -1108,10 +1113,16 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     # A stamped container half drifts the spec hash; if the workspace container
     # already exists, it must be recreated to apply -- announce with the remedy.
+    # Gate on what was ACTUALLY stamped, not merely what the pack CARRIES: an
+    # env-only pack whose every key was skipped as present-identical wrote a
+    # byte-identical file (no drift), so it must NOT claim a restart is needed.
+    # Mounts/setup are always stamped when present (a collision fails the add);
+    # env is stamped only for the non-skipped keys (`env_to_stamp`).
+    stamped_container_half = bool(exp.mounts or exp.setup or env_to_stamp)
     # `preset add` is otherwise a pure config edit, so a missing/unreachable
     # docker must not fail it: if we can't check, assume no container.
     container_exists = False
-    if not attached and exp.has_container_half:
+    if not attached and stamped_container_half:
         from ..core.errors import CredproxyError
         try:
             container_exists = \
@@ -1131,7 +1142,7 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         env=[{"key": k, "value": v} for k, v in env_to_stamp],
         skipped_env=skipped_env,
         setup=[dict(s) for s in exp.setup],
-        recreate=(container_exists and exp.has_container_half),
+        recreate=(container_exists and stamped_container_half),
         attached=attached)
 
 

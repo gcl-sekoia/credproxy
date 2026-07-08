@@ -14,9 +14,10 @@ The hard part is TOML surgery that touches ONLY the intended spans:
     single-line/empty array first, existing element text preserved verbatim), or
     a fresh `key = [ ... ]` is created at the END OF THE ROOT REGION (before the
     first top-level table header -- appending at EOF would wrongly nest the key
-    under a trailing `[env]`/`[[binding]]` section). A workspace whose mounts are
-    `[[mounts]]` array-of-tables blocks (from `mount add`) gets appended
-    `[[mounts]]` blocks instead (a `mounts =` key would collide with them).
+    under a trailing `[env]`/`[[binding]]` section). A workspace whose mounts /
+    setup are `[[mounts]]` / `[[setup]]` array-of-tables blocks gets appended
+    blocks of the same form instead (a `mounts =`/`setup =` key would collide
+    with them -- "Cannot mutate immutable namespace").
   - `[env]` keys append at the end of an existing `[env]` section, else a fresh
     `[env]` is created at the root-region end.
   - `[[binding]]`/`[[rule]]` blocks append at EOF (array-of-tables merge in file
@@ -26,10 +27,25 @@ Every stamped span carries a provenance marker:
 
     # credproxy:preset name=<name> rev=<12hex> sha=<12hex>
 
-`rev` = the preset definition-file digest; `sha` = a digest of the exact stamped
-element/block text (comment excluded). Placement: a standalone line above a
-`[[binding]]`/`[[rule]]` block; a trailing comment on an array element / env
-line.
+`rev` = the first-12-hex of sha256 over the preset definition-file bytes.
+
+`sha` = the first-12-hex of sha256 over the exact VISIBLE on-disk stamped text,
+by span kind (so #58 / a refresh can recompute it deterministically):
+
+  - **array element** (`mounts`/`setup`): the bare rendered element string as it
+    appears between the surrounding punctuation -- e.g. `{ run = "x", order = 1 }`
+    -- WITHOUT the 2-space indent, the trailing separating comma, the two spaces
+    before the marker, or the trailing newline.
+  - **env line**: the `KEY = "value"` code, WITHOUT the two spaces before the
+    marker or the trailing newline.
+  - **`[[...]]` block** (`binding`/`rule`/`mounts`): the whole block text from
+    its `[[...]]` header line through its trailing newline (inclusive) -- i.e.
+    exactly the bytes written after the marker line -- WITHOUT the phantom
+    leading blank line (that blank is inter-block spacing, not block content) and
+    WITHOUT the marker comment line itself.
+
+Placement: a standalone line above a `[[...]]` block; a trailing comment on an
+array element / env line.
 
 A MANDATORY verify step re-parses the composed text with tomllib and asserts it
 equals the old parse PLUS exactly the intended additions -- on any mismatch the
@@ -50,15 +66,23 @@ from .bindings import (
     _toml_key,
     _toml_str,
 )
+from .config import inline_array_span, last_code_char_index
 from .errors import ConfigError
-from .presets import mount_table
-from .rules import _RULE_HEADER_RE, _render_rule_block
+from .rules import _render_rule_block
 from .workspace import Workspace
 
-# `[[mounts]]` array-of-tables header (a workspace built its mounts via
-# `mount add` rather than an inline `mounts = [...]` array).
+# `[[mounts]]` / `[[setup]]` array-of-tables headers (a workspace built its
+# mounts/setup via `mount add` / a block form rather than an inline `key = [...]`
+# array). Tolerant of inner whitespace (`[[ mounts ]]`).
 _MOUNTS_BLOCK_RE = re.compile(r"^\s*\[\[\s*mounts\s*\]\]\s*(#.*)?$")
-_ENV_HEADER_RE = re.compile(r"^\s*\[env\]\s*(#.*)?$")
+_SETUP_BLOCK_RE = re.compile(r"^\s*\[\[\s*setup\s*\]\]\s*(#.*)?$")
+# `[env]` section header, tolerant of inner whitespace (`[ env ]`).
+_ENV_HEADER_RE = re.compile(r"^\s*\[\s*env\s*\]\s*(#.*)?$")
+# The two `env` shapes preset stamping can't extend surgically: a top-level
+# inline table (`env = { ... }`) or dotted keys (`env.KEY = ...`). Detected up
+# front so the failure names the remedy instead of the opaque verify abort.
+_ENV_INLINE_RE = re.compile(r"^\s*env\s*=")
+_ENV_DOTTED_RE = re.compile(r"^\s*env\s*\.")
 
 
 # ---- provenance --------------------------------------------------------------
@@ -75,11 +99,51 @@ def _marker(name: str, rev: str, element_text: str) -> str:
 _MARKER_RE = re.compile(r"#\s*credproxy:preset\s+name=(\S+)\s")
 
 
+def _line_comment(line: str) -> str:
+    """The comment portion of one TOML line -- from the first `#` that is OUTSIDE
+    a string to end of line -- or "" if the line has no real comment. A `#`
+    inside a `"..."`/`'...'` string value is not a comment (string scanning
+    mirrors the rest of this module)."""
+    in_str = False
+    str_ch = ""
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if in_str:
+            if str_ch == '"' and c == "\\":
+                i += 2
+                continue
+            if c == str_ch:
+                in_str = False
+            i += 1
+            continue
+        if c in "\"'":
+            in_str = True
+            str_ch = c
+            i += 1
+            continue
+        if c == "#":
+            return line[i:]
+        i += 1
+    return ""
+
+
 def already_applied(text: str, name: str) -> bool:
     """True iff `text` already carries a provenance marker for preset `name` --
     the double-add guard (protects pure-container packs, which have no
-    binding-name collision to trip). Matches the exact name token."""
-    return any(m.group(1) == name for m in _MARKER_RE.finditer(text))
+    binding-name collision to trip). Matches the exact name token, and ONLY in a
+    real comment (a `#` outside any string) -- so a marker-looking substring
+    inside a string VALUE (`NOTE = "... # credproxy:preset name=x ..."`) can't
+    false-positive the guard."""
+    for line in text.splitlines():
+        comment = _line_comment(line)
+        if not comment:
+            continue
+        m = _MARKER_RE.search(comment)
+        if m and m.group(1) == name:
+            return True
+    return False
 
 
 # ---- element / block rendering ----------------------------------------------
@@ -121,6 +185,17 @@ def _render_setup_inline(step: dict) -> str:
     return "{ " + ", ".join(parts) + " }"
 
 
+def _render_setup_block(step: dict) -> str:
+    """A `[[setup]]` array-of-tables block (leading blank line), for a workspace
+    that already declares setup as blocks (symmetric with `_render_mount_block`).
+    `user` is emitted only when non-default (`root`)."""
+    lines = ["", "[[setup]]", f"run = {_toml_str(step['run'])}"]
+    if step.get("user", "workspace") != "workspace":
+        lines.append(f"user = {_toml_str(step['user'])}")
+    lines.append(f"order = {step['order']}")
+    return "\n".join(lines) + "\n"
+
+
 def _render_env_line(key: str, value: str) -> str:
     """The `KEY = "value"` code of one env line (no comment)."""
     return f"{_toml_key(key)} = {_toml_str(value)}"
@@ -143,49 +218,6 @@ def _root_region_end(lines: list[str]) -> int:
     return len(lines)
 
 
-def _inline_array_span(text: str, key: str) -> tuple[int, int] | None:
-    """`(open_bracket_index, close_bracket_index)` of an uncommented top-level
-    `key = [ ... ]` inline array, else None (absent/commented/`[[key]]` blocks/
-    unbalanced). The bracket scan skips string contents and `#` comments and
-    balances nested `[]`, so a bracket inside a value or a multi-line array
-    doesn't fool it. (Generalized from config._inline_mounts_array_span.)"""
-    m = re.search(rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=[ \t]*", text)
-    if not m:
-        return None
-    open_idx = m.end()
-    if open_idx >= len(text) or text[open_idx] != "[":
-        return None
-    depth = 0
-    in_str = False
-    str_ch = ""
-    j = open_idx
-    while j < len(text):
-        c = text[j]
-        if in_str:
-            if str_ch == '"' and c == "\\":
-                j += 2
-                continue
-            if c == str_ch:
-                in_str = False
-        elif c in "\"'":
-            in_str = True
-            str_ch = c
-        elif c == "#":
-            nl = text.find("\n", j)
-            if nl == -1:
-                break
-            j = nl
-            continue
-        elif c == "[":
-            depth += 1
-        elif c == "]":
-            depth -= 1
-            if depth == 0:
-                return (open_idx, j)
-        j += 1
-    return None
-
-
 def _element_lines(elements: list[str], name: str, rev: str) -> str:
     """Render array element lines (2-space indent, trailing comma, trailing
     provenance comment), one per element, each newline-terminated."""
@@ -195,32 +227,31 @@ def _element_lines(elements: list[str], name: str, rev: str) -> str:
     return "".join(out)
 
 
-def _last_code_ends_with_comma(inner: str) -> bool:
-    """Does the array's existing content end with a `,` (ignoring a trailing
-    line comment / whitespace)? Used to decide whether to add a separating comma
-    before the appended elements. Conservative -- the verify step is the real
-    guard against a malformed compose."""
-    last = inner.rstrip().rsplit("\n", 1)[-1]
-    code = re.sub(r"#.*$", "", last).rstrip()
-    return code.endswith(",")
-
-
 def _insert_into_inline_array(text: str, span: tuple[int, int],
                               elements: list[str], name: str, rev: str) -> str:
     """Insert element lines before the closing `]` of the `key = [ ... ]` array
     at `span`, rewriting a single-line/empty array to multiline first and keeping
-    existing element text verbatim."""
+    existing element (and comment) text verbatim.
+
+    The separating comma is decided by a string/comment-aware scan for the last
+    CODE character (`last_code_char_index`) and spliced in directly AFTER it --
+    so it lands between the last element and any trailing comment,
+    never inside a comment (`# note` -> `# note,`) and never after a `#`/`,` that
+    only appears inside a string value."""
     open_idx, close_idx = span
     head = text[:open_idx + 1]        # up to and incl. "["
     inner = text[open_idx + 1:close_idx]
     tail = text[close_idx:]           # "]" onward
     body = _element_lines(elements, name, rev)
-    content = inner.rstrip()          # keep leading newline + existing elems
-    if not content.strip():
-        # empty array -> `[\n  <new>,  # ...\n]`
+    last = last_code_char_index(inner)
+    if last is not None and inner[last] != ",":
+        # Splice a separating comma right after the last element's last code
+        # char (comments/whitespace excluded), preserving any trailing comment.
+        inner = inner[:last + 1] + "," + inner[last + 1:]
+    content = inner.rstrip()          # keep leading newline + existing elems/comments
+    if content == "":
+        # empty / whitespace-only array -> `[\n  <new>,  # ...\n]`
         return head + "\n" + body + tail
-    if not _last_code_ends_with_comma(content):
-        content += ","
     lead = "" if content.startswith(("\n", "\r")) else "\n  "
     return head + lead + content + "\n" + body + tail
 
@@ -249,7 +280,10 @@ def _append_blocks(text: str, blocks: list[str], name: str, rev: str) -> str:
         text += "\n"
     for blk in blocks:
         body = blk[1:] if blk.startswith("\n") else blk   # drop the leading "\n"
-        text += "\n" + _marker(name, rev, blk) + "\n" + body
+        # The marker sha covers the EXACT on-disk block text (`body`: the
+        # `[[...]]` header line through the trailing newline) -- NOT the phantom
+        # leading blank line, which is inter-block spacing, not block content.
+        text += "\n" + _marker(name, rev, body) + "\n" + body
     return text
 
 
@@ -259,7 +293,7 @@ def _stamp_array(text: str, key: str, elements: list[str],
     """Stamp `elements` into the top-level `key` array. Prefers an existing
     inline `key = [...]` array; falls back to appended `[[key]]` blocks when the
     workspace uses that form (mounts only); else creates a fresh inline array."""
-    span = _inline_array_span(text, key)
+    span = inline_array_span(text, key)
     if span is not None:
         return _insert_into_inline_array(text, span, elements, name, rev)
     if block_re is not None and _has_block_header(text, block_re):
@@ -271,6 +305,20 @@ def _stamp_env(text: str, items: list[tuple[str, str]], name: str, rev: str) -> 
     """Append `KEY = "value"  # <marker>` lines to an existing `[env]` section,
     else create `[env]` at the end of the root region."""
     lines = text.splitlines(keepends=True)
+
+    # A root-level inline-table (`env = { ... }`) or dotted-key (`env.KEY = ...`)
+    # env can't be extended by appending an `[env]` section (tomllib would reject
+    # the redefinition). Detect it up front and fail with the remedy, rather than
+    # letting the surgery produce an opaque "invalid TOML" verify abort.
+    root_end = _root_region_end(lines)
+    for ln in lines[:root_end]:
+        if _ENV_INLINE_RE.match(ln) or _ENV_DOTTED_RE.match(ln):
+            raise ConfigError(
+                "workspace declares `env` as an inline table / dotted keys, "
+                "which preset env stamping can't extend surgically; convert it "
+                "to an `[env]` section header to accept preset env stamping (no "
+                "changes were written)")
+
     key_lines = []
     for k, v in items:
         code = _render_env_line(k, v)
@@ -326,7 +374,10 @@ def _verify(old_text: str, new_text: str, *, mounts, setup, env_items,
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(
             f"preset stamping produced invalid TOML ({e}); no changes were "
-            f"written")
+            f"written. This usually means the workspace TOML has a shape the "
+            f"surgical stamp mis-read -- e.g. a multiline string whose content "
+            f"looks like a `[table]`/`key = [` line, or an unusual mounts/setup/"
+            f"env declaration. Simplify that section (or file a bug) and retry")
     expected = copy.deepcopy(old)
     if mounts:
         expected["mounts"] = expected.get("mounts", []) + \
@@ -348,7 +399,10 @@ def _verify(old_text: str, new_text: str, *, mounts, setup, env_items,
     if new != expected:
         raise ConfigError(
             "preset stamping changed the config in an unexpected way; no "
-            "changes were written")
+            "changes were written. Likely causes: a workspace key with the same "
+            "name as one the preset stamps (mounts/setup/env/binding/rule) "
+            "declared in an unusual form, or a multiline string containing "
+            "header-looking lines. Simplify that section (or file a bug) and retry")
 
 
 # ---- public API --------------------------------------------------------------
@@ -370,7 +424,8 @@ def compose(text: str, name: str, rev: str, *, bindings, rules, mounts,
         text = _stamp_array(
             text, "setup",
             [_render_setup_inline(s) for s in setup],
-            [], name, rev, None)
+            [_render_setup_block(s) for s in setup],
+            name, rev, _SETUP_BLOCK_RE)
     if env_items:
         text = _stamp_env(text, env_items, name, rev)
     if bindings:

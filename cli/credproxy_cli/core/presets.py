@@ -116,9 +116,24 @@ class PresetSpec:
 def _tier_qualifier(source_label: str) -> str:
     """The mount-source TIER qualifier for a `layered_dirs` tier label: an overlay
     label `overlay:<base>` -> `<base>`; the literal tiers `user`/`builtin` stay.
-    Mirrors `config._tier_roots`, the resolution side."""
-    return source_label.split(":", 1)[1] if source_label.startswith("overlay:") \
-        else source_label
+    Mirrors `config._tier_roots`, the resolution side.
+
+    An overlay whose basename is a reserved tier literal (`user`/`builtin`) would
+    shadow that tier's qualifier for EVERY pack it holds -- a pack's own
+    `overlay="rel"` mount would qualify as `user:rel`/`builtin:rel` and resolve
+    against the WRONG root (silently the user config dir / builtin, not the
+    overlay). It's unambiguously broken, so it's rejected here (the seam that
+    turns a label into a qualifier)."""
+    if not source_label.startswith("overlay:"):
+        return source_label
+    base = source_label.split(":", 1)[1]
+    if base in ("user", "builtin"):
+        tier_name = "XDG user config" if base == "user" else "builtin"
+        raise ConfigError(
+            f"overlay directory named {base!r} shadows the reserved {base!r} "
+            f"tier qualifier (the {tier_name} tier) -- rename the overlay "
+            f"directory to something else")
+    return base
 
 
 def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
@@ -223,6 +238,18 @@ def _parse_preset_mount(m, i: int, src: str, tier: str) -> _PresetMount:
     table = dict(m)
     ov = table.get("overlay")
     if isinstance(ov, str) and ":" not in ov:
+        # A `#`-containing qualifier is a duplicate-basename overlay's dedup
+        # label (`base#2`) -- ORDER-DEPENDENT (the suffix follows discovery
+        # order), so pinning a pack's shipped file to it would silently break if
+        # the overlay order changed. Never a real user/builtin tier (those hold
+        # no `#`). Reject here, when we're about to bake the qualifier in.
+        if "#" in tier:
+            raise ConfigError(
+                f"{where}: overlay directory basename {tier!r} yields an "
+                f"order-dependent duplicate-basename tier qualifier (the "
+                f"'#N' suffix follows overlay discovery order) -- give the "
+                f"overlay a unique basename, or pin the source with an explicit "
+                f"`tier:rel` qualifier")
         table["overlay"] = f"{tier}:{ov}"
     # Validate shape (exactly one of overlay/volume/bind, absolute target,
     # readonly bool, volume-name/user_owned rules) + resolve the overlay file.

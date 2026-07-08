@@ -451,3 +451,325 @@ def test_describe_includes_container_half(xdg):
     assert row["env"] == [{"key": "C_VAR", "value": "one"}]
     assert row["setup"] == [{"run": "bash /opt/c.sh", "user": "workspace",
                              "order": 45}]
+
+
+# ============================================================================
+# #56 review follow-ups
+# ============================================================================
+
+import re as _re
+
+
+def _strip_markers(text: str) -> str:
+    """The stamped text with every provenance marker removed -- a standalone
+    `# credproxy:preset ...` line dropped entirely, a trailing `  # credproxy:
+    preset ...` comment trimmed -- so a golden compares the surgical SKELETON
+    (which is stable) rather than the rev/sha-varying marker."""
+    out = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("# credproxy:preset"):
+            continue
+        out.append(_re.sub(r"\s*#\s*credproxy:preset\s.*$", "", line))
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+def _setup_only_preset(name="su"):
+    """A pure-setup pack: one `{ run = "bash /opt/c.sh", order = 45 }` step."""
+    _write_preset(name, """
+        [[setup]]
+        run = "bash /opt/c.sh"
+        order = 45
+    """)
+
+
+# ---- Finding 1: comma-scanner (string/comment-aware) -- byte-for-byte golden --
+
+
+def test_comma_scanner_comment_only_last_line_no_mutation(xdg):
+    """A comment-only last line after a comma-terminated element must NOT get the
+    separating comma spliced into it (the silent-mutation case)."""
+    _setup_only_preset()
+    ws = _make_ws("w", _WS_MIN + 'setup = [\n  "a",\n  # user note\n]\n')
+    _stamp(ws, "su")
+    text = ws.config_path.read_text()
+    # The user's comment survives verbatim -- NOT turned into `# user note,`.
+    assert "  # user note\n" in text
+    assert "# user note," not in text
+    assert _strip_markers(text) == (
+        _WS_MIN
+        + 'setup = [\n'
+          '  "a",\n'
+          '  # user note\n'
+          '  { run = "bash /opt/c.sh", order = 45 },\n'
+          ']\n')
+    from credproxy_cli.core.config import load_config
+    # A bare-string setup entry stays a `str` (the escape-hatch form); the
+    # stamped table normalizes to a dict.
+    assert load_config(ws)["setup"] == [
+        "a",
+        {"run": "bash /opt/c.sh", "user": "workspace", "order": 45}]
+
+
+def test_comma_scanner_hash_in_string_no_double_comma(xdg):
+    """A `#` inside a string with a trailing comma must not fool the scanner into
+    a second comma (`,,`, the spurious-abort case)."""
+    _setup_only_preset()
+    ws = _make_ws("w", _WS_MIN
+                  + 'setup = [\n  { run = "echo a#b", order = 1 },\n]\n')
+    _stamp(ws, "su")
+    text = ws.config_path.read_text()
+    assert ",," not in text
+    assert _strip_markers(text) == (
+        _WS_MIN
+        + 'setup = [\n'
+          '  { run = "echo a#b", order = 1 },\n'
+          '  { run = "bash /opt/c.sh", order = 45 },\n'
+          ']\n')
+
+
+def test_comma_scanner_hash_in_string_no_trailing_comma(xdg):
+    """A `#`-in-string last element WITHOUT a trailing comma gets exactly one
+    comma spliced after the closing `}` (not inside the string's `#`)."""
+    _setup_only_preset()
+    ws = _make_ws("w", _WS_MIN
+                  + 'setup = [\n  { run = "echo a#b", order = 1 }\n]\n')
+    _stamp(ws, "su")
+    text = ws.config_path.read_text()
+    assert _strip_markers(text) == (
+        _WS_MIN
+        + 'setup = [\n'
+          '  { run = "echo a#b", order = 1 },\n'
+          '  { run = "bash /opt/c.sh", order = 45 },\n'
+          ']\n')
+
+
+def test_comma_scanner_commaless_element_with_trailing_comment(xdg):
+    """A comma-less last element with a trailing comment gets the comma spliced
+    BETWEEN the element and the comment (not after the comment)."""
+    _setup_only_preset()
+    ws = _make_ws("w", _WS_MIN
+                  + 'setup = [\n  { run = "x", order = 1 }  # note\n]\n')
+    _stamp(ws, "su")
+    text = ws.config_path.read_text()
+    assert '{ run = "x", order = 1 },  # note\n' in text
+    assert _strip_markers(text) == (
+        _WS_MIN
+        + 'setup = [\n'
+          '  { run = "x", order = 1 },  # note\n'
+          '  { run = "bash /opt/c.sh", order = 45 },\n'
+          ']\n')
+    from credproxy_cli.core.config import load_config
+    assert [s["order"] for s in load_config(ws)["setup"]] == [1, 45]
+
+
+# ---- Finding 6: the span scanner is shared with mount add --------------------
+
+
+def test_span_scanner_is_shared(xdg):
+    """`preset_stamp` reuses `config.inline_array_span` -- one scanner, no fork."""
+    from credproxy_cli.core import config, preset_stamp
+    assert preset_stamp.inline_array_span is config.inline_array_span
+    assert preset_stamp.last_code_char_index is config.last_code_char_index
+    # And the mount-add path uses it for the `mounts` key.
+    assert config.inline_array_span('mounts = [ "a:/a" ]\n', "mounts") is not None
+    assert config.inline_array_span('mounts = [ "a:/a" ]\n', "setup") is None
+
+
+# ---- Finding 2: block-marker sha == sha256 of the exact on-disk block text ----
+
+
+def test_block_marker_sha_matches_on_disk_block(xdg):
+    """The `sha=` on a `[[binding]]` block's provenance marker is sha256[:12] of
+    the EXACT on-disk block text (header line through trailing newline) -- so a
+    future refresh (#58) can recompute it deterministically."""
+    _write_preset("bo",
+                  '[placeholder]\nprefix = "ghp_"\nlength = 40\ncharset = "alnumeric"\n'
+                  '[[part]]\nsuffix = "api"\ninjector = "bearer"\n'
+                  'hosts = ["api.github.com"]\n')
+    ws = _make_ws("w", _WS_MIN)
+    _stamp(ws, "bo", "env", "TOK")
+    text = ws.config_path.read_text()
+    lines = text.splitlines(keepends=True)
+    bi = next(i for i, ln in enumerate(lines) if ln.strip() == "[[binding]]")
+    marker = lines[bi - 1]
+    sha_in_marker = _re.search(r"sha=(\w+)", marker).group(1)
+    # The binding is the last block -> its on-disk text runs to EOF.
+    block_text = "".join(lines[bi:])
+    from credproxy_cli.core.preset_stamp import _sha12
+    assert _sha12(block_text) == sha_in_marker
+    # And the marker line carries no phantom leading-newline in its hash input.
+    assert block_text.startswith("[[binding]]\n")
+
+
+def test_element_marker_sha_matches_bare_element(xdg):
+    """An array-element marker's `sha=` is sha256[:12] of the BARE rendered
+    element string (no indent, comma, or comment) -- the visible-text convention."""
+    _setup_only_preset()
+    ws = _make_ws("w", _WS_MIN)
+    _stamp(ws, "su")
+    text = ws.config_path.read_text()
+    line = next(ln for ln in text.splitlines() if "credproxy:preset" in ln
+                and "run" in ln)
+    sha_in_marker = _re.search(r"sha=(\w+)", line).group(1)
+    from credproxy_cli.core.preset_stamp import _sha12
+    assert _sha12('{ run = "bash /opt/c.sh", order = 45 }') == sha_in_marker
+
+
+# ---- Finding 3: setup-block form + [ env ] spacing + inline/dotted env --------
+
+
+def test_setup_block_form_appends_block(xdg):
+    """A workspace whose setup is `[[setup]]` blocks gets an appended `[[setup]]`
+    block (not a colliding `setup =` key -> the old 'immutable namespace' abort)."""
+    _setup_only_preset()
+    ws = _make_ws("w", _WS_MIN + textwrap.dedent('''
+        [[setup]]
+        run = "curl bootstrap"
+        order = 10
+    '''))
+    _stamp(ws, "su")
+    text = ws.config_path.read_text()
+    assert "setup = [" not in text
+    assert text.count("[[setup]]") == 2
+    from credproxy_cli.core.config import load_config
+    assert [s["order"] for s in load_config(ws)["setup"]] == [10, 45]
+
+
+def test_env_header_tolerates_inner_whitespace(xdg):
+    """`[ env ]` (inner spaces) is recognized -- keys append to that section, no
+    duplicate header created."""
+    _install_cont_preset()
+    ws = _make_ws("w", _WS_MIN + '\n[ env ]\nEXIST = "yes"\n')
+    _stamp(ws, "cont")
+    text = ws.config_path.read_text()
+    assert 'C_VAR = "one"' in text
+    assert text.count("env ]") == 1 and "[env]\n" not in text
+    from credproxy_cli.core.config import load_config
+    assert load_config(ws)["env"] == {"EXIST": "yes", "C_VAR": "one"}
+
+
+def test_inline_table_env_clear_error(xdg):
+    """A top-level inline-table env fails with a CLEAR remedy, not the opaque
+    verify abort."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.preset_stamp import compose
+    with pytest.raises(ConfigError, match="inline table / dotted keys"):
+        compose(_WS_MIN + 'env = { TZ = "UTC" }\n', "p", "rev",
+                bindings=[], rules=[], mounts=[], env_items=[("C_VAR", "one")],
+                setup=[])
+
+
+def test_dotted_key_env_clear_error(xdg):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.preset_stamp import compose
+    with pytest.raises(ConfigError, match="inline table / dotted keys"):
+        compose(_WS_MIN + 'env.TZ = "UTC"\n', "p", "rev",
+                bindings=[], rules=[], mounts=[], env_items=[("C_VAR", "one")],
+                setup=[])
+
+
+# ---- Finding 4: reserved-literal / duplicate-basename tier qualifier guards ---
+
+
+def test_overlay_named_user_rejected(xdg, monkeypatch):
+    """An overlay dir literally named `user` shadows the reserved `user` tier
+    qualifier -- loading its presets errors clearly."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.paths import config_dir
+    from credproxy_cli.core.presets import load_presets
+    ov = config_dir() / "ovs" / "user"
+    (ov / "presets").mkdir(parents=True)
+    (ov / "presets" / "p.toml").write_text('[env]\nX = "y"\n')
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
+    with pytest.raises(ConfigError, match="reserved 'user' tier qualifier"):
+        load_presets()
+
+
+def test_overlay_named_builtin_rejected(xdg, monkeypatch):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.paths import config_dir
+    from credproxy_cli.core.presets import load_presets
+    ov = config_dir() / "ovs" / "builtin"
+    (ov / "presets").mkdir(parents=True)
+    (ov / "presets" / "p.toml").write_text('[env]\nX = "y"\n')
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
+    with pytest.raises(ConfigError, match="reserved 'builtin' tier qualifier"):
+        load_presets()
+
+
+def test_duplicate_basename_qualifier_rejected(xdg, monkeypatch):
+    """A duplicate-basename overlay's `#N` qualifier is order-dependent -- a pack
+    in it that would auto-qualify an unqualified overlay mount errors clearly."""
+    import os
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.paths import config_dir
+    from credproxy_cli.core.presets import load_presets
+    a = config_dir() / "a" / "base"
+    b = config_dir() / "b" / "base"        # same basename -> b gets `base#2`
+    (a / "presets").mkdir(parents=True)
+    (b / "presets").mkdir(parents=True)
+    _pack_file(b, "setup.d/x.sh")
+    (b / "presets" / "dup.toml").write_text(
+        '[[mount]]\noverlay = "setup.d/x.sh"\ntarget = "/opt/x.sh"\n')
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
+    with pytest.raises(ConfigError, match="order-dependent duplicate-basename"):
+        load_presets()
+
+
+# ---- Finding 5: recreate hint gated on ACTUAL stamped content -----------------
+
+
+def test_no_recreate_hint_when_env_all_skipped(xdg, monkeypatch):
+    """An env-only pack whose every key already matches stamps NOTHING (byte-
+    identical file) -- no 'restart to apply' claim even with a live container."""
+    _write_preset("envonly", '[env]\nC_VAR = "one"\n')
+    ws = _make_ws("w", _WS_MIN + '\n[env]\nC_VAR = "one"\n')
+    before = ws.config_path.read_text()
+    from credproxy_cli.porcelain import cli as pcli
+    monkeypatch.setattr(pcli.core_docker, "container_status", lambda _n: "running")
+    code, out, err = _run(["workspace", "w", "preset", "add", "envonly"])
+    assert code == 0, out + err
+    assert "restart to apply" not in (out + err)
+    assert "already set to the same value" in (out + err)
+    assert ws.config_path.read_text() == before   # nothing written
+
+
+# ---- Finding 8: qualified overlay source can't name the tier root itself ------
+
+
+def test_qualified_source_empty_subpath_rejected(xdg):
+    from credproxy_cli.core import config as core_config
+    from credproxy_cli.core.errors import ConfigError
+    with pytest.raises(ConfigError, match="tier root dir"):
+        core_config._overlay_source("user:", "w")
+    with pytest.raises(ConfigError, match="tier root dir"):
+        core_config._overlay_source("user:.", "w")
+
+
+# ---- Finding 7: pure-container pack rejects --provider with an apt message ----
+
+
+def test_container_only_pack_rejects_provider(xdg):
+    _install_cont_preset()          # no [[part]] -> pure container
+    ws = _make_ws("w", _WS_MIN)
+    code, out, err = _run(["workspace", "w", "preset", "add", "cont",
+                           "--provider", "env"])
+    assert code == 1
+    assert "container-only" in (out + err) and "needs no credential" in (out + err)
+
+
+# ---- Finding 12: double-add guard ignores a marker inside a string value ------
+
+
+def test_already_applied_ignores_marker_in_string_value(xdg):
+    from credproxy_cli.core.preset_stamp import already_applied
+    # A marker-looking substring inside a STRING VALUE (real `#` in a comment vs
+    # a `#` inside a quoted value) must not trip the guard.
+    text = 'note = "see # credproxy:preset name=foo rev=x sha=y here"\n'
+    assert already_applied(text, "foo") is False
+    # A genuine trailing-comment marker (what the stamp writes) IS detected.
+    real = 'C_VAR = "one"  # credproxy:preset name=foo rev=x sha=y\n'
+    assert already_applied(real, "foo") is True
+    # As is a standalone block marker line.
+    blk = '# credproxy:preset name=bar rev=x sha=y\n[[binding]]\n'
+    assert already_applied(blk, "bar") is True

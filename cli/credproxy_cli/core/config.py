@@ -186,7 +186,15 @@ def _qualified_overlay_source(rel: str, where: str) -> str:
             f"(known tiers: {known})")
     base = base.resolve()
     resolved = (base / sub).resolve()
-    if resolved != base and base not in resolved.parents:
+    if resolved == base:
+        # `tier:` / `tier:.` / `tier:foo/..` -- an empty/degenerate sub-path
+        # pointing at the tier ROOT dir (not a file/dir under it). A bare tier
+        # root is never a valid mount source.
+        raise ConfigError(
+            f"{where} overlay source {rel!r} names the {tier!r} tier root dir "
+            f"itself (empty sub-path) -- name a file/dir under it, e.g. "
+            f"`{tier}:setup.d/x.sh`")
+    if base not in resolved.parents:
         raise ConfigError(
             f"{where} overlay path {sub!r} escapes the {tier!r} tier dir")
     if not resolved.exists():
@@ -743,16 +751,16 @@ def _render_volume_mount_block(name: str, target: str, readonly: bool,
     return "\n".join(lines) + "\n"
 
 
-def _inline_mounts_array_span(text: str) -> tuple[int, int] | None:
-    """If the doc has an uncommented top-level `mounts = [ ... ]` inline array,
-    return `(open_bracket_index, close_bracket_index)`; else None.
+def inline_array_span(text: str, key: str) -> tuple[int, int] | None:
+    """`(open_bracket_index, close_bracket_index)` of an uncommented top-level
+    `key = [ ... ]` inline array, else None (absent / commented / `[[key]]`
+    blocks / unbalanced -- all cases where the caller appends a block instead).
 
     The bracket scan skips string contents and `#` comments and balances nested
-    `[]`, so a path containing a bracket or a multi-line array doesn't fool it.
-    Returns None when `mounts` is absent, commented, declared as `[[mounts]]`
-    blocks (a header, not a `mounts =` assignment), or not an inline array -- all
-    cases where the caller appends a `[[mounts]]` block instead."""
-    m = re.search(r"(?m)^[ \t]*mounts[ \t]*=[ \t]*", text)
+    `[]`, so a bracket inside a value or a multi-line array doesn't fool it. The
+    single string/comment/bracket-aware scanner shared by `mount add`
+    (`add_volume_mount`) and preset stamping (`preset_stamp._stamp_array`)."""
+    m = re.search(rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=[ \t]*", text)
     if not m:
         return None
     open_idx = m.end()
@@ -789,6 +797,50 @@ def _inline_mounts_array_span(text: str) -> tuple[int, int] | None:
     return None  # unbalanced -> let the caller append a block instead
 
 
+def last_code_char_index(inner: str) -> int | None:
+    """Index within `inner` (the text between an array's `[` and `]`) of the
+    last real-code character -- outside any string or `#` comment, and not
+    whitespace -- or None when the body is empty / whitespace / comments only.
+
+    Used to place a separating comma exactly after the last existing element
+    (never inside a trailing comment, never mistaking a `#` or `,` inside a
+    string for code). String/comment scanning mirrors `inline_array_span`."""
+    last: int | None = None
+    in_str = False
+    str_ch = ""
+    i = 0
+    n = len(inner)
+    while i < n:
+        c = inner[i]
+        if in_str:
+            if str_ch == '"' and c == "\\":
+                # escaped char stays part of the string (code); skip both.
+                last = min(i + 1, n - 1)
+                i += 2
+                continue
+            last = i
+            if c == str_ch:
+                in_str = False
+            i += 1
+            continue
+        if c in "\"'":
+            in_str = True
+            str_ch = c
+            last = i
+            i += 1
+            continue
+        if c == "#":
+            nl = inner.find("\n", i)
+            if nl == -1:
+                break
+            i = nl + 1
+            continue
+        if not c.isspace():
+            last = i
+        i += 1
+    return last
+
+
 def add_volume_mount(text: str, name: str, target: str,
                      readonly: bool = False, user_owned: bool = False) -> str:
     """Add a managed-volume mount to a workspace TOML, preserving comments.
@@ -798,7 +850,7 @@ def add_volume_mount(text: str, name: str, target: str,
     Otherwise a `[[mounts]]` block is appended -- which also composes with
     existing `[[mounts]]` blocks (TOML merges them), but is never mixed with an
     inline array (TOML forbids a key and a table-array of the same name)."""
-    span = _inline_mounts_array_span(text)
+    span = inline_array_span(text, "mounts")
     if span is None:
         block = _render_volume_mount_block(name, target, readonly, user_owned)
         if text and not text.endswith("\n"):
