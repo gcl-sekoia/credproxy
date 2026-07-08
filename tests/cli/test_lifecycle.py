@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
+
+# The pristine subprocess.run, captured at import before any test monkeypatches
+# lifecycle.subprocess.run -- so a fake that re-invokes a real subprocess (see
+# _local_passwd_exec) never recurses into a prior test's still-installed fake.
+_REAL_SUBPROCESS_RUN = subprocess.run
 
 
 # ---- helpers -----------------------------------------------------------------
@@ -1362,6 +1368,194 @@ def test_run_setup_missing_user_errors(xdg, ws_factory, monkeypatch):
             ws,
             {"setup": [{"run": "x", "user": "workspace", "order": 0}],
              "user": "vscode"})
+
+
+# ---- per-step HOME resolution + _resolve_container_home hardening (#55) -------
+
+
+class _FakeDocker:
+    """A subprocess.run fake for run_setup where HOME resolution and step execs
+    INTERACT: it answers the in-container HOME lookup from a mutable `users` map
+    (user -> home; an absent user yields an empty passwd line, i.e. the
+    genuinely-absent path) and records execs. Each exec fires an `on_exec` side
+    effect that may mutate `users`, so a root step that `useradd`s a user makes
+    a LATER workspace step's lookup succeed -- the acceptance-criterion shape,
+    and proof that resolution is per-step, not once up front. `calls` is the
+    ordered ("home", user) / ("exec", cmd) transcript."""
+
+    def __init__(self, users=None, on_exec=None, exec_code=0):
+        self.users = dict(users or {})
+        self.on_exec = on_exec or (lambda cmd: None)
+        self.exec_code = exec_code
+        self.calls = []
+
+    def run(self, cmd, **kw):
+        import subprocess as _sp
+        if len(cmd) > 7 and cmd[5:7] == ["sh", "-c"] and "getent" in cmd[7]:
+            user = cmd[-1]
+            self.calls.append(("home", user))
+            home = self.users.get(user)
+            out = f"{user}:x:1000:1000::{home}:/bin/sh\n" if home else ""
+            return _sp.CompletedProcess(cmd, 0, stdout=out, stderr="")
+        self.calls.append(("exec", cmd))
+        self.on_exec(cmd)
+        code = self.exec_code
+
+        class _R:
+            returncode = code
+
+        return _R()
+
+
+def _homes(fake):
+    return [payload for kind, payload in fake.calls if kind == "home"]
+
+
+def _execs(fake):
+    return [payload for kind, payload in fake.calls if kind == "exec"]
+
+
+def test_run_setup_home_resolved_per_step(xdg, ws_factory, monkeypatch):
+    """TWO workspace-user steps trigger TWO separate in-container HOME lookups,
+    interleaved with the execs (home, exec, home, exec) -- proving resolution is
+    PER STEP, not hoisted once up front (which would give home, exec, exec)."""
+    from credproxy_cli.core import lifecycle
+    fake = _FakeDocker(users={"vscode": "/home/vscode"})
+    monkeypatch.setattr(lifecycle.subprocess, "run", fake.run)
+    ws = ws_factory("a")
+    lifecycle.run_setup(
+        ws,
+        {"setup": [{"run": "one", "user": "workspace", "order": 0},
+                   {"run": "two", "user": "workspace", "order": 0}],
+         "user": "vscode"})
+    assert [k for k, _ in fake.calls] == ["home", "exec", "home", "exec"]
+    assert _homes(fake) == ["vscode", "vscode"]  # one lookup per step
+
+
+def test_run_setup_user_created_by_earlier_root_step(xdg, ws_factory, monkeypatch):
+    """Acceptance criterion 1: `setup = [{run="useradd dev", user="root"},
+    {run=..., user="workspace"}]`. The user `dev` is ABSENT until the root step
+    runs, then PRESENT -- so the later workspace step's per-step lookup resolves
+    the just-created user's HOME. A once-up-front lookup would have failed."""
+    from credproxy_cli.core import lifecycle
+
+    def on_exec(cmd):
+        if "useradd dev" in cmd[-1]:      # the root step creates the user
+            fake.users["dev"] = "/home/dev"
+
+    fake = _FakeDocker(users={}, on_exec=on_exec)  # dev absent initially
+    monkeypatch.setattr(lifecycle.subprocess, "run", fake.run)
+    ws = ws_factory("a")
+    lifecycle.run_setup(
+        ws,
+        {"setup": [{"run": "useradd dev", "user": "root", "order": 0},
+                   {"run": "gh auth setup-git", "user": "workspace", "order": 10}],
+         "user": "dev"})
+    # order: root useradd exec first, THEN the HOME lookup (which now succeeds),
+    # THEN the workspace exec -- the lookup happens after the user is created.
+    assert fake.calls[0][0] == "exec"
+    assert fake.calls[1] == ("home", "dev")
+    assert _homes(fake) == ["dev"]                 # only the ws step looks up
+    ws_argv = _execs(fake)[1]                       # 2nd exec = the workspace step
+    assert ws_argv[ws_argv.index("-u") + 1] == "dev"
+    assert "HOME=/home/dev" in ws_argv             # resolved from the new user
+
+
+def test_resolve_home_exec_failure_distinct_error(xdg, ws_factory, monkeypatch):
+    """A `docker exec` FAILURE during HOME resolution (container died, daemon
+    hiccup) surfaces a DISTINCT DockerError carrying the stderr/returncode --
+    NOT the misleading 'user does not exist, create it earlier' advice (the exec
+    failing is unrelated to whether the user exists)."""
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.errors import DockerError
+    import subprocess as _sp
+
+    def run(cmd, **kw):
+        if len(cmd) > 7 and cmd[5:7] == ["sh", "-c"] and "getent" in cmd[7]:
+            return _sp.CompletedProcess(cmd, 137, stdout="",
+                                        stderr="Error: No such container: ws")
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(lifecycle.subprocess, "run", run)
+    ws = ws_factory("a")
+    with pytest.raises(DockerError) as ei:
+        lifecycle.run_setup(
+            ws, {"setup": [{"run": "x", "user": "workspace", "order": 0}],
+                 "user": "vscode"})
+    msg = str(ei.value)
+    assert "does not exist" not in msg           # not the create-it-earlier error
+    assert "No such container" in msg            # carries the real stderr
+    assert "137" in msg                          # and the returncode
+
+
+def _local_passwd_exec(passwd_text, tmp_path):
+    """A subprocess.run replacement that executes the REAL in-container HOME
+    lookup _resolve_container_home builds, locally: it strips the `docker exec
+    -u 0 <container>` prefix, repoints `/etc/passwd` at a controlled file, and
+    forces getent OFF PATH so the awk `/etc/passwd` fallback runs. This exercises
+    the actual awk matching (numeric-uid + literal-name), no canned output, so
+    the test can't drift from the shipped command."""
+    import shutil
+    import tempfile
+
+    real_run = _REAL_SUBPROCESS_RUN   # pristine, never a prior test's fake
+    d = Path(tempfile.mkdtemp(dir=tmp_path))
+    passwd = d / "passwd"
+    passwd.write_text(passwd_text)
+    bindir = d / "bin"
+    bindir.mkdir()
+    for tool in ("sh", "awk"):                    # getent deliberately excluded
+        src = shutil.which(tool)
+        if src:
+            (bindir / tool).symlink_to(src)
+
+    def run(cmd, **kw):
+        assert cmd[5:7] == ["sh", "-c"]
+        script = cmd[7].replace("/etc/passwd", str(passwd))
+        user = cmd[-1]
+        return real_run(["sh", "-c", script, "_", user],
+                        capture_output=True, text=True,
+                        env={"PATH": str(bindir)})
+
+    return run
+
+
+import shutil as _shutil  # noqa: E402
+
+
+@pytest.mark.skipif(_shutil.which("awk") is None, reason="awk required")
+def test_resolve_home_numeric_user_via_fallback(xdg, ws_factory, monkeypatch, tmp_path):
+    """A legal NUMERIC user (`user = "1000"`) resolves via the /etc/passwd
+    fallback's UID-field (field 3) match, so a getent-less busybox where uid
+    1000 exists still resolves -- the old name-only `grep "^$1:"` reported it
+    missing."""
+    from credproxy_cli.core import lifecycle
+    passwd = "root:x:0:0::/root:/bin/sh\ndev:x:1000:1000::/home/dev:/bin/sh\n"
+    monkeypatch.setattr(lifecycle.subprocess, "run",
+                        _local_passwd_exec(passwd, tmp_path))
+    ws = ws_factory("a")
+    assert lifecycle._resolve_container_home(ws, "1000") == "/home/dev"
+
+
+@pytest.mark.skipif(_shutil.which("awk") is None, reason="awk required")
+def test_resolve_home_dotted_user_literal(xdg, ws_factory, monkeypatch, tmp_path):
+    """A username with a `.` (regex-significant) matches LITERALLY: querying
+    `foo.bar` must NOT match a `fooXbar` passwd entry (the old `grep "^foo.bar:"`
+    regex WOULD have, `.` being any-char), and DOES match a real `foo.bar`."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a")
+    # 'foo.bar' must not match 'fooXbar' -- proves the compare is literal.
+    monkeypatch.setattr(lifecycle.subprocess, "run", _local_passwd_exec(
+        "fooXbar:x:1001:1001::/home/fooXbar:/bin/sh\n", tmp_path))
+    assert lifecycle._resolve_container_home(ws, "foo.bar") is None
+    # the literal name still resolves.
+    monkeypatch.setattr(lifecycle.subprocess, "run", _local_passwd_exec(
+        "foo.bar:x:1002:1002::/home/foo.bar:/bin/sh\n", tmp_path))
+    assert lifecycle._resolve_container_home(ws, "foo.bar") == "/home/foo.bar"
 
 
 def test_binding_env_map_skip_rule(xdg):

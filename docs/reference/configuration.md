@@ -176,6 +176,8 @@ it into the image). Editing any of a table's `run`/`user`/`order` is spec drift
 (recreate on next `start`), same as changing a string.
 
 ```toml
+user = "dev"   # `user = "workspace"` (the table default) resolves to this;
+               # without it a workspace-user step would resolve to root
 setup = [
   "curl -fsSL http://proxy.local/bootstrap.sh | sh",       # root, no env
   { run = "useradd -m -u $CREDPROXY_HOST_UID dev", user = "root", order = 10 },

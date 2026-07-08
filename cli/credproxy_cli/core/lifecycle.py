@@ -663,18 +663,40 @@ def _resolve_container_home(ws: Workspace, user: str) -> str | None:
 
     Portable across images: `getent` when present, falling back to a raw
     /etc/passwd scan (busybox/distroless may lack getent). Field 6 of the passwd
-    line is the home dir."""
+    line is the home dir.
+
+    The in-container lookup ALWAYS exits 0 (a trailing `|| true`), so a nonzero
+    `docker exec` return code means the exec itself failed -- the container died,
+    a daemon hiccup -- NOT that the user is absent. That case raises a distinct
+    DockerError (carrying the stderr/returncode) rather than funnelling into the
+    caller's "user does not exist, create it earlier" advice, which would be
+    misleading. A genuinely absent user is the `returncode == 0` + empty-output
+    path, which returns None.
+
+    The fallback matches the NAME (field 1) OR the UID (field 3) via an exact
+    awk string compare, so a legal numeric user (`user = "1000"`) resolves on a
+    getent-less busybox where uid 1000 exists, and a username containing a `.`
+    (regex-significant) matches literally -- unlike the old name-only
+    `grep "^$1:"` regex. `user` stays a positional parameter (`sh -c '...' _
+    "$user"`) spliced into an awk `-v` binding, never into the awk program body,
+    preserving the no-injection property."""
     r = subprocess.run(
         ["docker", "exec", "-u", "0", ws.ws_container, "sh", "-c",
-         'getent passwd "$1" 2>/dev/null || grep "^$1:" /etc/passwd 2>/dev/null',
+         'getent passwd "$1" 2>/dev/null '
+         '|| awk -F: -v u="$1" \'$1==u||$3==u{print;exit}\' /etc/passwd 2>/dev/null '
+         '|| true',
          "_", user],
         capture_output=True, text=True, check=False,
     )
     if r.returncode != 0:
-        return None
+        raise DockerError(
+            f"resolving HOME for setup user {user!r} failed: `docker exec` "
+            f"exited {r.returncode} (the workspace container may have died)"
+            + (f": {r.stderr.strip()}" if (r.stderr or "").strip() else "")
+        )
     lines = (r.stdout or "").strip().splitlines()
     if not lines:
-        return None
+        return None  # user genuinely absent -> caller's "create it earlier" error
     fields = lines[0].split(":")
     if len(fields) < 6 or not fields[5]:
         return None
@@ -759,6 +781,8 @@ def _build_setup_exec(
 
     env_flags: list[str] = []
     if is_root:
+        # decision-6-wins: a TABLE entry gets the binding env even when it
+        # resolves to root; only plain STRINGS are the env-free escape hatch.
         for k, v in env_map.items():
             env_flags += ["-e", f"{k}={v}"]
         return (run,
