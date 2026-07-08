@@ -139,21 +139,27 @@ def _load_applied_rules(ws: Workspace) -> list[dict] | None:
         return None
 
 
-def create_workspace_files(ws: Workspace) -> None:
+def create_workspace_files(ws: Workspace, text: str | None = None) -> None:
+    """Scaffold a managed workspace's config + auth token. `text` overrides the
+    rendered template (used by `create` after in-memory `[[preset]]` expansion, so
+    the write is a single atomic step -- all-or-nothing)."""
     if ws.exists():
         raise WorkspaceError(
             f"workspace '{ws.name}' already exists ({ws.config_path})"
         )
     ws.config_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(ws.config_path, render_template(ws.name))
+    atomic_write_text(ws.config_path,
+                      render_template(ws.name) if text is None else text)
     ensure_token(ws)
 
 
-def create_attached_workspace_files(ws: Workspace, selector: dict) -> None:
+def create_attached_workspace_files(ws: Workspace, selector: dict,
+                                    text: str | None = None) -> None:
     """Scaffold an ATTACHED workspace: the attach template stamped with the given
     (already-validated, normalized) selector, plus the auth token. The token is
     still host-owned -- it authenticates the config push to the externally-run
-    proxy exactly as for a managed workspace."""
+    proxy exactly as for a managed workspace. `text` overrides the rendered
+    template (post-`[[preset]]`-expansion; single atomic write)."""
     from .config import render_attach_template
 
     if ws.exists():
@@ -161,7 +167,9 @@ def create_attached_workspace_files(ws: Workspace, selector: dict) -> None:
             f"workspace '{ws.name}' already exists ({ws.config_path})"
         )
     ws.config_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(ws.config_path, render_attach_template(ws.name, selector))
+    atomic_write_text(
+        ws.config_path,
+        render_attach_template(ws.name, selector) if text is None else text)
     ensure_token(ws)
 
 

@@ -169,8 +169,17 @@ class Renderer:
             print(f"  {k:<24}{short(v) if v else '(default)'}")
 
     # -- create / use / generic name ack --
-    def created(self, name: str, path: str, attached: bool = False) -> None:
+    def created(self, name: str, path: str, attached: bool = False,
+                presets: list[dict] | None = None) -> None:
         print(f"created workspace '{name}' at {path}")
+        # Template-declared `[[preset]]` entries (#57) were expanded and stamped
+        # into the fresh config -- announce each like `preset add` does (no
+        # recreate/push hint; the create hint below covers the follow-up).
+        for p in (presets or []):
+            self._preset_summary(
+                name, p["preset"], p["bindings"], p["rules"],
+                p["newly_intercepted"], p["mounts"], p["env"],
+                p["skipped_env"], p["setup"])
         # An ATTACHED workspace has no `start` (its containers are external);
         # the follow-up there is a config push.
         verb = "push" if attached else "start"
@@ -604,16 +613,14 @@ class Renderer:
                 u = "" if s.get("user", "workspace") == "workspace" else f" ({s['user']})"
                 print(f"  setup   [{s['order']}] {s['run']}{u}")
 
-    def preset_applied(self, ws: str, preset: str, bindings: list[dict],
-                       rules: list[dict], newly_intercepted: list[str],
-                       mounts: list[dict] | None = None,
-                       env: list[dict] | None = None,
-                       skipped_env: list[str] | None = None,
-                       setup: list[dict] | None = None,
-                       recreate: bool = False,
-                       attached: bool = False) -> None:
-        mounts, env, setup = mounts or [], env or [], setup or []
-        skipped_env = skipped_env or []
+    def _preset_summary(self, ws: str, preset: str, bindings: list[dict],
+                        rules: list[dict], newly_intercepted: list[str],
+                        mounts: list[dict], env: list[dict],
+                        skipped_env: list[str], setup: list[dict]) -> None:
+        """The per-preset stamp summary (header + item lines + skipped-env /
+        newly-intercepted advisories), shared by `preset_applied` and `create`'s
+        per-entry announcement. No push hint / recreate warning -- those are the
+        caller's (they differ between add and create)."""
         nb, nr = len(bindings), len(rules)
         parts = [f"{nb} binding(s)", f"{nr} rule(s)"]
         if mounts:
@@ -646,6 +653,17 @@ class Renderer:
                 + ", ".join(newly_intercepted)
                 + " -- a workspace that hasn't bootstrapped the CA will see a "
                   "cert error there until it does")
+
+    def preset_applied(self, ws: str, preset: str, bindings: list[dict],
+                       rules: list[dict], newly_intercepted: list[str],
+                       mounts: list[dict] | None = None,
+                       env: list[dict] | None = None,
+                       skipped_env: list[str] | None = None,
+                       setup: list[dict] | None = None,
+                       recreate: bool = False,
+                       attached: bool = False) -> None:
+        self._preset_summary(ws, preset, bindings, rules, newly_intercepted,
+                             mounts or [], env or [], skipped_env or [], setup or [])
         if recreate:
             say("container-half config changed the workspace spec -- "
                 f"restart to apply: credproxy workspace {ws} start")
@@ -662,7 +680,13 @@ class JsonRenderer(Renderer):
         print(json.dumps(obj))
 
     def error(self, exc: Exception) -> None:
-        self._emit({"error": {"type": type(exc).__name__, "message": str(exc)}})
+        obj = {"type": type(exc).__name__, "message": str(exc)}
+        # An exception may attach structured fields (e.g. PresetTemplateError's
+        # {preset, missing}) so a --json consumer gets the shape, not just prose.
+        extra = getattr(exc, "json_fields", None)
+        if isinstance(extra, dict):
+            obj.update(extra)
+        self._emit({"error": obj})
 
     def workspace_list(self, rows: list[dict]) -> None:
         self._emit(rows)
@@ -670,8 +694,12 @@ class JsonRenderer(Renderer):
     def info(self, d: dict) -> None:
         self._emit(d)
 
-    def created(self, name: str, path: str, attached: bool = False) -> None:
-        self._emit({"name": name, "config_path": path})
+    def created(self, name: str, path: str, attached: bool = False,
+                presets: list[dict] | None = None) -> None:
+        obj = {"name": name, "config_path": path}
+        if presets:
+            obj["presets"] = presets
+        self._emit(obj)
 
     def used(self, name: str) -> None:
         self._emit({"default": name})

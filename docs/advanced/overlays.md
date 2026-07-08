@@ -120,7 +120,8 @@ story and the no-fork bundle differ only in how the directory is named.
 
 The `<name>.toml` body a fresh `credproxy create` writes. Make it your canonical
 default workspace — your image, your `user`/`home`, your `setup`, even default
-`[[binding]]` blocks for org infrastructure. It is a **literal** workspace
+`[[binding]]` blocks (or `[[preset]]` entries, expanded at create — see below)
+for org infrastructure. It is a **literal** workspace
 config: every occurrence of the exact token `{name}` is replaced with the
 workspace name, and **nothing else** is touched — no `str.format`, so literal
 braces (`{ volume = ... }` inline tables, `${VAR}`, a stray `{foo}`) need no
@@ -165,12 +166,45 @@ as literal v1 defaults, existence-checked when the workspace starts. Each stampe
 block carries an inert `# credproxy:preset …` provenance comment, so re-applying
 the same pack is refused rather than duplicated.
 
+**A template can *declare* presets.** Instead of inlining literal `[[binding]]`
+blocks (which bypass preset machinery), a `workspace.template.toml` /
+`workspace.attach.template.toml` may carry `[[preset]]` entries that `create`
+expands through the **same** path as `preset add` — so each created workspace
+gets its own freshly generated shared placeholder, and the template shrinks from
+mechanism to intent:
+
+```toml
+# in your overlay's workspace.template.toml, alongside ordinary literal config
+[[preset]]
+name = "github"                     # complete defaults (gh-cli / github.com): nothing else needed
+
+[[preset]]
+name     = "claude-code"
+provider = "bw"
+secret   = "claude-code-oauth-token"
+```
+
+Each entry takes `name` (required) and optional `provider` / `secret` (a single
+ref, defaulting exactly as `preset add` does — the pack's `default_provider`,
+and `default_secret` only when the resolved provider *is* the default). The
+`[[preset]]` blocks are **consumed at create and never survive** into the stamped
+`<name>.toml` (the loader **rejects** `preset` in a workspace config — references
+live only in templates). Create is **all-or-nothing**: a defaults-less pack with
+no provider/secret, a name collision against a literal `[[binding]]`, or an
+attach template naming a container-half pack fails the whole create with nothing
+written (no config, no token, no state). There is **no prompting** — a missing
+field is a loud error naming exactly what to fill (or drop the entry and run
+`preset add` after). Leave `[[preset]]` out of the *builtin* templates so a bare
+`credproxy create` needs no provider login; template presets are for
+overlays/forks.
+
 **Template vs. preset — both exist on purpose.** Baking `[[binding]]`/`[[rule]]`
-blocks into `workspace.template.toml` applies them to **every** workspace at
-**create** time, all-or-nothing. A **preset** is the **per-service, composable,
-post-create** granularity: applied to the workspaces that need it, when they need
-it, and stacked with others. Use the template for "every box gets this"; use a
-preset for "this box also talks to service X."
+blocks (or now `[[preset]]` entries) into `workspace.template.toml` applies them
+to **every** workspace at **create** time, all-or-nothing. A **preset** applied
+with `preset add` is the **per-service, composable, post-create** granularity:
+applied to the workspaces that need it, when they need it, and stacked with
+others. Use the template for "every box gets this"; use a bare `preset add` for
+"this box also talks to service X."
 
 ## Shipping static files (overlay mounts)
 

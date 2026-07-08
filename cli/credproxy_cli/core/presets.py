@@ -413,6 +413,82 @@ def describe_presets() -> list[dict]:
 
 
 @dataclass(frozen=True)
+class TemplatePreset:
+    """One `[[preset]]` entry declared in a `workspace.template.toml` /
+    `workspace.attach.template.toml`, consumed and expanded at `create` time (it
+    never survives into the stamped `<name>.toml` -- the loader rejects `preset`
+    in a workspace config). Mirrors the `preset add` inputs: the pack `name`, an
+    optional `provider`, and an optional single `secret` ref."""
+    name: str
+    provider: str | None
+    secret: str | None
+
+
+def parse_template_presets(raw: dict, source: str) -> list[TemplatePreset]:
+    """Extract + validate the `[[preset]]` entries from a rendered template's
+    parsed TOML. `source` labels error messages. Returns [] when there are none.
+    Fields: `name` (required non-empty string), `provider` / `secret` (optional
+    non-empty strings, `secret` a single ref like `preset add`'s one `--secret`).
+    Unknown keys are rejected."""
+    entries_raw = raw.get("preset")
+    if entries_raw is None:
+        return []
+    if not isinstance(entries_raw, list):
+        raise ConfigError(f"{source}: `[[preset]]` must be an array of tables")
+    allowed = {"name", "provider", "secret"}
+    out: list[TemplatePreset] = []
+    for i, e in enumerate(entries_raw):
+        where = f"{source}: preset[{i}]"
+        if not isinstance(e, dict):
+            raise ConfigError(f"{where} must be a table")
+        extra = sorted(set(e) - allowed)
+        if extra:
+            raise ConfigError(
+                f"{where} unknown key(s): {', '.join(extra)} "
+                f"(allowed: name, provider, secret)")
+        name = e.get("name")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"{where} 'name' must be a non-empty string")
+        provider = e.get("provider")
+        if provider is not None and (not isinstance(provider, str) or not provider):
+            raise ConfigError(f"{where} 'provider' must be a non-empty string")
+        secret = e.get("secret")
+        if secret is not None and (not isinstance(secret, str) or not secret):
+            raise ConfigError(f"{where} 'secret' must be a non-empty string")
+        out.append(TemplatePreset(name=name, provider=provider, secret=secret))
+    return out
+
+
+def resolve_preset_credential(
+    spec: PresetSpec, provider: str | None, secret: str | None,
+) -> tuple[str | None, str | None, list[str]]:
+    """Apply a preset's provider/secret DEFAULTS -- the single source of truth
+    shared by `preset add` and template-declared `[[preset]]` expansion (#57), so
+    the two never diverge on how a pack's `default_provider`/`default_secret` fill
+    an omitted flag/field.
+
+    Returns `(provider, secret, missing)`: the resolved values plus the list of
+    still-unresolved REQUIRED fields (`["provider"]`/`["secret"]`), empty when
+    complete or when the pack needs no credential. `default_secret` fills an
+    omitted secret ONLY when the resolved provider equals `default_provider` (a
+    ref's meaning is provider-specific). The caller renders its own error from
+    `missing` (add points at flags; create points at the template entry)."""
+    if not spec.needs_credential:
+        return None, None, []
+    provider = provider or spec.default_provider
+    missing: list[str] = []
+    if provider is None:
+        missing.append("provider")
+    if secret is None:
+        if provider is not None and provider == spec.default_provider \
+                and spec.default_secret is not None:
+            secret = spec.default_secret
+        else:
+            missing.append("secret")
+    return provider, secret, missing
+
+
+@dataclass(frozen=True)
 class PresetExpansion:
     """A preset expanded for stamping: the ordinary blocks/config it writes into
     a workspace TOML. `rev` (the definition-file digest) rides every provenance

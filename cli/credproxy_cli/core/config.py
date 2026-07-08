@@ -114,7 +114,7 @@ def _parse_attach(raw_attach, source: str) -> dict:
     return {"container": val}
 
 
-def _attached_config(raw: dict, ws: Workspace) -> dict:
+def _attached_config(raw: dict, source: str) -> dict:
     """The normalized config for an attached workspace: the `attach` selector plus
     every container-lifecycle field defaulted to empty/None, so the shape matches
     the managed path (inspect/resolve read one dict). Rejects any lifecycle key
@@ -122,16 +122,16 @@ def _attached_config(raw: dict, ws: Workspace) -> dict:
     offending = sorted(k for k in raw if k in _ATTACH_EXCLUSIVE)
     if offending:
         raise ConfigError(
-            f"{ws.config_path}: `attach` is mutually exclusive with "
+            f"{source}: `attach` is mutually exclusive with "
             f"container-lifecycle fields -- remove: {', '.join(offending)} "
             f"(an attached workspace's container is managed externally; credproxy "
             f"manages only its credentials/config)")
-    attach = _parse_attach(raw["attach"], str(ws.config_path))
+    attach = _parse_attach(raw["attach"], source)
 
     directory = raw.get("directory")
     if directory is not None and (not isinstance(directory, str)
                                   or not directory.startswith("/")):
-        raise ConfigError(f"{ws.config_path}: `directory` must be an absolute path")
+        raise ConfigError(f"{source}: `directory` must be an absolute path")
 
     return {
         "attach": attach, "directory": directory,
@@ -421,13 +421,33 @@ def load_config(ws: Workspace) -> dict:
         raise ConfigError(
             f"workspace '{ws.name}' not found (no {ws.config_path})"
         )
+    return load_config_from_text(ws.config_path.read_text(), str(ws.config_path))
+
+
+def load_config_from_text(text: str, source: str) -> dict:
+    """The text-based core of `load_config`: validate a workspace-config TOML
+    STRING into the normalized dict. `source` is the path/label used in error
+    messages. Used both by `load_config` (from disk) and by `create`'s in-memory
+    all-or-nothing preset expansion (which validates the composed text before any
+    file exists)."""
     try:
-        raw = tomllib.loads(ws.config_path.read_text())
+        raw = tomllib.loads(text)
     except Exception as e:
-        raise ConfigError(f"{ws.config_path}: TOML parse error: {e}") from e
+        raise ConfigError(f"{source}: TOML parse error: {e}") from e
 
     if not isinstance(raw, dict):
-        raise ConfigError(f"{ws.config_path}: top level must be a table")
+        raise ConfigError(f"{source}: top level must be a table")
+
+    # `[[preset]]` is a TEMPLATE-only key: it is consumed and expanded at `create`
+    # time and never survives into a workspace's `<name>.toml`. Reject it here --
+    # specifically, ahead of the generic unknown-key path -- so "preset references
+    # live only in templates" is a load-enforced invariant (both managed and
+    # attached configs).
+    if "preset" in raw:
+        raise ConfigError(
+            f"{source}: `[[preset]]` is a template-only key -- it expands at "
+            f"create time; on an existing workspace use "
+            f"`credproxy workspace NAME preset add ...`")
 
     # Reject unknown top-level keys (a typo silently no-ops otherwise). Mirror the
     # `_parse_mount` "unknown key(s)" precedent, with a cheap did-you-mean.
@@ -437,21 +457,21 @@ def load_config(ws: Workspace) -> dict:
             near = difflib.get_close_matches(k, KNOWN_KEYS, n=1)
             return f"`{k}` (did you mean `{near[0]}`?)" if near else f"`{k}`"
         raise ConfigError(
-            f"{ws.config_path}: unknown key(s): {', '.join(_hint(k) for k in unknown)}"
+            f"{source}: unknown key(s): {', '.join(_hint(k) for k in unknown)}"
         )
 
     # Attached workspace: credproxy manages only credentials/config; the
     # container is run externally. Mutually exclusive with every lifecycle field
     # (checked in _attached_config), so it takes a distinct, container-free path.
     if raw.get("attach") is not None:
-        return _attached_config(raw, ws)
+        return _attached_config(raw, source)
 
     # image (mandatory -- the scaffold writes a concrete one; there is no
     # built-in default image to fall back to).
     image = raw.get("image")
     if not isinstance(image, str) or not image:
         raise ConfigError(
-            f"{ws.config_path}: `image` is required (a non-empty string) -- "
+            f"{source}: `image` is required (a non-empty string) -- "
             f"`credproxy workspace create` writes one for you"
         )
 
@@ -460,7 +480,7 @@ def load_config(ws: Workspace) -> dict:
     # container's home is the image's, ephemeral (gone on recreate).
     home = raw.get("home")
     if home is not None and (not isinstance(home, str) or not home.startswith("/")):
-        raise ConfigError(f"{ws.config_path}: `home` must be an absolute path")
+        raise ConfigError(f"{source}: `home` must be an absolute path")
 
     # directory: optional host path this workspace is "for". Pure resolution
     # metadata for the loose surface -- `credp <verb>` with no NAME, run at or
@@ -471,15 +491,15 @@ def load_config(ws: Workspace) -> dict:
     directory = raw.get("directory")
     if directory is not None and (not isinstance(directory, str)
                                   or not directory.startswith("/")):
-        raise ConfigError(f"{ws.config_path}: `directory` must be an absolute path")
+        raise ConfigError(f"{source}: `directory` must be an absolute path")
 
     # mounts: typed list. A string is a host bind ("SRC:DST[:ro]"); a table is a
     # bind/volume/overlay mount. The `home` sugar prepends the home volume so it
     # shares the uniqueness checks + emission path.
     raw_mounts = raw.get("mounts") or []
     if not isinstance(raw_mounts, list):
-        raise ConfigError(f"{ws.config_path}: `mounts` must be an array")
-    mounts = [_parse_mount(m, f"{ws.config_path}: mounts[{i}]")
+        raise ConfigError(f"{source}: `mounts` must be an array")
+    mounts = [_parse_mount(m, f"{source}: mounts[{i}]")
               for i, m in enumerate(raw_mounts)]
     if home:
         mounts.insert(0, {"kind": "volume", "name": "home", "target": home,
@@ -488,20 +508,20 @@ def load_config(ws: Workspace) -> dict:
     # env: inline table of string values
     env = raw.get("env") or {}
     if not isinstance(env, dict):
-        raise ConfigError(f"{ws.config_path}: `env` must be a table")
+        raise ConfigError(f"{source}: `env` must be a table")
     for k, v in env.items():
         if not isinstance(k, str):
-            raise ConfigError(f"{ws.config_path}: `env` keys must be strings")
+            raise ConfigError(f"{source}: `env` keys must be strings")
         if not isinstance(v, str):
             raise ConfigError(
-                f"{ws.config_path}: env.{k} must be a string, got {type(v).__name__}"
+                f"{source}: env.{k} must be a string, got {type(v).__name__}"
             )
 
     # setup: a mixed array of shell command STRINGS and typed step TABLES,
     # normalized to a canonical form (strings stay strings; tables become
     # {"run", "user", "order"} dicts with defaults filled) so the spec hash is
     # deterministic. See _parse_setup.
-    setup = _parse_setup(raw.get("setup") or [], ws.config_path)
+    setup = _parse_setup(raw.get("setup") or [], source)
 
     # user: optional user that `enter` execs as (docker exec -u). Exec-only, so
     # NOT part of the spec hash -- changing it never recreates the container; it
@@ -509,12 +529,12 @@ def load_config(ws: Workspace) -> dict:
     # in or created by `setup`, which always runs as root).
     user = raw.get("user")
     if user is not None and (not isinstance(user, str) or not user):
-        raise ConfigError(f"{ws.config_path}: `user` must be a non-empty string")
+        raise ConfigError(f"{source}: `user` must be a non-empty string")
 
     # No two mounts on the same target; no two volumes with the same name; and a
     # `user_owned` volume needs a non-root `user` (validated together now that
     # `user` is known).
-    validate_mount_set(mounts, ws.config_path, user)
+    validate_mount_set(mounts, source, user)
 
     # exec_flags: escape hatch -- extra flags spliced into `docker exec` for
     # `enter` (e.g. ["--workdir", "/srv"], ["--env", "FOO=bar"]). credproxy keeps
@@ -522,7 +542,7 @@ def load_config(ws: Workspace) -> dict:
     # session tracking. Exec-only, like `user`; not part of the spec.
     exec_flags = raw.get("exec_flags") or []
     if not isinstance(exec_flags, list) or not all(isinstance(f, str) for f in exec_flags):
-        raise ConfigError(f"{ws.config_path}: `exec_flags` must be an array of strings")
+        raise ConfigError(f"{source}: `exec_flags` must be an array of strings")
 
     # workdir: directory `enter` starts in (docker exec --workdir), defaulting to
     # `home` at exec time. The workspaceFolder analog -- so `enter` lands in your
@@ -531,7 +551,7 @@ def load_config(ws: Workspace) -> dict:
     # --workdir in `exec_flags` still overrides it (docker last-wins).
     workdir = raw.get("workdir")
     if workdir is not None and (not isinstance(workdir, str) or not workdir.startswith("/")):
-        raise ConfigError(f"{ws.config_path}: `workdir` must be an absolute path")
+        raise ConfigError(f"{source}: `workdir` must be an absolute path")
 
     # enter_prelude: escape hatch over the `enter` env shim. By default credproxy
     # wraps the enter command in `sh -c '<prelude>; exec "$@"'`, where the prelude
@@ -541,7 +561,7 @@ def load_config(ws: Workspace) -> dict:
     # Exec-only -> not part of the spec hash.
     enter_prelude = raw.get("enter_prelude")
     if enter_prelude is not None and not isinstance(enter_prelude, str):
-        raise ConfigError(f"{ws.config_path}: `enter_prelude` must be a string")
+        raise ConfigError(f"{source}: `enter_prelude` must be a string")
 
     # shell: the command `enter` runs when no `-- CMD` is given (argv list).
     # Defaults to a LOGIN shell (`["bash", "-l"]`) -- semantically `enter` is
@@ -554,7 +574,7 @@ def load_config(ws: Workspace) -> dict:
         or not all(isinstance(s, str) and s for s in shell)
     ):
         raise ConfigError(
-            f"{ws.config_path}: `shell` must be a non-empty array of non-empty strings"
+            f"{source}: `shell` must be a non-empty array of non-empty strings"
         )
 
     # run_flags: escape hatch -- extra flags spliced into the workspace
@@ -566,7 +586,7 @@ def load_config(ws: Workspace) -> dict:
     # win on conflict, so run_flags can't detach the netns or rename the box.
     run_flags = raw.get("run_flags") or []
     if not isinstance(run_flags, list) or not all(isinstance(f, str) for f in run_flags):
-        raise ConfigError(f"{ws.config_path}: `run_flags` must be an array of strings")
+        raise ConfigError(f"{source}: `run_flags` must be an array of strings")
 
     # map_host_user: let credproxy make the non-root `user` own the bind mounts
     # without changing host ownership, picking the runtime-appropriate lever
@@ -575,7 +595,7 @@ def load_config(ws: Workspace) -> dict:
     # spec hash. Requires a non-root `user` (validated below).
     map_host_user = raw.get("map_host_user", False)
     if not isinstance(map_host_user, bool):
-        raise ConfigError(f"{ws.config_path}: `map_host_user` must be a boolean")
+        raise ConfigError(f"{source}: `map_host_user` must be a boolean")
 
     # auto_stop: host-side session behavior (stop the workspace when the last
     # `enter` session exits). Strict bool -- `auto_stop = "false"` is a truthy
@@ -585,7 +605,7 @@ def load_config(ws: Workspace) -> dict:
     # intentional) but with the same `is True` strictness.
     auto_stop = raw.get("auto_stop", False)
     if not isinstance(auto_stop, bool):
-        raise ConfigError(f"{ws.config_path}: `auto_stop` must be a boolean")
+        raise ConfigError(f"{source}: `auto_stop` must be a boolean")
 
     # user_uid: the in-container uid of `user`. map_host_user's keep-id maps
     # host-you onto THIS uid, so it's the side the host must land on for `user`
@@ -596,7 +616,7 @@ def load_config(ws: Workspace) -> dict:
     user_uid = raw.get("user_uid")
     if user_uid is not None and (not isinstance(user_uid, int) or isinstance(user_uid, bool)
                                  or user_uid < 0):
-        raise ConfigError(f"{ws.config_path}: `user_uid` must be a non-negative integer")
+        raise ConfigError(f"{source}: `user_uid` must be a non-negative integer")
 
     # map_host_user / user_uid configure how the non-root `user` owns bind
     # mounts, so they're meaningless without one. Reject rather than silently
@@ -610,7 +630,7 @@ def load_config(ws: Workspace) -> dict:
             joined = " and ".join(f"`{o}`" for o in orphans)
             verb, subj = ("require", "they") if len(orphans) > 1 else ("requires", "it")
             raise ConfigError(
-                f"{ws.config_path}: {joined} {verb} `user` to be set "
+                f"{source}: {joined} {verb} `user` to be set "
                 f"({subj} configure{'' if len(orphans) > 1 else 's'} how the "
                 f"non-root `user` owns bind mounts)"
             )

@@ -369,7 +369,7 @@ def test_mount_target_collision(xdg):
         target = "/opt/c.sh"
     '''))
     code, out, err = _run(["workspace", "w", "preset", "add", "cont"])
-    assert code == 1 and "already mounts" in (out + err)
+    assert code == 1 and "already mounted" in (out + err)
     # Nothing stamped.
     assert "C_VAR" not in ws.config_path.read_text()
 

@@ -50,3 +50,26 @@ class ProviderError(CredproxyError):
 class InjectorError(CredproxyError):
     """An injector definition could not be found or is malformed
     (missing/invalid `header`, bad `[placeholder]` charset, etc.)."""
+
+
+class PresetTemplateError(ConfigError):
+    """A template-declared `[[preset]]` entry (#57) can't be expanded at `create`
+    time because a required field (provider/secret) is missing and the pack has no
+    default for it. Carries `preset` + `missing` so `--json` can serialize the
+    structured `{preset, missing}` shape (surfaced via `json_fields`)."""
+
+    def __init__(self, preset: str, missing: list[str]):
+        self.preset = preset
+        self.missing = list(missing)
+        joined = " and ".join(f"`{m}`" for m in self.missing)
+        add_flags = " ".join(f"--{m} ..." for m in self.missing)
+        super().__init__(
+            f"template preset '{preset}' is missing {joined} -- fill it in the "
+            f"`[[preset]]` entry (name/provider/secret) in your "
+            f"workspace.template.toml, or drop the entry and run "
+            f"`credproxy workspace NAME preset add {preset} {add_flags}` after "
+            f"create")
+
+    @property
+    def json_fields(self) -> dict:
+        return {"preset": self.preset, "missing": self.missing}
