@@ -284,11 +284,22 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
     # Expand any template-declared `[[preset]]` entries (#57) into ordinary
     # stamped blocks IN MEMORY -- all-or-nothing: any failure raises/exits here,
     # before a single byte is written (no config file, no token, no state dir).
-    final_text, preset_announces = _expand_template_presets(base_text, source)
+    final_text, preset_announces, stamped_packs = _expand_template_presets(
+        base_text, source)
     if attach is not None:
         lifecycle.create_attached_workspace_files(ws, selector, text=final_text)
     else:
         lifecycle.create_workspace_files(ws, text=final_text)
+    # Host-prerequisite checks (#58) run only AFTER the atomic write succeeds, so
+    # a `fetch=true` provider check never execs a provider for a create that then
+    # aborts (finding 5). Advisory -- the stamp is durable, host state is fixable
+    # afterward. `do_fetch=True` (create is interactive, like `preset add`).
+    if stamped_packs:
+        from ..core import prereqs
+        for announce, (spec, provider, secret) in zip(preset_announces,
+                                                       stamped_packs):
+            announce["requires"] = [prereqs.summary(r) for r in prereqs.evaluate(
+                spec.requires, provider=provider, secret=secret, do_fetch=True)]
     render.OUT.created(ws.name, str(ws.config_path), attached=attach is not None,
                        presets=preset_announces)
     # Optional cwd-association (`--here`/`--dir`): record the directory this
@@ -354,7 +365,10 @@ def _expand_template_presets(base_text: str, source: str):
     """Expand template-declared `[[preset]]` entries (#57) into the final config
     text: strip the `[[preset]]` blocks and stamp each pack's expansion through
     the SAME `_expand_preset_into_text` core `preset add` uses. Returns
-    `(final_text, announces)` where `announces` is the per-entry render metadata.
+    `(final_text, announces, stamped_packs)` -- `announces` is the per-entry
+    render metadata; `stamped_packs` is the `(spec, provider, secret)` per pack so
+    the caller can run the #58 host-prerequisite checks AFTER it writes (finding
+    5), never invoking a provider for a create that then aborts.
 
     All-or-nothing: everything is composed in memory and every failure raises/exits
     before the caller writes, so a bad entry leaves no partial config. Entries are
@@ -381,14 +395,14 @@ def _expand_template_presets(base_text: str, source: str):
             fail(f"{source}: template is malformed TOML ({e}); its preset "
                  f"entries can't be expanded -- fix the template's `[[preset]]` "
                  f"syntax")
-        return base_text, []
+        return base_text, [], []
 
     # Gate on the KEY'S PRESENCE, not on entries being non-empty: any `preset`
     # key must be stripped/rejected here so it never survives into the stamped
     # config (where every later command would reject it with a misleading
     # "use preset add" remedy -- findings 1/2).
     if "preset" not in raw:
-        return base_text, []
+        return base_text, [], []
 
     entries = parse_template_presets(raw, source)   # ConfigError on a bad entry
 
@@ -409,6 +423,11 @@ def _expand_template_presets(base_text: str, source: str):
 
     text = _strip_preset_blocks(base_text)
     announces: list[dict] = []
+    # (spec, provider, secret) per stamped pack, so the host-prerequisite checks
+    # (#58) run AFTER the atomic write succeeds -- a `fetch=true` provider check
+    # execs a provider, and a later entry aborting create must not have invoked
+    # one for a create that then writes nothing (finding 5).
+    stamped_packs: list[tuple] = []
     for entry in entries:
         spec = get_preset(entry.name)               # CredproxyError on unknown pack
         provider = secret = None
@@ -429,13 +448,8 @@ def _expand_template_presets(base_text: str, source: str):
         exp = build_preset(entry.name, provider, secret)
         text, announce = _expand_preset_into_text(
             text, exp, entry.name, source, context="create")
-        # Host-prerequisite checks (#58): advisory -- the stamp is durable and
-        # host state is fixable afterward, so create never fails on a bad check.
-        # `do_fetch=True` here (create is interactive, like `preset add`).
-        from ..core import prereqs
-        announce["requires"] = [prereqs.summary(r) for r in prereqs.evaluate(
-            spec.requires, provider=provider, secret=secret, do_fetch=True)]
         announces.append(announce)
+        stamped_packs.append((spec, provider, secret))
 
     # Post-strip safety net (backstops findings 1/2): the composed config must
     # carry no top-level `preset` key. The stripper is line-based, so re-parse and
@@ -447,7 +461,7 @@ def _expand_template_presets(base_text: str, source: str):
     if "preset" in recheck:
         fail(f"{source}: internal error -- a `preset` key survived template "
              f"expansion (credproxy bug); nothing was written")
-    return text, announces
+    return text, announces, stamped_packs
 
 
 def do_bind_dir(ctx: Ctx, name: str | None, directory_flag: str | None) -> None:

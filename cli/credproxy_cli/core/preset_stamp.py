@@ -96,7 +96,31 @@ def _marker(name: str, rev: str, element_text: str) -> str:
     return f"# credproxy:preset name={name} rev={rev} sha={_sha12(element_text)}"
 
 
+# Loose match (name token only), used by the double-add guard `already_applied`.
 _MARKER_RE = re.compile(r"#\s*credproxy:preset\s+name=(\S+)\s")
+
+# The FULL stamp shape, anchored end-to-end: `name=<token> rev=<12hex> sha=<12hex>`
+# with nothing but optional trailing whitespace after. DISCOVERY
+# (`applied_preset_names`) and the removal fold (`is_marker_line`) use this, not
+# the loose match: a real stamp always carries 12-hex `rev`/`sha` (a def-file
+# digest + a span digest), so requiring the full shape means a marker-SHAPED line
+# that isn't a genuine stamp -- e.g. one living inside a multiline string value,
+# which the per-line comment scan can't distinguish from a real comment -- won't
+# be read as an applied pack. `name` is a `\S+` token (auto names /
+# `<preset>-<suffix>` never contain whitespace).
+_MARKER_FULL_RE = re.compile(
+    r"#\s*credproxy:preset\s+name=(\S+)\s+rev=[0-9a-f]{12}\s+sha=[0-9a-f]{12}\s*$")
+
+
+def is_marker_line(line: str) -> bool:
+    """True iff `line` (a whole config line) is a STANDALONE preset provenance
+    marker -- the full stamp shape, as written directly above a `[[binding]]` /
+    `[[rule]]` block. `remove_binding`/`remove_rule` fold this line away when
+    removing a stamped block, so removal leaves no orphan `# credproxy:preset`
+    marker (which #58 doctor would otherwise keep reading as an applied pack). A
+    trailing-comment marker (on an array element / env line) is NOT matched -- it
+    isn't a standalone line, and its owning span is removed by other means."""
+    return bool(_MARKER_FULL_RE.match(line.strip()))
 
 
 def _line_comment(line: str) -> str:
@@ -133,16 +157,21 @@ def applied_preset_names(text: str) -> list[str]:
     """Every preset name that has a provenance marker in `text`, in first-seen
     order, deduped. The diagnostics read (#58 `doctor`) that discovers which
     packs a workspace uses -- the loader never reads comments, but doctor may.
-    Only real comments count (a `#` outside any string), matching
-    `already_applied`, so a marker-looking substring inside a string VALUE can't
-    inject a phantom pack name."""
+
+    Discovery requires the FULL stamp shape (`_MARKER_FULL_RE`: 12-hex rev/sha),
+    not just the loose name token: `_line_comment` scans string state per-line
+    only, so a marker-shaped line inside a `\"\"\"...\"\"\"` value looks like a
+    real comment to it -- but such a stray line won't carry the full 12-hex shape,
+    so it can't inject a phantom pack name here. (This is a robustness bound
+    against ACCIDENTAL lookalikes, not a security boundary -- the config is
+    host-owned; the workspace can't write it.)"""
     out: list[str] = []
     seen: set[str] = set()
     for line in text.splitlines():
         comment = _line_comment(line)
         if not comment:
             continue
-        m = _MARKER_RE.search(comment)
+        m = _MARKER_FULL_RE.match(comment)
         if m and m.group(1) not in seen:
             seen.add(m.group(1))
             out.append(m.group(1))

@@ -46,7 +46,8 @@ def summary(r: RequireResult) -> dict:
 
 
 def evaluate(requires, *, provider: str | None, secret: str | None,
-             do_fetch: bool) -> list[RequireResult]:
+             do_fetch: bool,
+             fetched_refs: dict | None = None) -> list[RequireResult]:
     """Run every check in `requires`, in declared order, returning one
     `RequireResult` each. Never raises -- a provider/fetch error is captured into
     its result (advisory callers must not be broken by a bad host state).
@@ -54,6 +55,12 @@ def evaluate(requires, *, provider: str | None, secret: str | None,
     `provider`/`secret` are the pack's resolved credential (for the `provider`
     kind); `do_fetch` gates whether a `fetch = true` provider check actually
     test-fetches the secret (else it degrades to a resolve-only provider check).
+
+    `fetched_refs` (doctor) dedupes a provider that was ALREADY invoked earlier in
+    the same run (the binding-fetch layer): a `{(provider, ref): ok}` map -- a
+    provider check whose `(provider, secret)` is present reuses that outcome
+    instead of re-invoking the provider (so an interactive vault prompts once, not
+    twice; finding 4). None means no dedup (the stamp-time callers).
     """
     out: list[RequireResult] = []
     for rq in requires:
@@ -64,7 +71,10 @@ def evaluate(requires, *, provider: str | None, secret: str | None,
         elif rq.kind == "env":
             out.append(_check_env(rq))
         elif rq.kind == "provider":
-            out.append(_check_provider(rq, provider, secret, do_fetch))
+            out.append(_check_provider(rq, provider, secret, do_fetch,
+                                       fetched_refs))
+        else:  # pragma: no cover - _REQUIRE_KINDS and the dispatch must stay in sync
+            raise AssertionError(f"unhandled requires kind {rq.kind!r}")
     return out
 
 
@@ -98,11 +108,18 @@ def _check_env(rq: _Require) -> RequireResult:
 
 
 def _check_provider(rq: _Require, provider: str | None, secret: str | None,
-                    do_fetch: bool) -> RequireResult:
+                    do_fetch: bool,
+                    fetched_refs: dict | None = None) -> RequireResult:
     """The chosen provider must resolve; with `fetch = true` (and `do_fetch`) it
     must also serve the secret. Goes through the existing provider protocol only
     (`find_provider` + `bindings.test_binding`) -- the reported length never
-    reveals the value."""
+    reveals the value.
+
+    A `provider` check reaches this with `provider is None` only at doctor time,
+    where it means the pack's stamped binding is gone (removed/renamed) so its
+    credential couldn't be recovered -- the doctor layer swaps in a
+    marker-appropriate remedy (finding 2a), so the pack's own `hint` (which is for
+    the prerequisite, not a missing binding) is deliberately NOT carried here."""
     from .bindings import Binding, test_binding
     from .providers import find_provider
 
@@ -110,7 +127,7 @@ def _check_provider(rq: _Require, provider: str | None, secret: str | None,
         return RequireResult(
             "provider", False,
             "provider for this pack could not be determined "
-            "(stamped binding missing?)", rq.hint)
+            "(stamped binding missing?)", None)
     try:
         find_provider(provider)
     except CredproxyError as e:
@@ -128,6 +145,19 @@ def _check_provider(rq: _Require, provider: str | None, secret: str | None,
             "provider", False,
             f"provider '{provider}' resolves but no secret ref is available to "
             "test-fetch", rq.hint)
+    # Dedup: if the binding-fetch layer already invoked this provider for this
+    # ref in the same doctor run, reuse that outcome rather than re-invoking it
+    # (which would prompt an interactive provider a second time; finding 4).
+    if fetched_refs is not None and (provider, secret) in fetched_refs:
+        if fetched_refs[(provider, secret)]:
+            return RequireResult(
+                "provider", True,
+                f"provider '{provider}' serves the secret (fetch covered by this "
+                "workspace's binding check)", rq.hint)
+        return RequireResult(
+            "provider", False,
+            f"provider '{provider}' failed to fetch the secret "
+            "(see this workspace's binding fetch check)", rq.hint)
     probe = Binding(name=f"requires:{provider}", injector="", provider=provider,
                     secret=secret, hosts=(), placeholder=None, env=None)
     r = test_binding(probe)

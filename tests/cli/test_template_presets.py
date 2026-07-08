@@ -530,3 +530,66 @@ def test_loader_rejects_preset_in_attached_config(xdg):
         'attach = { container = "foo" }\n[[preset]]\nname = "github"\n')
     with pytest.raises(ConfigError, match="template-only key"):
         load_config(Workspace("att"))
+
+
+# ---- create runs the pack's host-prereq checks (#57 + #58 finding 5) ---------
+
+
+def test_create_template_preset_runs_requires(xdg):
+    """#57 create expanding a template `[[preset]]` runs the pack's #58 host-prereq
+    checks (only `preset add` exercised them before). A failing `command` requires
+    is reported while the config still lands (advisory)."""
+    _preset("gitsign", """
+        [placeholder]
+        prefix = "ghp_"
+        length = 40
+        charset = "alnumeric"
+        [[part]]
+        suffix = "api"
+        injector = "bearer"
+        hosts = ["api.github.com"]
+        [[requires]]
+        kind = "command"
+        command = "definitely-absent-cmd-zzz"
+        hint = "install the tool"
+    """)
+    _template(_MIN + '\n[[preset]]\nname = "gitsign"\n'
+              'provider = "env"\nsecret = "TOK"\n')
+    code, out, err = _run(["--json", "workspace", "create", "proj"])
+    assert code == 0, out + err
+    obj = json.loads(out)
+    reqs = obj["presets"][0]["requires"]
+    assert reqs and reqs[0]["kind"] == "command" and reqs[0]["ok"] is False
+    assert reqs[0]["hint"] == "install the tool"
+    assert "[[binding]]" in _config_text("proj")   # the stamp landed
+
+
+def test_create_requires_run_after_write_not_when_later_entry_aborts(xdg, monkeypatch):
+    """Finding 5: requires (which may exec a provider) run only AFTER the atomic
+    write succeeds. A create that aborts on a later entry invokes NO prereqs at
+    all -- so no provider is exec'd for a create that writes nothing."""
+    calls: list[int] = []
+    from credproxy_cli.core import prereqs
+    real = prereqs.evaluate
+    monkeypatch.setattr(prereqs, "evaluate",
+                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    _preset("first", """
+        [placeholder]
+        prefix = "ghp_"
+        length = 40
+        charset = "alnumeric"
+        [[part]]
+        suffix = "api"
+        injector = "bearer"
+        hosts = ["api.github.com"]
+        [[requires]]
+        kind = "provider"
+        fetch = true
+    """)
+    _template(_MIN
+              + '\n[[preset]]\nname = "first"\nprovider = "env"\nsecret = "TOK"\n'
+              + '\n[[preset]]\nname = "nonexistent-pack-zzz"\n')
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code != 0                               # aborts on the unknown 2nd pack
+    assert calls == []                             # requires never evaluated
+    _assert_no_workspace("proj")

@@ -300,6 +300,18 @@ def _parse_preset_require(r, i: int, src: str, *, has_parts: bool) -> _Require:
         if not isinstance(val, str) or not val:
             raise ConfigError(
                 f"{where}: a {kind!r} check needs a non-empty '{field}' string")
+        if kind == "path" and not val.startswith(("~", "$")):
+            # A bare relative path resolves against the CURRENT DIRECTORY, so the
+            # same check would pass or fail depending on where `doctor` runs --
+            # nondeterministic. Require an absolute or `~`/`$VAR`-rooted path (the
+            # latter resolves to absolute at check time, portable even if the var
+            # is currently unset). Finding 7.
+            import os
+            if not os.path.isabs(os.path.expanduser(os.path.expandvars(val))):
+                raise ConfigError(
+                    f"{where}: a 'path' check must be absolute or `~`/`$VAR`-rooted "
+                    f"(got {val!r}, which resolves relative to the current "
+                    f"directory -- nondeterministic across `doctor` runs)")
         payload[field] = val
 
     hint = r.get("hint")
