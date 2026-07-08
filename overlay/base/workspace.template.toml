@@ -36,6 +36,13 @@ name = "proxy-ca"           # trust the proxy CA (this image doesn't out of the 
 [[preset]]
 name = "toolchain"
 
+# cache (opt-in): a /cache volume for regenerable toolchain state (mise installs, uv
+# pythons, XDG cache) so a recreate skips re-installing the toolchain. Readily
+# discardable (`recreate --reset-volume cache`) — the toolchain setup re-runs on that
+# recreate and repopulates it. Uncomment to persist the toolchain across recreates:
+# [[preset]]
+# name = "cache"
+
 [[preset]]
 name = "github-auth"        # provider=gh-cli, secret=github.com (defaults; needs a host `gh auth login`)
 

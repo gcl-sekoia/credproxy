@@ -9,7 +9,7 @@ from credproxy_cli.core.presets import build_preset, get_preset, load_preset_sou
 
 def test_base_packs_resolve_from_the_base_overlay():
     src = load_preset_sources()
-    for name in ("proxy-ca", "toolchain", "claude-code", "github-auth", "git-signing"):
+    for name in ("proxy-ca", "toolchain", "cache", "claude-code", "github-auth", "git-signing"):
         assert src.get(name) == "overlay:base", f"{name} resolved from {src.get(name)!r}"
 
 
@@ -84,6 +84,25 @@ def test_toolchain_is_pure_container_half():
     # The pack carries the terminal-env polish (moved off the templates).
     env = dict(exp.env)
     assert env["LANG"] == "C.UTF-8" and env["COLORTERM"] == "truecolor"
+
+
+def test_cache_is_the_discardable_toolchain_volume():
+    exp = build_preset("cache")
+    assert exp.bindings == () and exp.rules == ()
+    (mount,) = exp.mounts
+    assert mount.kind == "volume" and mount.value == "cache" and mount.target == "/cache"
+    # Chowned pre-setup (root), before the toolchain pack's order=10 install writes in.
+    (setup,) = exp.setup
+    assert setup["user"] == "root" and setup["order"] == 5
+    assert "/cache" in setup["run"]
+    env = dict(exp.env)
+    # The generic cache tier for the whole ecosystem...
+    assert env["XDG_CACHE_HOME"] == "/cache/xdg"
+    # ...plus the DATA-tier install dirs XDG_CACHE_HOME can't reach, so a recreate
+    # skips re-installing the toolchain (not just re-downloading).
+    assert env["MISE_DATA_DIR"] == "/cache/mise"
+    assert env["UV_PYTHON_INSTALL_DIR"] == "/cache/uv/python"
+    assert env["UV_TOOL_DIR"] == "/cache/uv/tools"
 
 
 def test_git_signing_option_feeds_mount_and_requires():

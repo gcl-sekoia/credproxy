@@ -24,7 +24,10 @@ done
 mapfile -t names < <(printf '%s\n' "${names[@]}" | awk '!seen[$0]++')   # dedup, keep first-seen order
 
 curl -fsSL https://mise.run | sh
-export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+# The shims live under mise's data dir; the `cache` pack may redirect it (MISE_DATA_DIR),
+# so derive the path from it rather than hardcoding ~/.local/share (runtime `mise activate`
+# in mise.zsh already derives it — this covers the setup-step session too).
+export PATH="$HOME/.local/bin:${MISE_DATA_DIR:-$HOME/.local/share/mise}/shims:$PATH"
 mise use -g "${names[@]}"
 
 # A default Python via uv (only when uv is part of the toolset).

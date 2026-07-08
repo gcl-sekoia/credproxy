@@ -35,14 +35,18 @@ mounts = [
 # expands each [[preset]] into ordinary config (mounts above; setup steps, [env],
 # and [[binding]]/[[rule]] blocks below, each tagged `# credproxy:preset`) and drops
 # the [[preset]] lines — so a generated <name>.toml shows only the expansion. See
-# `credproxy preset list`. (Here: proxy-ca bootstraps the CA, persist carries the
-# /persist volume + CLAUDE_CONFIG_DIR/HISTFILE, toolchain carries LANG/COLORTERM.)
+# `credproxy preset list`. (Here: proxy-ca bootstraps the CA, toolchain carries
+# LANG/COLORTERM, cache carries the /cache toolchain-state volume, persist carries
+# the /persist volume + CLAUDE_CONFIG_DIR/HISTFILE.)
 
 [[preset]]
 name = "proxy-ca"           # trust the proxy CA (this image doesn't out of the box)
 
 [[preset]]
 name = "toolchain"
+
+[[preset]]
+name = "cache"              # /cache volume: regenerable toolchain state (mise/uv), readily discardable
 
 [[preset]]
 name = "persist"            # /persist volume + CLAUDE_CONFIG_DIR/HISTFILE, durable across recreates
