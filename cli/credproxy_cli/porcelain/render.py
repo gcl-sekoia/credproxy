@@ -687,10 +687,16 @@ class Renderer:
     # -- preset refresh --
     def preset_refreshed(self, ws: str, results: list[dict], *,
                          newly_intercepted: list[str], container_changed: bool,
-                         attached: bool, skipped_unresolved: list[str]) -> None:
+                         attached: bool, skipped_unresolved: list[str],
+                         skipped_attached: list[str] | None = None,
+                         container_exists: bool = False) -> None:
+        skipped_attached = skipped_attached or []
         # Human-readable action verbs (the JSON keeps the terse kebab forms).
         verb = {"up-to-date": "up to date", "updated": "updated",
-                "skipped-edited": "skipped (hand-edited)", "added": "added",
+                "skipped-edited": "skipped (hand-edited)",
+                "skipped-divergent": "skipped (bindings hand-edited apart)",
+                "skipped-collision": "skipped (collides with existing config)",
+                "added": "added",
                 "prunable": "vanished (use --prune to remove)",
                 "pruned": "pruned"}
         any_change = False
@@ -702,6 +708,7 @@ class Renderer:
             summary = ", ".join(
                 f"{tally[k]} {verb[k]}" for k in
                 ("updated", "added", "pruned", "skipped-edited",
+                 "skipped-divergent", "skipped-collision",
                  "prunable", "up-to-date") if k in tally)
             if r["changed"]:
                 any_change = True
@@ -719,6 +726,10 @@ class Renderer:
         for name in skipped_unresolved:
             say(f"preset '{name}' is no longer in the registry -- skipped "
                 f"(its stamped blocks are left as-is)")
+        for name in skipped_attached:
+            say(f"preset '{name}' carries container-half config (mounts/env/"
+                f"setup) -- skipped on this attached workspace (its container is "
+                f"external; only binding/rule-only packs refresh here)")
         if newly_intercepted:
             say("newly intercepted (TLS-terminated) host(s): "
                 + ", ".join(newly_intercepted)
@@ -727,7 +738,7 @@ class Renderer:
         if not any_change:
             say("already up to date -- nothing written")
             return
-        if container_changed:
+        if container_changed and container_exists:
             say("container-half config changed the workspace spec -- "
                 f"restart to apply: credproxy workspace {ws} start")
         _say_push_hint(ws, attached)
@@ -895,11 +906,15 @@ class JsonRenderer(Renderer):
 
     def preset_refreshed(self, ws: str, results: list[dict], *,
                          newly_intercepted: list[str], container_changed: bool,
-                         attached: bool, skipped_unresolved: list[str]) -> None:
+                         attached: bool, skipped_unresolved: list[str],
+                         skipped_attached: list[str] | None = None,
+                         container_exists: bool = False) -> None:
         self._emit({"workspace": ws, "presets": results,
                     "newly_intercepted": newly_intercepted,
                     "container_changed": container_changed,
-                    "skipped_unresolved": skipped_unresolved})
+                    "container_exists": container_exists,
+                    "skipped_unresolved": skipped_unresolved,
+                    "skipped_attached": skipped_attached or []})
 
     def provider_show(self, info: dict) -> None:
         self._emit(info)

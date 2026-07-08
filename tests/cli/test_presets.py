@@ -178,3 +178,44 @@ def test_describe_presets_includes_rules(xdg):
     assert row["rules"][0] == {"name": "gh-guarded-readonly",
                                "hosts": ["api.github.com"], "action": "script",
                                "script": "readonly-guard", "visible": False}
+
+
+# ---- #59 v2 review finding 5: unique join keys within a pack ------------------
+
+
+def test_preset_rejects_duplicate_setup_order(xdg):
+    """Two `[[setup]]` steps sharing an `order` are a definition error -- `order`
+    is the join key `preset refresh` re-classifies setup elements by."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.presets import load_presets
+    _write_raw_preset(
+        "dupsetup",
+        '[[setup]]\nrun = "a"\norder = 1\n[[setup]]\nrun = "b"\norder = 1\n')
+    with pytest.raises(ConfigError, match=r"duplicate .*setup.* order"):
+        load_presets()
+
+
+def test_preset_rejects_duplicate_mount_target(xdg):
+    """Two `[[mount]]` entries with the same target (trailing slash normalized)
+    are a definition error -- `target` is the mount join key."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.presets import load_presets
+    _write_raw_preset(
+        "dupmount",
+        '[[mount]]\nvolume = "a"\ntarget = "/x"\n'
+        '[[mount]]\nvolume = "b"\ntarget = "/x/"\n')
+    with pytest.raises(ConfigError, match=r"duplicate .*mount.* target"):
+        load_presets()
+
+
+def test_preset_distinct_setup_orders_ok(xdg):
+    """Distinct orders / targets parse fine (the guard is duplicate-only)."""
+    from credproxy_cli.core.presets import get_preset
+    _write_raw_preset(
+        "okpack",
+        '[[setup]]\nrun = "a"\norder = 1\n[[setup]]\nrun = "b"\norder = 2\n'
+        '[[mount]]\nvolume = "a"\ntarget = "/x"\n'
+        '[[mount]]\nvolume = "b"\ntarget = "/y"\n')
+    spec = get_preset("okpack")
+    assert [s["order"] for s in spec.setup] == [1, 2]
+    assert [m.target for m in spec.mounts] == ["/x", "/y"]

@@ -154,21 +154,101 @@ def _line_comment(line: str) -> str:
     return ""
 
 
+def _advance_string_state(line: str, state: str | None) -> str | None:
+    """Advance the multiline-string tracker across one physical `line` (keepends
+    form). `state` is None (code / single-line strings) or `'\"\"\"'` / `\"'''\"`
+    when INSIDE a TOML multiline string. Single-line basic/literal strings never
+    cross a newline, so they open and close within one line and leave `state`
+    unchanged; only a triple-quote open/close carries across lines. A `#` outside
+    any string starts a comment (rest of line ignored -- a comment can't open a
+    string). Escapes are honoured inside basic strings so a `\\\"` doesn't
+    prematurely close (an escaped quote before `\"\"\"` can't complete the closing
+    delimiter)."""
+    i, n = 0, len(line)
+    while i < n:
+        c = line[i]
+        if state is None:
+            if line.startswith('"""', i):
+                state = '"""'
+                i += 3
+                continue
+            if line.startswith("'''", i):
+                state = "'''"
+                i += 3
+                continue
+            if c == '"':                       # single-line basic string
+                i += 1
+                while i < n and line[i] != '"':
+                    if line[i] == "\\":
+                        i += 1
+                    i += 1
+                i += 1
+                continue
+            if c == "'":                       # single-line literal string
+                i += 1
+                while i < n and line[i] != "'":
+                    i += 1
+                i += 1
+                continue
+            if c == "#":
+                break                          # comment to end of line
+            i += 1
+        elif state == '"""':
+            if c == "\\" and i + 1 < n and line[i + 1] not in "\r\n":
+                i += 2                         # escaped char (incl. an escaped ")
+                continue
+            if line.startswith('"""', i):
+                state = None
+                i += 3
+                continue
+            i += 1
+        else:                                  # state == "'''" (no escapes)
+            if line.startswith("'''", i):
+                state = None
+                i += 3
+                continue
+            i += 1
+    return state
+
+
+def multiline_string_line_indices(text: str) -> frozenset[int]:
+    """The 0-indexed line numbers whose START is inside a TOML multiline string
+    (`\"\"\"...\"\"\"` / `'''...'''`). credproxy never WRITES multiline strings
+    (its renderers escape newlines into single-line values), but a user's
+    hand-written `[[setup]]` `run = \"\"\"...\"\"\"` script can contain arbitrary
+    bytes -- including a line that LOOKS like a `# credproxy:preset ...` marker or
+    a `[[binding]]` header. The per-line comment/marker scanners can't see
+    triple-quoted string state, so every marker/blockspan scan skips these lines:
+    a marker-shaped line inside a string value is a value, never a provenance
+    marker. (A robustness bound against accidental lookalikes, not a security
+    boundary -- the config is host-owned.)"""
+    masked: set[int] = set()
+    state: str | None = None
+    for idx, line in enumerate(text.splitlines(keepends=True)):
+        if state is not None:
+            masked.add(idx)
+        state = _advance_string_state(line, state)
+    return frozenset(masked)
+
+
 def applied_preset_names(text: str) -> list[str]:
     """Every preset name that has a provenance marker in `text`, in first-seen
     order, deduped. The diagnostics read (#58 `doctor`) that discovers which
     packs a workspace uses -- the loader never reads comments, but doctor may.
 
     Discovery requires the FULL stamp shape (`_MARKER_FULL_RE`: 12-hex rev/sha),
-    not just the loose name token: `_line_comment` scans string state per-line
-    only, so a marker-shaped line inside a `\"\"\"...\"\"\"` value looks like a
-    real comment to it -- but such a stray line won't carry the full 12-hex shape,
-    so it can't inject a phantom pack name here. (This is a robustness bound
-    against ACCIDENTAL lookalikes, not a security boundary -- the config is
-    host-owned; the workspace can't write it.)"""
+    not just the loose name token, AND ignores any line inside a multiline string
+    (`multiline_string_line_indices`): a marker-shaped line copied into a
+    `\"\"\"...\"\"\"` value is a string value, not a real stamp, so it can't
+    inject a phantom pack name here. (This is a robustness bound against
+    ACCIDENTAL lookalikes, not a security boundary -- the config is host-owned;
+    the workspace can't write it.)"""
+    masked = multiline_string_line_indices(text)
     out: list[str] = []
     seen: set[str] = set()
-    for line in text.splitlines():
+    for idx, line in enumerate(text.splitlines()):
+        if idx in masked:
+            continue
         comment = _line_comment(line)
         if not comment:
             continue

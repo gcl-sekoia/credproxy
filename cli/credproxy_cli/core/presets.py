@@ -241,6 +241,15 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
     requires = [_parse_preset_require(r, i, src, has_parts=bool(parts_raw))
                 for i, r in enumerate(requires_raw)]
 
+    # `order` (setup) and `target` (mount) are the JOIN KEYS `preset refresh`
+    # re-classifies each stamped element by, so they must be UNIQUE within a pack
+    # -- a duplicate would silently mis-join a refresh onto the wrong element.
+    # Reject it here, at definition parse (a well-defined join key up front).
+    _reject_dup_join_keys(
+        [s["order"] for s in setup], "setup", "order", src)
+    _reject_dup_join_keys(
+        [_norm_mount_target(m.target) for m in mounts], "mount", "target", src)
+
     return PresetSpec(
         name=name,
         placeholder=placeholder,
@@ -254,6 +263,31 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
         default_provider=raw.get("default_provider"),
         default_secret=raw.get("default_secret"),
     )
+
+
+def _norm_mount_target(t: str) -> str:
+    """Normalize a mount target the same way `preset refresh` joins on it (trailing
+    slashes stripped), so `/opt/x` and `/opt/x/` count as the same target."""
+    return t.rstrip("/") or "/"
+
+
+def _reject_dup_join_keys(keys: list, kind: str, field: str, src: str) -> None:
+    """Reject a duplicate join key across a pack's elements. `keys` is the ordered
+    list of each element's `field` value (already normalized). A duplicate is a
+    definition error -- `preset refresh` joins stamped elements to definition
+    elements by this key, so it must be unique per pack."""
+    seen: set = set()
+    dups: list = []
+    for k in keys:
+        if k in seen and k not in dups:
+            dups.append(k)
+        seen.add(k)
+    if dups:
+        shown = ", ".join(repr(d) for d in dups)
+        raise ConfigError(
+            f"{src}: duplicate [[{kind}]] {field} ({shown}) -- each {kind} needs "
+            f"a unique {field} (it is the join key `preset refresh` re-classifies "
+            f"by)")
 
 
 def _parse_preset_require(r, i: int, src: str, *, has_parts: bool) -> _Require:

@@ -64,6 +64,7 @@ from .preset_stamp import (
     _sha12,
     compose,
     is_marker_line,
+    multiline_string_line_indices,
 )
 from .presets import PresetSpec, build_preset
 from .rules import (
@@ -94,7 +95,9 @@ class RefreshAction:
     `skipped-edited` (a unified diff of on-disk vs. would-write)."""
     kind: str      # binding | rule | env | mount | setup
     target: str
-    action: str    # up-to-date | updated | skipped-edited | added | prunable | pruned
+    # up-to-date | updated | skipped-edited | skipped-divergent |
+    # skipped-collision | added | prunable | pruned
+    action: str
     diff: str | None = None
 
 
@@ -127,6 +130,14 @@ def _norm_target(t: str) -> str:
     return t.rstrip("/") or "/"
 
 
+def _is_blank_or_comment(line: str) -> bool:
+    """True for a blank line or a whole-line comment (`# ...`, marker or plain
+    hand note) -- the trailing lines a `[[...]]` block span swallows but that the
+    stamp's `sha` never covered."""
+    s = line.strip()
+    return s == "" or s.startswith("#")
+
+
 def _parse_marker(line: str) -> tuple[str, str] | None:
     m = _REV_SHA_RE.search(line)
     return (m.group(1), m.group(2)) if m else None
@@ -140,6 +151,11 @@ def _locate(text: str, preset_name: str) -> list[_Stamped]:
     marker. Each item's `current_sha` is recomputed from the on-disk text so the
     caller can tell an unedited block from a hand-edited one."""
     lines = text.splitlines(keepends=True)
+    # Lines inside a hand-written multiline string (`run = """..."""`) are inert:
+    # a marker-shaped / header-shaped line there is a string value, never a real
+    # stamp, so every scan below skips them (the per-line comment/blockspan
+    # scanners can't see triple-quote state on their own).
+    masked = multiline_string_line_indices(text)
     items: list[_Stamped] = []
 
     # 1) Standalone-marker blocks. Identity is parsed from each block's own text
@@ -153,7 +169,8 @@ def _locate(text: str, preset_name: str) -> list[_Stamped]:
     ]
     for kind, header_re, child_re, toml_key, id_fn in block_kinds:
         for start, end in _block_spans(text, header_re, child_re):
-            if start == 0 or not is_marker_line(lines[start - 1]):
+            if start == 0 or (start - 1) in masked \
+                    or not is_marker_line(lines[start - 1]):
                 continue
             marker = lines[start - 1].strip()
             name = _marker_name(marker)
@@ -163,14 +180,16 @@ def _locate(text: str, preset_name: str) -> list[_Stamped]:
             if rs is None:
                 continue
             # `_block_spans` runs a block to the NEXT table header, so its span
-            # swallows the trailing blank separator AND the following block's
-            # standalone provenance marker. Trim both back off, so `body` is the
-            # exact `[[...]]`-header-through-trailing-newline text the stamp's
-            # `sha` covered (#56) -- the round-trip anchor.
+            # swallows the trailing blank separator, the following block's
+            # standalone provenance marker, AND any hand comment a user appended
+            # after the last stamped block. Trim all trailing blank/comment lines
+            # back off, so `body` is the exact `[[...]]`-header-through-trailing-
+            # newline text the stamp's `sha` covered (#56) -- the round-trip
+            # anchor. The stamp never writes a comment INSIDE a block body, so a
+            # trailing comment is provably not part of the sha'd text; leaving it
+            # outside `end` also keeps it in the file across an `updated` splice.
             body_end = end
-            while body_end > start and (
-                    lines[body_end - 1].strip() == ""
-                    or is_marker_line(lines[body_end - 1])):
+            while body_end > start and _is_blank_or_comment(lines[body_end - 1]):
                 body_end -= 1
             end = body_end
             body = "".join(lines[start:end])
@@ -192,6 +211,11 @@ def _locate(text: str, preset_name: str) -> list[_Stamped]:
     array_key: str | None = None
     depth = 0
     for i, ln in enumerate(lines):
+        if i in masked:
+            # Inside a multiline string: inert. Skip marker detection AND the
+            # bracket-depth update (its brackets are string content, not array
+            # structure).
+            continue
         comment = _line_comment(ln)
         marker = comment.strip() if comment else ""
         code = ln[:ln.index(comment)].rstrip() if comment else ln.rstrip("\n")
@@ -215,11 +239,17 @@ def _locate(text: str, preset_name: str) -> list[_Stamped]:
                             current_sha=_sha12(bare), on_disk=bare,
                             edit_start=i, edit_end=i + 1, is_block=False))
                 elif array_key is None and depth == 0:
-                    identity = _env_key(code)
+                    # Strip the env code to its bare `KEY = "value"` before
+                    # hashing/comparing: the stamp writes it unindented, so a
+                    # cosmetic re-indent must not flip the block to skipped-edited
+                    # (matches how inline mount/setup elements strip to bare). The
+                    # round-trip is unaffected (a fresh stamp has no indent).
+                    env_code = code.strip()
+                    identity = _env_key(env_code)
                     if identity is not None:
                         items.append(_Stamped(
                             kind="env", identity=identity, rev=rs[0], sha=rs[1],
-                            current_sha=_sha12(code), on_disk=code,
+                            current_sha=_sha12(env_code), on_disk=env_code,
                             edit_start=i, edit_end=i + 1, is_block=False))
         depth = max(0, depth + _array_depth_delta(ln))
         if depth == 0:
@@ -261,15 +291,23 @@ def _env_key(code: str) -> str | None:
 def _kept_credential(text: str, stamped_names: set[str], source: str):
     """Read the shared placeholder + provider/secret back from the workspace's
     stamped bindings for this preset (identity is preserved across a refresh,
-    never regenerated). Returns `(provider, secret, placeholder)` from the first
-    stamped binding in file order, or `(None, None, None)` when the pack stamped
-    no bindings (pure-rule / pure-container)."""
+    never regenerated). Returns `(provider, secret, placeholder, divergent)`:
+    the first stamped binding's credential in file order, and `divergent=True`
+    when the pack's stamped bindings DISAGREE on (provider, secret, placeholder)
+    -- someone hand-edited them apart. On divergence there is no single shared
+    credential to reuse, so the caller must NOT silently pick the first and
+    rotate the siblings (that would break placeholder-consuming state); it reports
+    the divergence and rotates nothing. `(None, None, None, False)` when the pack
+    stamped no bindings (pure-rule / pure-container)."""
     raw = tomllib.loads(text)
     bindings = _bindings_with_auto_names(_parse_bindings(raw, source))
-    for b in bindings:
-        if b.name in stamped_names:
-            return b.provider, b.secret, b.placeholder
-    return None, None, None
+    stamped = [b for b in bindings if b.name in stamped_names]
+    if not stamped:
+        return None, None, None, False
+    first = stamped[0]
+    divergent = len({(b.provider, b.secret, b.placeholder)
+                     for b in stamped}) > 1
+    return first.provider, first.secret, first.placeholder, divergent
 
 
 # ---- rendering a definition item's would-be on-disk text ---------------------
@@ -339,9 +377,30 @@ def _classify(text: str, preset_name: str, spec: PresetSpec, *,
     it) and `_verify` (which re-runs it on the composed text to prove
     convergence), so the two can never disagree on the classification."""
     stamped = _locate(text, preset_name)
+
+    # Fail closed (belt-and-suspenders behind the multiline-aware scan): two
+    # located items sharing a (kind, identity) join key mean the scan mis-targeted
+    # -- editing either would corrupt foreign bytes. Never write; make the operator
+    # look.
+    seen_ids: dict[tuple[str, str], _Stamped] = {}
+    for s in stamped:
+        key = (s.kind, s.identity)
+        if key in seen_ids:
+            raise ConfigError(
+                f"preset '{preset_name}': two stamped {s.kind} items share the "
+                f"identity {s.identity!r} (lines "
+                f"{seen_ids[key].edit_start + 1} and {s.edit_start + 1}) -- refusing "
+                f"to refresh, as an edit could target the wrong one. Resolve the "
+                f"duplicate by hand (no changes were written)")
+        seen_ids[key] = s
+
     stamped_binding_names = {s.identity for s in stamped if s.kind == "binding"}
 
-    provider, secret, placeholder = _kept_credential(
+    # `divergent`: the stamped bindings disagree on the shared credential (a hand
+    # edit). The binding half is then skipped whole (below) -- never rotated -- but
+    # the expansion is still built with the first binding's cred so the
+    # credential-independent halves (rules, mounts/env/setup) classify normally.
+    provider, secret, placeholder, divergent = _kept_credential(
         text, stamped_binding_names, source)
     if spec.needs_credential and provider is None:
         raise ConfigError(
@@ -379,29 +438,44 @@ def _classify(text: str, preset_name: str, spec: PresetSpec, *,
         for ident in ordered:
             s = smap.get(ident)
             obj = dmap.get(ident)
+            # A pack whose stamped bindings were hand-edited apart has no single
+            # shared credential to rebuild from: skip the whole binding half (both
+            # matched and definition-new bindings) rather than rotate siblings to
+            # the first binding's placeholder. A prunable binding (no `obj`) is
+            # credential-free to delete, so it falls through to the prune path.
+            if kind == "binding" and divergent and obj is not None:
+                plan.actions.append(
+                    RefreshAction(kind, ident, "skipped-divergent"))
+                continue
             if s is not None and obj is not None:
                 want = _render_defn(kind, obj, is_block=s.is_block)
-                if s.on_disk == want:
-                    plan.actions.append(RefreshAction(kind, ident, "up-to-date"))
-                elif s.current_sha != s.sha:
-                    diff = _unified_diff(s.on_disk, want, kind, ident)
+                # Check the edit state FIRST: a hand-edited block (recomputed sha
+                # != marker sha) is ALWAYS skipped, even if the would-write text
+                # happens to match on disk (e.g. the kept credential was read from
+                # this very edited binding) -- otherwise the edit would be masked
+                # as up-to-date and silently propagated to its siblings.
+                if s.current_sha != s.sha:
+                    diff = _unified_diff(s.on_disk, want, kind, ident) \
+                        if s.on_disk != want else None
                     plan.actions.append(
                         RefreshAction(kind, ident, "skipped-edited", diff))
+                elif s.on_disk == want:
+                    plan.actions.append(RefreshAction(kind, ident, "up-to-date"))
                 else:
                     plan.edits.append(_update_edit(s, want, preset_name, spec.rev))
                     plan.actions.append(RefreshAction(kind, ident, "updated"))
             elif obj is not None:
                 # A definition item with no stamped counterpart -> add it, unless
-                # it collides with unmanaged config (report, don't clobber).
+                # it collides with UNMANAGED config (report, don't clobber).
                 if kind == "mount" and ident in existing_targets:
                     plan.actions.append(
-                        RefreshAction(kind, ident, "skipped-edited"))
+                        RefreshAction(kind, ident, "skipped-collision"))
                     continue
                 if kind == "env":
                     key, val = obj
                     if key in existing_env:
                         act = "up-to-date" if existing_env[key] == val \
-                            else "skipped-edited"
+                            else "skipped-collision"
                         plan.actions.append(RefreshAction(kind, ident, act))
                         continue
                     plan.add_env.append(obj)
@@ -433,15 +507,29 @@ def refresh_preset(text: str, preset_name: str, spec: PresetSpec, *,
     plan = _classify(text, preset_name, spec, prune=prune, source=source)
 
     new_text = _apply(text.splitlines(keepends=True), plan.edits)
-    # Additions ride the shared compose (re-parse + additive verify + one text).
-    new_text = compose(
-        new_text, preset_name, spec.rev,
-        bindings=plan.add_bindings, rules=plan.add_rules, mounts=plan.add_mounts,
-        env_items=plan.add_env, setup=[dict(s) for s in plan.add_setup])
-
-    changed = new_text != text
-    if changed:
-        _verify(new_text, preset_name, spec, prune=prune, source=source)
+    try:
+        # Additions ride the shared compose (re-parse + additive verify + one text).
+        new_text = compose(
+            new_text, preset_name, spec.rev,
+            bindings=plan.add_bindings, rules=plan.add_rules,
+            mounts=plan.add_mounts, env_items=plan.add_env,
+            setup=[dict(s) for s in plan.add_setup])
+        changed = new_text != text
+        if changed:
+            _verify(new_text, preset_name, spec, prune=prune, source=source)
+    except ConfigError as e:
+        # A pack that RENAMED a block (its old suffix vanished -> prunable, a new
+        # suffix appeared -> added) leaves the old block in place without --prune,
+        # so the new one collides with it (e.g. two bindings sharing a placeholder
+        # on one host). That's a legible situation, not a credproxy bug -- name it.
+        if not prune and _looks_like_rename(plan):
+            raise ConfigError(
+                f"preset '{preset_name}' looks like it renamed a block: a stamped "
+                f"block vanished from the definition while a new one appeared, and "
+                f"the new block collides with the old (still-present) one. Delete "
+                f"the vanished block by hand and re-run, or refresh with --prune to "
+                f"drop it. Underlying error: {e}") from e
+        raise
 
     container_changed = any(
         a.kind in ("env", "mount", "setup")
@@ -450,6 +538,15 @@ def refresh_preset(text: str, preset_name: str, spec: PresetSpec, *,
     return RefreshResult(
         preset=preset_name, actions=tuple(plan.actions), new_text=new_text,
         changed=changed, container_changed=container_changed)
+
+
+def _looks_like_rename(plan: _Plan) -> bool:
+    """True iff the plan both prunes and adds an item of the same kind -- the
+    fingerprint of a pack renaming a block (the old suffix goes prunable, the new
+    one added), which collides on compose/validate without --prune."""
+    prunable = {a.kind for a in plan.actions if a.action == "prunable"}
+    added = {a.kind for a in plan.actions if a.action == "added"}
+    return bool(prunable & added)
 
 
 def _update_edit(s: _Stamped, want: str, preset_name: str,

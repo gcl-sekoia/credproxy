@@ -1400,12 +1400,14 @@ def do_preset_refresh(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None
                     f"to refresh")
                 render.OUT.preset_refreshed(
                     ws.name, [], newly_intercepted=[], container_changed=False,
-                    attached=attached, skipped_unresolved=[])
+                    attached=attached, skipped_unresolved=[],
+                    skipped_attached=[], container_exists=False)
                 return
 
         known = load_presets()
         results: list[dict] = []
-        skipped_unresolved: list[str] = []
+        skipped_unresolved: list[str] = []   # no longer in the registry
+        skipped_attached: list[str] = []     # container-half pack, attached ws
         container_changed = False
         cur = text
         for pname in targets:
@@ -1425,7 +1427,7 @@ def do_preset_refresh(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None
                          f"(mounts/env/setup), but the workspace is attached -- "
                          f"only binding/rule-only packs refresh on an attached "
                          f"workspace")
-                skipped_unresolved.append(pname)
+                skipped_attached.append(pname)
                 continue
             res = preset_refresh.refresh_preset(
                 cur, pname, spec, prune=a.prune, source=source)
@@ -1434,19 +1436,40 @@ def do_preset_refresh(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None
             results.append({
                 "preset": res.preset,
                 "changed": res.changed,
-                "actions": [{"kind": act.kind, "target": act.target,
-                             "action": act.action, "diff": act.diff}
-                            for act in res.actions],
+                "actions": [_refresh_action_dict(act) for act in res.actions],
             })
 
         newly = _newly_intercepted_between(text, cur) if cur != text else []
         if cur != text:
             atomic_write_text(ws.config_path, cur)
 
+    # Gate the container-drift restart hint on the workspace container actually
+    # EXISTING (mirrors `do_preset_add`): a never-created workspace shows no
+    # spurious "restart to apply" line. A missing/unreachable docker means we
+    # can't check -> assume no container.
+    container_exists = False
+    if not attached and container_changed:
+        from ..core.errors import CredproxyError
+        try:
+            container_exists = \
+                core_docker.container_status(ws.ws_container) is not None
+        except CredproxyError:
+            container_exists = False
+
     render.OUT.preset_refreshed(
         ws.name, results, newly_intercepted=newly,
         container_changed=container_changed, attached=attached,
-        skipped_unresolved=skipped_unresolved)
+        skipped_unresolved=skipped_unresolved,
+        skipped_attached=skipped_attached, container_exists=container_exists)
+
+
+def _refresh_action_dict(act) -> dict:
+    """One refresh action -> a JSON-clean dict. `diff` (set only for a
+    skipped-edited block) is omitted when null, per the `diff?` shape."""
+    d = {"kind": act.kind, "target": act.target, "action": act.action}
+    if act.diff is not None:
+        d["diff"] = act.diff
+    return d
 
 
 def _has_stamped_container_half(text: str, preset_name: str) -> bool:
