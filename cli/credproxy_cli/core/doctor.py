@@ -157,9 +157,11 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
         # predict the runc `sysfs` failure (#50) before `start` hits the raw OCI
         # error. Skips silently on every not-bad case.
         out += _runc_keep_id_check(ws, cfg)
-    out += _binding_checks(ws, fetch=fetch)
+    binding_checks, fetched_refs = _binding_checks(ws, fetch=fetch)
+    out += binding_checks
     out += _script_compile_checks(ws)
     out += _rule_checks(ws)
+    out += _preset_requires_checks(ws, fetch=fetch, fetched_refs=fetched_refs)
     return out
 
 
@@ -241,7 +243,7 @@ def _script_compile_checks(ws: Workspace) -> list[Check]:
     return out
 
 
-def _binding_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
+def _binding_checks(ws: Workspace, *, fetch: bool) -> tuple[list[Check], dict]:
     """Binding checks in two layers, so a run both reports EVERY problem and
     upholds the "doctor passes => start passes" contract:
 
@@ -255,15 +257,23 @@ def _binding_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
        `.star`. First-error, but that's the action-time behavior we're mirroring.
 
     `fetch` (opt-in) additionally resolves each secret via its provider; it reuses
-    the layer-2 parse, so it means only "also fetch", never a different verdict."""
+    the layer-2 parse, so it means only "also fetch", never a different verdict.
+
+    Returns `(checks, fetched)` where `fetched` maps `{(provider, ref): ok}` for
+    every binding secret this run already fetched -- the preset-requires layer
+    reads it to avoid re-invoking a provider it just called (finding 4). Empty
+    unless `fetch`."""
     out: list[Check] = []
+    fetched: dict[tuple[str | None, str | None], bool] = {}
     try:
         raw = tomllib.loads(ws.config_path.read_text())
     except (OSError, tomllib.TOMLDecodeError) as e:
-        return [_fail(f"ws:{ws.name}:toml", f"[{ws.name}] TOML parse: {e}")]
+        return ([_fail(f"ws:{ws.name}:toml", f"[{ws.name}] TOML parse: {e}")],
+                fetched)
     bindings = raw.get("binding") or []
     if not isinstance(bindings, list):
-        return [_fail(f"ws:{ws.name}:bindings", f"[{ws.name}] `binding` must be an array")]
+        return ([_fail(f"ws:{ws.name}:bindings",
+                       f"[{ws.name}] `binding` must be an array")], fetched)
 
     _probe_bindings_raw(ws, bindings, out)
 
@@ -282,12 +292,18 @@ def _binding_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
         out.append(_fail(f"ws:{ws.name}:bindings", f"[{ws.name}] bindings: {e}"))
 
     if fetch and bs is not None:
-        for r in test_bindings(bs):
+        results = test_bindings(bs)
+        for r in results:
             out.append(_ok(f"ws:{ws.name}:{r.name}:fetch",
                            f"[{ws.name}] {r.name}: secret resolved ({r.value_len} chars)")
                        if r.ok else
                        _fail(f"ws:{ws.name}:{r.name}:fetch", f"[{ws.name}] {r.name}: {r.error}"))
-    return out
+        # Record each fetched (provider, first-ref) -> ok so the preset-requires
+        # layer can reuse the outcome rather than re-invoking the provider
+        # (finding 4). `test_bindings` keeps input order, so zip is 1:1.
+        for b, r in zip(bs, results):
+            fetched[(b.provider, _secret_ref(b.secret))] = r.ok
+    return out, fetched
 
 
 def _probe_bindings_raw(ws: Workspace, bindings: list, out: list[Check]) -> None:
@@ -322,6 +338,175 @@ def _probe_bindings_raw(ws: Workspace, bindings: list, out: list[Check]) -> None
                     err = hostmatch.validate_pattern(h)
                     if err:
                         out.append(_fail(f"{bid}:host[{j}]", f"[{ws.name}] {label}: {err}"))
+
+
+def _preset_requires_checks(ws: Workspace, *, fetch: bool,
+                            fetched_refs: dict | None = None) -> list[Check]:
+    """Re-run each stamped preset's declarative `[[requires]]` host-prereq checks
+    (#58) -- the authoritative side (`preset add`/`create` are advisory).
+
+    Discovery is via the provenance markers the stamp left behind (a diagnostics
+    read; the loader never reads comments): scan the config text for pack names,
+    then for each still-resolvable pack re-run its checks. A marker naming a pack
+    that no longer resolves in the registry is a skip-with-note (`ok=True`) -- the
+    stamped config still works; the pack just isn't around to describe its
+    prerequisites.
+
+    The `provider` kind checks the provider CHOSEN at stamp time, recovered from
+    the pack's stamped bindings (`<pack>-<suffix>` carry ordinary provider/secret
+    fields) -- not a pack default, so no side-channel state is needed. A
+    `fetch=true` check runs only under `doctor NAME --fetch` (the `fetch` gate);
+    without it, it degrades to a resolve-only provider check -- so a nameless
+    `doctor` scan-all never invokes a provider."""
+    from . import prereqs
+    from .preset_stamp import applied_preset_names
+    from .presets import load_presets
+
+    try:
+        text = ws.config_path.read_text()
+    except OSError:
+        return []
+    names = applied_preset_names(text)
+    if not names:
+        return []
+
+    # `load_presets()` raises `ConfigError` on the FIRST unparseable registry
+    # `.toml` -- a WIP preset unrelated to this workspace would otherwise abort
+    # the whole doctor sweep, violating report-all-not-raise. Report it as a
+    # failing check and stop the preset layer here (every other check still ran).
+    try:
+        presets = load_presets()
+    except CredproxyError as e:
+        return [_fail(f"ws:{ws.name}:presets:load",
+                      f"[{ws.name}] preset registry failed to load: {e}",
+                      "fix or remove the malformed preset file in the registry")]
+
+    # Map each stamped binding name -> (provider, secret), so a pack's provider
+    # check can recover the credential actually chosen at stamp time. Best-effort:
+    # an invalid config (already flagged by :bindings) just yields no mapping, so
+    # provider checks report "could not determine provider".
+    from .bindings import load_bindings
+    binding_cred: dict[str, tuple[str | None, object]] = {}
+    try:
+        for b in load_bindings(ws):
+            binding_cred[b.name] = (b.provider, b.secret)
+    except (CredproxyError, tomllib.TOMLDecodeError, OSError):
+        pass
+
+    out: list[Check] = []
+    for pack in names:
+        spec = presets.get(pack)
+        if spec is None:
+            out.append(Check(
+                f"ws:{ws.name}:preset:{pack}", True,
+                f"[{ws.name}] preset '{pack}' is stamped but no longer resolves "
+                f"in the registry -- prerequisite checks skipped",
+                "the stamped config still works; reinstall the pack to re-check "
+                "its prerequisites"))
+            continue
+        if not spec.requires:
+            continue
+        provider, secret = _pack_credential(spec, binding_cred)
+        # A pack WITH bindings but no recoverable provider means its stamped
+        # binding is gone (removed/renamed) -- the provider check will fail; its
+        # remedy must point at the orphaned marker, not the pack's own prereq
+        # hint (which is for the prerequisite, not a missing binding; finding 2a).
+        missing_binding = provider is None and bool(spec.parts)
+        # Requires with a `path = { option = "id" }` marker (#59): substitute the
+        # option's value read back from the stamped mounts (or its default). An
+        # option feeding ONLY the requires path (no stamped mount, no default) is
+        # unrecoverable -> degrade that check to a skip-with-note (never crash).
+        # A stale stamped option value (e.g. an enum choice later dropped from the
+        # pack's `choices`) makes `coerce_option_value` raise -- catch it and emit
+        # a FAILING check for just this pack so the rest of the sweep still runs
+        # (report-all, the #58 contract; S2).
+        try:
+            resolved_requires, skipped_opt = _resolve_pack_requires(spec, text)
+        except (CredproxyError, tomllib.TOMLDecodeError) as e:
+            out.append(Check(
+                f"ws:{ws.name}:preset:{pack}:requires-opt", False,
+                f"[{ws.name}] preset '{pack}' requires: a stamped option value can't "
+                f"be resolved ({e})",
+                "re-add the pack with a valid --opt value (`preset add "
+                f"{pack} --opt ...`), or fix the pack's `[[option]]` definition"))
+            continue
+        # An option feeds a MOUNT source (recoverable via read-back) vs. feeds
+        # ONLY the requires path (nothing stamped to read back). The message splits
+        # on this: a requires-only option is unrecoverable BY DESIGN, but an option
+        # that DOES feed a mount whose stamp is gone/re-targeted is a repairable
+        # drift, not an inherent limitation (N3).
+        mount_fed = {m.source_option for m in spec.mounts if m.source_option}
+        for j, rq in enumerate(skipped_opt):
+            if rq.path_option in mount_fed:
+                msg = (f"[{ws.name}] preset '{pack}' requires ({rq.kind}): path is "
+                       f"supplied by option '{rq.path_option}', but its stamped "
+                       f"mount is missing or re-targeted -- can't recover its "
+                       f"value, check skipped")
+                hint = (f"restore the option-fed mount, or re-add the pack "
+                        f"(`preset add {pack} --opt {rq.path_option}=...`), so the "
+                        f"value is recoverable at doctor time")
+            else:
+                msg = (f"[{ws.name}] preset '{pack}' requires ({rq.kind}): path is "
+                       f"supplied by option '{rq.path_option}', which is used only "
+                       f"here (nowhere stamped) -- can't recover its value, check "
+                       f"skipped")
+                hint = ("give the option a default, or also use it in a stamped "
+                        "mount, so its value is recoverable at doctor time")
+            out.append(Check(
+                f"ws:{ws.name}:preset:{pack}:requires-opt[{j}]", True, msg, hint))
+        results = prereqs.evaluate(resolved_requires, provider=provider,
+                                   secret=_secret_ref(secret), do_fetch=fetch,
+                                   fetched_refs=fetched_refs)
+        for i, r in enumerate(results):
+            cid = f"ws:{ws.name}:preset:{pack}:requires[{i}]"
+            msg = f"[{ws.name}] preset '{pack}' requires ({r.kind}): {r.detail}"
+            if r.ok:
+                out.append(_ok(cid, msg))
+                continue
+            hint = r.hint
+            if r.kind == "provider" and missing_binding:
+                hint = (f"the stamped binding for pack '{pack}' is missing "
+                        f"(removed or renamed); re-add the pack or remove its "
+                        f"stale `# credproxy:preset` marker")
+            out.append(Check(cid, False, msg, hint))
+    return out
+
+
+def _resolve_pack_requires(spec, text: str):
+    """Resolve a pack's `[[requires]]` for the doctor re-run, substituting any
+    `path = { option = "id" }` marker with the option's value read back from the
+    workspace's stamped mounts (#59). Returns `(resolved, skipped)` -- see
+    `presets.resolve_requires_for_check`."""
+    from . import preset_refresh
+    from .presets import resolve_requires_for_check
+    option_values = {}
+    if spec.options:
+        option_values = preset_refresh._read_back_options(
+            preset_refresh._locate(text, spec.name), spec)
+    return resolve_requires_for_check(spec, option_values)
+
+
+def _pack_credential(spec, binding_cred: dict) -> tuple[str | None, object]:
+    """Recover the (provider, secret) a pack's bindings were stamped with, by
+    matching its expected `<pack>-<suffix>` names against the loaded bindings.
+    All parts of a pack share one provider/secret, so the first match wins.
+    Returns (None, None) for a pack with no bindings or none found."""
+    for part in spec.parts:
+        cred = binding_cred.get(f"{spec.name}-{part.suffix}")
+        if cred is not None:
+            return cred
+    return None, None
+
+
+def _secret_ref(secret) -> str | None:
+    """A single secret ref for a provider test-fetch. A binding's secret is a
+    bare ref (str) or a {slot: ref} map; the provider check just needs one ref to
+    prove the provider serves the credential, so pick the first."""
+    if isinstance(secret, str):
+        return secret
+    if isinstance(secret, dict) and secret:
+        return next(iter(secret.values()))
+    return None
 
 
 def _rule_checks(ws: Workspace) -> list[Check]:

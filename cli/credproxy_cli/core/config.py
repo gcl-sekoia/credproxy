@@ -9,7 +9,8 @@ Schema:
   home   = "/root"                     # str, optional (default applied)
   mounts = ["~/src:/src"]              # list[str] "SRC:DST" or "SRC:DST:ro"
   env    = { KEY = "value" }           # table, optional; passed as -e to ws
-  setup  = ["npm ci"]                  # list[str], optional; run once on create
+  setup  = ["npm ci",                  # mixed list of strings and typed tables;
+            {run="…", user="workspace", order=45}]  #   run once on create
   run_flags = ["--userns=keep-id"]     # list[str], optional; spliced into docker run
   map_host_user = true                 # bool, optional; non-root `user` owns mounts
   user_uid = 1000                      # int, optional; in-container uid of `user`
@@ -113,7 +114,7 @@ def _parse_attach(raw_attach, source: str) -> dict:
     return {"container": val}
 
 
-def _attached_config(raw: dict, ws: Workspace) -> dict:
+def _attached_config(raw: dict, source: str) -> dict:
     """The normalized config for an attached workspace: the `attach` selector plus
     every container-lifecycle field defaulted to empty/None, so the shape matches
     the managed path (inspect/resolve read one dict). Rejects any lifecycle key
@@ -121,16 +122,16 @@ def _attached_config(raw: dict, ws: Workspace) -> dict:
     offending = sorted(k for k in raw if k in _ATTACH_EXCLUSIVE)
     if offending:
         raise ConfigError(
-            f"{ws.config_path}: `attach` is mutually exclusive with "
+            f"{source}: `attach` is mutually exclusive with "
             f"container-lifecycle fields -- remove: {', '.join(offending)} "
             f"(an attached workspace's container is managed externally; credproxy "
             f"manages only its credentials/config)")
-    attach = _parse_attach(raw["attach"], str(ws.config_path))
+    attach = _parse_attach(raw["attach"], source)
 
     directory = raw.get("directory")
     if directory is not None and (not isinstance(directory, str)
                                   or not directory.startswith("/")):
-        raise ConfigError(f"{ws.config_path}: `directory` must be an absolute path")
+        raise ConfigError(f"{source}: `directory` must be an absolute path")
 
     return {
         "attach": attach, "directory": directory,
@@ -151,12 +152,71 @@ def _bind_source(raw_src: str, where: str) -> str:
     return str(src)
 
 
+def _tier_roots() -> dict[str, Path]:
+    """Map each mount-source TIER *qualifier* -> its root dir: every configured
+    overlay by basename (from `paths.overlay_dirs()`), plus the reserved literals
+    `user` (the XDG config dir) and `builtin`. The reserved literals win over a
+    same-named overlay basename. This is the set a `TIER:REL` qualified overlay
+    source resolves against (see `_overlay_source`)."""
+    from .paths import BUILTIN_DIR, config_dir
+    roots: dict[str, Path] = {}
+    for label, base in overlay_dirs():
+        # labels are `overlay:<basename>` (deduped `overlay:<basename>#2`); the
+        # qualifier is the part after the colon.
+        roots[label.split(":", 1)[1]] = base
+    roots["user"] = config_dir()
+    roots["builtin"] = BUILTIN_DIR
+    return roots
+
+
+def _qualified_overlay_source(rel: str, where: str) -> str:
+    """Resolve a `TIER:REL` qualified overlay source: `TIER` names an overlay
+    basename or the literal `user`/`builtin` (see `_tier_roots`), `REL` a path
+    under exactly that root. Confinement (no `..`/symlink escape) and the
+    must-exist check apply per root, as for an unqualified source. This is how a
+    preset pins its shipped files to its own owning tier, immune to overlay
+    reordering/shadowing (see core/presets.py)."""
+    tier, _, sub = rel.partition(":")
+    roots = _tier_roots()
+    base = roots.get(tier)
+    if base is None:
+        known = ", ".join(sorted(roots)) or "(none)"
+        raise ConfigError(
+            f"{where} overlay source {rel!r}: unknown tier {tier!r} "
+            f"(known tiers: {known})")
+    base = base.resolve()
+    resolved = (base / sub).resolve()
+    if resolved == base:
+        # `tier:` / `tier:.` / `tier:foo/..` -- an empty/degenerate sub-path
+        # pointing at the tier ROOT dir (not a file/dir under it). A bare tier
+        # root is never a valid mount source.
+        raise ConfigError(
+            f"{where} overlay source {rel!r} names the {tier!r} tier root dir "
+            f"itself (empty sub-path) -- name a file/dir under it, e.g. "
+            f"`{tier}:setup.d/x.sh`")
+    if base not in resolved.parents:
+        raise ConfigError(
+            f"{where} overlay path {sub!r} escapes the {tier!r} tier dir")
+    if not resolved.exists():
+        raise ConfigError(
+            f"{where} overlay source {rel!r} not found (looked at {resolved})")
+    return str(resolved)
+
+
 def _overlay_source(rel: str, where: str) -> str:
-    """Resolve an overlay-relative bind source across the configured overlays,
-    searched in declared order (first overlay containing `rel` wins). Confined
-    within the winning overlay (no `..`/symlink escape) and required to exist.
-    The user tier and builtin do NOT participate -- mounts search the overlays
-    only. The not-found error names every overlay searched."""
+    """Resolve an overlay-relative bind source. A `TIER:REL` form (the prefix
+    contains a `:`) pins resolution to exactly that tier (`_qualified_overlay_source`);
+    a bare `REL` is searched across the configured overlays, in declared order
+    (first overlay containing `rel` wins), confined within the winning overlay
+    (no `..`/symlink escape) and required to exist. The user tier and builtin do
+    NOT participate in the unqualified search -- only via an explicit qualifier.
+    The not-found error names every overlay searched.
+
+    A relative path never legitimately contains a `:`, so a `:` unambiguously
+    signals the qualified form; an unknown prefix is an error listing the known
+    tiers (rather than being silently treated as a path)."""
+    if ":" in rel:
+        return _qualified_overlay_source(rel, where)
     searched: list[Path] = []
     for _label, base in overlay_dirs():
         base = base.resolve()
@@ -174,13 +234,24 @@ def _overlay_source(rel: str, where: str) -> str:
     )
 
 
-def _parse_mount(m, where: str) -> dict:
+def _parse_mount(m, where: str, *, expand_bind: bool = True) -> dict:
     """One `mounts` entry -> a typed record
     `{kind: bind|volume|overlay, source|name, target, readonly}`.
 
     String form is a host bind (`"SRC:DST[:ro]"`). Table form has exactly one of
     `bind`/`volume`/`overlay`, plus an absolute `target` and optional `readonly`
-    (overlay mounts default to read-only -- they ship static assets)."""
+    (overlay mounts default to read-only -- they ship static assets).
+
+    The ONE mount parser -- both `load_config` (workspace TOML) and the preset
+    parser call it, so mount validation lives in a single place. `expand_bind`
+    (default True) is the one preset-path knob: a preset carries a host-bind
+    SOURCE as a literal v1 default (e.g. `~/.ssh/agent`) that need not exist on
+    the machine that loads the pack -- it is existence-checked when the stamped
+    workspace config is loaded at `start`, not at pack-parse time. With
+    `expand_bind=False` the bind source is validated as a non-empty string and
+    kept verbatim (no `~` expansion, no existence check); overlay sources are
+    still fully resolved+existence-checked (a pack's shipped files must be
+    present in its tier)."""
     if isinstance(m, str):
         parts = m.split(":")
         if len(parts) < 2 or len(parts) > 3 or (len(parts) == 3 and parts[2] != "ro"):
@@ -188,7 +259,8 @@ def _parse_mount(m, where: str) -> dict:
         target = parts[1]
         if not target.startswith("/"):
             raise ConfigError(f"{where} target must be absolute: {target!r}")
-        return {"kind": "bind", "source": _bind_source(parts[0], where),
+        source = _bind_source(parts[0], where) if expand_bind else parts[0]
+        return {"kind": "bind", "source": source,
                 "target": target, "readonly": len(parts) == 3}
 
     if not isinstance(m, dict):
@@ -218,7 +290,8 @@ def _parse_mount(m, where: str) -> dict:
         raise ConfigError(f"{where} {kind} must be a non-empty string")
 
     if kind == "bind":
-        return {"kind": "bind", "source": _bind_source(val, where),
+        source = _bind_source(val, where) if expand_bind else val
+        return {"kind": "bind", "source": source,
                 "target": target, "readonly": bool(ro)}
     if kind == "volume":
         if not _VOLUME_NAME_RE.match(val):
@@ -238,6 +311,106 @@ def _parse_mount(m, where: str) -> dict:
             "target": target, "readonly": True if ro is None else bool(ro)}
 
 
+# The only keys a typed `setup` table may carry. `user` is limited to the two
+# literals "workspace"/"root" in v1 (no arbitrary username), `order` to a
+# non-negative int -- see _parse_setup.
+_SETUP_KEYS = {"run", "user", "order"}
+
+
+def _parse_setup_table(entry: dict, where: str, *, require_order: bool) -> dict:
+    """Validate one typed `setup` TABLE and normalize it to
+    `{"run": str, "user": "workspace"|"root", "order": int}` (defaults filled).
+    The ONE typed-setup-step validator -- both the workspace-config setup parser
+    (`_parse_setup`, `require_order=False`) and the preset parser (which passes
+    `require_order=True`) call it, so the field rules live in a single place.
+
+    `require_order`: a preset `[[setup]]` step MUST declare `order` (packs are
+    explicit about cross-pack ordering; there is no per-workspace declaration
+    index to fall back on when several packs' steps interleave). A workspace
+    config defaults an omitted order to 0."""
+    extra = set(entry) - _SETUP_KEYS
+    if extra:
+        raise ConfigError(f"{where} unknown key(s): {', '.join(sorted(extra))}")
+    run = entry.get("run")
+    if not isinstance(run, str) or not run:
+        raise ConfigError(
+            f"{where} `run` is required and must be a non-empty string")
+    user = entry.get("user", "workspace")
+    if user not in ("workspace", "root"):
+        raise ConfigError(
+            f'{where} `user` must be "workspace" or "root", got {user!r}')
+    if require_order and "order" not in entry:
+        raise ConfigError(
+            f"{where} `order` is required in a preset setup step "
+            f"(a pack must be explicit about ordering)")
+    order = entry.get("order", 0)
+    # bool is an int subclass -- reject `order = true` explicitly.
+    if isinstance(order, bool) or not isinstance(order, int) or order < 0:
+        raise ConfigError(f"{where} `order` must be an integer >= 0")
+    return {"run": run, "user": user, "order": order}
+
+
+def _parse_setup(raw_setup, config_path) -> list:
+    """Normalize the `setup` array to its canonical in-memory form.
+
+    `setup` is a MIXED array: plain command strings AND typed step tables.
+
+      - A plain STRING keeps EXACTLY today's semantics (root, `sh -lc`, no
+        injected env -- the escape hatch, unchanged) and stays a `str` here.
+      - A TABLE `{run, user, order}` is normalized to a dict with every default
+        filled: `{"run": str, "user": "workspace"|"root", "order": int}`
+        (`user` -> "workspace", `order` -> 0).
+
+    Normalizing tables at load time is what makes the spec hash deterministic:
+    `{run="x"}` and `{run="x", user="workspace", order=0}` collapse to the
+    identical dict, so they hash the same (see workspace_spec_hash). Strings are
+    left as strings -- an all-string config is byte-identical to before this
+    feature, and hashes/behaves exactly as today."""
+    if not isinstance(raw_setup, list):
+        raise ConfigError(f"{config_path}: `setup` must be an array")
+    out: list = []
+    for i, entry in enumerate(raw_setup):
+        where = f"{config_path}: setup[{i}]"
+        if isinstance(entry, str):
+            out.append(entry)
+            continue
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be a string or a table")
+        out.append(_parse_setup_table(entry, where, require_order=False))
+    return out
+
+
+
+def validate_mount_set(mounts: list[dict], config_path, user: str | None) -> None:
+    """Cross-mount validation on a set of NORMALIZED mount records (`_parse_mount`
+    output): no two mounts on the same target, no two volumes with the same name,
+    and a `user_owned` volume requires a non-root `user` (it is chowned to it).
+    Factored so both `load_config` and the preset-add merge check (existing +
+    stamped mounts) run identical rules."""
+    seen_targets: set[str] = set()
+    seen_vols: set[str] = set()
+    for m in mounts:
+        t = m["target"].rstrip("/") or "/"
+        if t in seen_targets:
+            raise ConfigError(f"{config_path}: two mounts target {m['target']!r}")
+        seen_targets.add(t)
+        if m["kind"] == "volume":
+            if m["name"] in seen_vols:
+                raise ConfigError(
+                    f"{config_path}: two volumes named {m['name']!r} "
+                    f"('home' names the home volume)"
+                )
+            seen_vols.add(m["name"])
+
+    # `user_owned` volumes are chowned to `user`, so they need a non-root one --
+    # otherwise the flag is a silent no-op (root already owns everything).
+    if any(m["kind"] == "volume" and m.get("user_owned") for m in mounts) and (
+            not user or user.split(":", 1)[0] in ("root", "0")):
+        raise ConfigError(
+            f"{config_path}: a `user_owned` volume requires a non-root `user` "
+            f"(the volume is chowned to it)"
+        )
+
 
 def load_config(ws: Workspace) -> dict:
     """Parse and validate the container-side settings of <name>.toml into a
@@ -248,13 +421,44 @@ def load_config(ws: Workspace) -> dict:
         raise ConfigError(
             f"workspace '{ws.name}' not found (no {ws.config_path})"
         )
+    return load_config_from_text(ws.config_path.read_text(), str(ws.config_path))
+
+
+def load_config_from_text(text: str, source: str, *,
+                          check_bind_exists: bool = True) -> dict:
+    """The text-based core of `load_config`: validate a workspace-config TOML
+    STRING into the normalized dict. `source` is the path/label used in error
+    messages. Used both by `load_config` (from disk) and by `create`'s in-memory
+    all-or-nothing preset expansion (which validates the composed text before any
+    file exists).
+
+    `check_bind_exists` (default True) is the preset re-load knob: the normal
+    load path (`start`/`load_config`) existence-checks every host-bind SOURCE, but
+    the preset expand/refresh VALIDATION re-loads (`_expand_preset_into_text`,
+    `preset_refresh._classify`) pass False so an option-fed bind source that need
+    not exist until runtime (a socket dir the agent creates, `~/.ssh/...-agent`)
+    doesn't fail those internal re-validations. The real existence check still
+    runs at `start`, where CLAUDE.md says it belongs -- this only defers it for
+    the in-memory composition passes, never for a config loaded to actually run."""
     try:
-        raw = tomllib.loads(ws.config_path.read_text())
+        raw = tomllib.loads(text)
     except Exception as e:
-        raise ConfigError(f"{ws.config_path}: TOML parse error: {e}") from e
+        raise ConfigError(f"{source}: TOML parse error: {e}") from e
 
     if not isinstance(raw, dict):
-        raise ConfigError(f"{ws.config_path}: top level must be a table")
+        raise ConfigError(f"{source}: top level must be a table")
+
+    # `[[preset]]` is a TEMPLATE-only key: it is consumed and expanded at `create`
+    # time and never survives into a workspace's `<name>.toml`. Reject it here --
+    # specifically, ahead of the generic unknown-key path -- so "preset references
+    # live only in templates" is a load-enforced invariant (both managed and
+    # attached configs).
+    if "preset" in raw:
+        raise ConfigError(
+            f"{source}: `[[preset]]` (and its `[preset.options]` sub-table) is a "
+            f"template-only construct -- it expands at create time and must not "
+            f"appear in a workspace config; on an existing workspace use "
+            f"`credproxy workspace NAME preset add ...`")
 
     # Reject unknown top-level keys (a typo silently no-ops otherwise). Mirror the
     # `_parse_mount` "unknown key(s)" precedent, with a cheap did-you-mean.
@@ -264,21 +468,21 @@ def load_config(ws: Workspace) -> dict:
             near = difflib.get_close_matches(k, KNOWN_KEYS, n=1)
             return f"`{k}` (did you mean `{near[0]}`?)" if near else f"`{k}`"
         raise ConfigError(
-            f"{ws.config_path}: unknown key(s): {', '.join(_hint(k) for k in unknown)}"
+            f"{source}: unknown key(s): {', '.join(_hint(k) for k in unknown)}"
         )
 
     # Attached workspace: credproxy manages only credentials/config; the
     # container is run externally. Mutually exclusive with every lifecycle field
     # (checked in _attached_config), so it takes a distinct, container-free path.
     if raw.get("attach") is not None:
-        return _attached_config(raw, ws)
+        return _attached_config(raw, source)
 
     # image (mandatory -- the scaffold writes a concrete one; there is no
     # built-in default image to fall back to).
     image = raw.get("image")
     if not isinstance(image, str) or not image:
         raise ConfigError(
-            f"{ws.config_path}: `image` is required (a non-empty string) -- "
+            f"{source}: `image` is required (a non-empty string) -- "
             f"`credproxy workspace create` writes one for you"
         )
 
@@ -287,7 +491,7 @@ def load_config(ws: Workspace) -> dict:
     # container's home is the image's, ephemeral (gone on recreate).
     home = raw.get("home")
     if home is not None and (not isinstance(home, str) or not home.startswith("/")):
-        raise ConfigError(f"{ws.config_path}: `home` must be an absolute path")
+        raise ConfigError(f"{source}: `home` must be an absolute path")
 
     # directory: optional host path this workspace is "for". Pure resolution
     # metadata for the loose surface -- `credp <verb>` with no NAME, run at or
@@ -298,57 +502,38 @@ def load_config(ws: Workspace) -> dict:
     directory = raw.get("directory")
     if directory is not None and (not isinstance(directory, str)
                                   or not directory.startswith("/")):
-        raise ConfigError(f"{ws.config_path}: `directory` must be an absolute path")
+        raise ConfigError(f"{source}: `directory` must be an absolute path")
 
     # mounts: typed list. A string is a host bind ("SRC:DST[:ro]"); a table is a
     # bind/volume/overlay mount. The `home` sugar prepends the home volume so it
     # shares the uniqueness checks + emission path.
     raw_mounts = raw.get("mounts") or []
     if not isinstance(raw_mounts, list):
-        raise ConfigError(f"{ws.config_path}: `mounts` must be an array")
-    mounts = [_parse_mount(m, f"{ws.config_path}: mounts[{i}]")
+        raise ConfigError(f"{source}: `mounts` must be an array")
+    mounts = [_parse_mount(m, f"{source}: mounts[{i}]",
+                           expand_bind=check_bind_exists)
               for i, m in enumerate(raw_mounts)]
     if home:
         mounts.insert(0, {"kind": "volume", "name": "home", "target": home,
                           "readonly": False})
 
-    # No two mounts on the same target; no two volumes with the same name.
-    seen_targets: set[str] = set()
-    seen_vols: set[str] = set()
-    for m in mounts:
-        t = m["target"].rstrip("/") or "/"
-        if t in seen_targets:
-            raise ConfigError(f"{ws.config_path}: two mounts target {m['target']!r}")
-        seen_targets.add(t)
-        if m["kind"] == "volume":
-            if m["name"] in seen_vols:
-                raise ConfigError(
-                    f"{ws.config_path}: two volumes named {m['name']!r} "
-                    f"('home' names the home volume)"
-                )
-            seen_vols.add(m["name"])
-
     # env: inline table of string values
     env = raw.get("env") or {}
     if not isinstance(env, dict):
-        raise ConfigError(f"{ws.config_path}: `env` must be a table")
+        raise ConfigError(f"{source}: `env` must be a table")
     for k, v in env.items():
         if not isinstance(k, str):
-            raise ConfigError(f"{ws.config_path}: `env` keys must be strings")
+            raise ConfigError(f"{source}: `env` keys must be strings")
         if not isinstance(v, str):
             raise ConfigError(
-                f"{ws.config_path}: env.{k} must be a string, got {type(v).__name__}"
+                f"{source}: env.{k} must be a string, got {type(v).__name__}"
             )
 
-    # setup: list of shell command strings
-    setup = raw.get("setup") or []
-    if not isinstance(setup, list):
-        raise ConfigError(f"{ws.config_path}: `setup` must be an array")
-    for i, cmd in enumerate(setup):
-        if not isinstance(cmd, str):
-            raise ConfigError(
-                f"{ws.config_path}: setup[{i}] must be a string"
-            )
+    # setup: a mixed array of shell command STRINGS and typed step TABLES,
+    # normalized to a canonical form (strings stay strings; tables become
+    # {"run", "user", "order"} dicts with defaults filled) so the spec hash is
+    # deterministic. See _parse_setup.
+    setup = _parse_setup(raw.get("setup") or [], source)
 
     # user: optional user that `enter` execs as (docker exec -u). Exec-only, so
     # NOT part of the spec hash -- changing it never recreates the container; it
@@ -356,16 +541,12 @@ def load_config(ws: Workspace) -> dict:
     # in or created by `setup`, which always runs as root).
     user = raw.get("user")
     if user is not None and (not isinstance(user, str) or not user):
-        raise ConfigError(f"{ws.config_path}: `user` must be a non-empty string")
+        raise ConfigError(f"{source}: `user` must be a non-empty string")
 
-    # `user_owned` volumes are chowned to `user`, so they need a non-root one --
-    # otherwise the flag is a silent no-op (root already owns everything).
-    if any(m["kind"] == "volume" and m.get("user_owned") for m in mounts) and (
-            not user or user.split(":", 1)[0] in ("root", "0")):
-        raise ConfigError(
-            f"{ws.config_path}: a `user_owned` volume requires a non-root `user` "
-            f"(the volume is chowned to it)"
-        )
+    # No two mounts on the same target; no two volumes with the same name; and a
+    # `user_owned` volume needs a non-root `user` (validated together now that
+    # `user` is known).
+    validate_mount_set(mounts, source, user)
 
     # exec_flags: escape hatch -- extra flags spliced into `docker exec` for
     # `enter` (e.g. ["--workdir", "/srv"], ["--env", "FOO=bar"]). credproxy keeps
@@ -373,7 +554,7 @@ def load_config(ws: Workspace) -> dict:
     # session tracking. Exec-only, like `user`; not part of the spec.
     exec_flags = raw.get("exec_flags") or []
     if not isinstance(exec_flags, list) or not all(isinstance(f, str) for f in exec_flags):
-        raise ConfigError(f"{ws.config_path}: `exec_flags` must be an array of strings")
+        raise ConfigError(f"{source}: `exec_flags` must be an array of strings")
 
     # workdir: directory `enter` starts in (docker exec --workdir), defaulting to
     # `home` at exec time. The workspaceFolder analog -- so `enter` lands in your
@@ -382,7 +563,7 @@ def load_config(ws: Workspace) -> dict:
     # --workdir in `exec_flags` still overrides it (docker last-wins).
     workdir = raw.get("workdir")
     if workdir is not None and (not isinstance(workdir, str) or not workdir.startswith("/")):
-        raise ConfigError(f"{ws.config_path}: `workdir` must be an absolute path")
+        raise ConfigError(f"{source}: `workdir` must be an absolute path")
 
     # enter_prelude: escape hatch over the `enter` env shim. By default credproxy
     # wraps the enter command in `sh -c '<prelude>; exec "$@"'`, where the prelude
@@ -392,7 +573,7 @@ def load_config(ws: Workspace) -> dict:
     # Exec-only -> not part of the spec hash.
     enter_prelude = raw.get("enter_prelude")
     if enter_prelude is not None and not isinstance(enter_prelude, str):
-        raise ConfigError(f"{ws.config_path}: `enter_prelude` must be a string")
+        raise ConfigError(f"{source}: `enter_prelude` must be a string")
 
     # shell: the command `enter` runs when no `-- CMD` is given (argv list).
     # Defaults to a LOGIN shell (`["bash", "-l"]`) -- semantically `enter` is
@@ -405,7 +586,7 @@ def load_config(ws: Workspace) -> dict:
         or not all(isinstance(s, str) and s for s in shell)
     ):
         raise ConfigError(
-            f"{ws.config_path}: `shell` must be a non-empty array of non-empty strings"
+            f"{source}: `shell` must be a non-empty array of non-empty strings"
         )
 
     # run_flags: escape hatch -- extra flags spliced into the workspace
@@ -417,7 +598,7 @@ def load_config(ws: Workspace) -> dict:
     # win on conflict, so run_flags can't detach the netns or rename the box.
     run_flags = raw.get("run_flags") or []
     if not isinstance(run_flags, list) or not all(isinstance(f, str) for f in run_flags):
-        raise ConfigError(f"{ws.config_path}: `run_flags` must be an array of strings")
+        raise ConfigError(f"{source}: `run_flags` must be an array of strings")
 
     # map_host_user: let credproxy make the non-root `user` own the bind mounts
     # without changing host ownership, picking the runtime-appropriate lever
@@ -426,7 +607,7 @@ def load_config(ws: Workspace) -> dict:
     # spec hash. Requires a non-root `user` (validated below).
     map_host_user = raw.get("map_host_user", False)
     if not isinstance(map_host_user, bool):
-        raise ConfigError(f"{ws.config_path}: `map_host_user` must be a boolean")
+        raise ConfigError(f"{source}: `map_host_user` must be a boolean")
 
     # auto_stop: host-side session behavior (stop the workspace when the last
     # `enter` session exits). Strict bool -- `auto_stop = "false"` is a truthy
@@ -436,7 +617,7 @@ def load_config(ws: Workspace) -> dict:
     # intentional) but with the same `is True` strictness.
     auto_stop = raw.get("auto_stop", False)
     if not isinstance(auto_stop, bool):
-        raise ConfigError(f"{ws.config_path}: `auto_stop` must be a boolean")
+        raise ConfigError(f"{source}: `auto_stop` must be a boolean")
 
     # user_uid: the in-container uid of `user`. map_host_user's keep-id maps
     # host-you onto THIS uid, so it's the side the host must land on for `user`
@@ -447,7 +628,7 @@ def load_config(ws: Workspace) -> dict:
     user_uid = raw.get("user_uid")
     if user_uid is not None and (not isinstance(user_uid, int) or isinstance(user_uid, bool)
                                  or user_uid < 0):
-        raise ConfigError(f"{ws.config_path}: `user_uid` must be a non-negative integer")
+        raise ConfigError(f"{source}: `user_uid` must be a non-negative integer")
 
     # map_host_user / user_uid configure how the non-root `user` owns bind
     # mounts, so they're meaningless without one. Reject rather than silently
@@ -461,7 +642,7 @@ def load_config(ws: Workspace) -> dict:
             joined = " and ".join(f"`{o}`" for o in orphans)
             verb, subj = ("require", "they") if len(orphans) > 1 else ("requires", "it")
             raise ConfigError(
-                f"{ws.config_path}: {joined} {verb} `user` to be set "
+                f"{source}: {joined} {verb} `user` to be set "
                 f"({subj} configure{'' if len(orphans) > 1 else 's'} how the "
                 f"non-root `user` owns bind mounts)"
             )
@@ -602,16 +783,16 @@ def _render_volume_mount_block(name: str, target: str, readonly: bool,
     return "\n".join(lines) + "\n"
 
 
-def _inline_mounts_array_span(text: str) -> tuple[int, int] | None:
-    """If the doc has an uncommented top-level `mounts = [ ... ]` inline array,
-    return `(open_bracket_index, close_bracket_index)`; else None.
+def inline_array_span(text: str, key: str) -> tuple[int, int] | None:
+    """`(open_bracket_index, close_bracket_index)` of an uncommented top-level
+    `key = [ ... ]` inline array, else None (absent / commented / `[[key]]`
+    blocks / unbalanced -- all cases where the caller appends a block instead).
 
     The bracket scan skips string contents and `#` comments and balances nested
-    `[]`, so a path containing a bracket or a multi-line array doesn't fool it.
-    Returns None when `mounts` is absent, commented, declared as `[[mounts]]`
-    blocks (a header, not a `mounts =` assignment), or not an inline array -- all
-    cases where the caller appends a `[[mounts]]` block instead."""
-    m = re.search(r"(?m)^[ \t]*mounts[ \t]*=[ \t]*", text)
+    `[]`, so a bracket inside a value or a multi-line array doesn't fool it. The
+    single string/comment/bracket-aware scanner shared by `mount add`
+    (`add_volume_mount`) and preset stamping (`preset_stamp._stamp_array`)."""
+    m = re.search(rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=[ \t]*", text)
     if not m:
         return None
     open_idx = m.end()
@@ -648,6 +829,50 @@ def _inline_mounts_array_span(text: str) -> tuple[int, int] | None:
     return None  # unbalanced -> let the caller append a block instead
 
 
+def last_code_char_index(inner: str) -> int | None:
+    """Index within `inner` (the text between an array's `[` and `]`) of the
+    last real-code character -- outside any string or `#` comment, and not
+    whitespace -- or None when the body is empty / whitespace / comments only.
+
+    Used to place a separating comma exactly after the last existing element
+    (never inside a trailing comment, never mistaking a `#` or `,` inside a
+    string for code). String/comment scanning mirrors `inline_array_span`."""
+    last: int | None = None
+    in_str = False
+    str_ch = ""
+    i = 0
+    n = len(inner)
+    while i < n:
+        c = inner[i]
+        if in_str:
+            if str_ch == '"' and c == "\\":
+                # escaped char stays part of the string (code); skip both.
+                last = min(i + 1, n - 1)
+                i += 2
+                continue
+            last = i
+            if c == str_ch:
+                in_str = False
+            i += 1
+            continue
+        if c in "\"'":
+            in_str = True
+            str_ch = c
+            last = i
+            i += 1
+            continue
+        if c == "#":
+            nl = inner.find("\n", i)
+            if nl == -1:
+                break
+            i = nl + 1
+            continue
+        if not c.isspace():
+            last = i
+        i += 1
+    return last
+
+
 def add_volume_mount(text: str, name: str, target: str,
                      readonly: bool = False, user_owned: bool = False) -> str:
     """Add a managed-volume mount to a workspace TOML, preserving comments.
@@ -657,7 +882,7 @@ def add_volume_mount(text: str, name: str, target: str,
     Otherwise a `[[mounts]]` block is appended -- which also composes with
     existing `[[mounts]]` blocks (TOML merges them), but is never mixed with an
     inline array (TOML forbids a key and a table-array of the same name)."""
-    span = _inline_mounts_array_span(text)
+    span = inline_array_span(text, "mounts")
     if span is None:
         block = _render_volume_mount_block(name, target, readonly, user_owned)
         if text and not text.endswith("\n"):
@@ -713,7 +938,13 @@ def workspace_spec_hash(cfg: dict, proxy_id: str | None, hostname: str | None = 
     not config- or environment-derived. Like `map_host_user`, it rides the hash
     on every runtime even though the `--hostname` argv itself is only emitted on
     podman: the hash carries the deterministic intent, not the runtime probe, so
-    switching runtimes doesn't recreate (mirroring `map_host_user`/keep-id)."""
+    switching runtimes doesn't recreate (mirroring `map_host_user`/keep-id).
+
+    `setup` is already normalized by _parse_setup (strings stay strings; every
+    table is a `{"run", "user", "order"}` dict with defaults filled), so a
+    table's default-equivalent spellings hash identically and editing any of
+    `run`/`user`/`order` changes the hash. `sort_keys=True` makes the dict-key
+    order irrelevant."""
     spec = json.dumps(
         {
             "image": cfg["image"],

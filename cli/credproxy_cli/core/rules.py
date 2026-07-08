@@ -501,6 +501,12 @@ def remove_rule(ws: Workspace, name: str) -> None:
     lines = text.splitlines(keepends=True)
     spans = _block_spans(text, _RULE_HEADER_RE, _RULE_CHILD_RE)
     start, end = spans[target]
+    # Fold away a preset provenance marker directly above the block (a stamped
+    # rule), then one preceding blank separator -- symmetric with
+    # `remove_binding`, so removing a stamped rule leaves no orphan marker.
+    from . import preset_stamp
+    if start > 0 and preset_stamp.is_marker_line(lines[start - 1]):
+        start -= 1
     if start > 0 and lines[start - 1].strip() == "":
         start -= 1
     del lines[start:end]

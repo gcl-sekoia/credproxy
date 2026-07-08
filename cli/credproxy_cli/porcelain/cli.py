@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
+import tomllib
 
 from ..core import dirmatch
 from ..core import docker as core_docker
@@ -260,19 +262,49 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
         name = core_workspace.derive_workspace_name(directory)
         say(f"derived workspace name '{name}' from {directory}")
     ws = for_name(name)  # reserved-name / charset check happens here
+    # Fail fast on an existing workspace BEFORE any template render / preset
+    # expansion, so create stays all-or-nothing (nothing resolved or written for a
+    # name that's already taken). create_*_workspace_files re-checks under its own
+    # write, closing the (host-single-user) race.
+    if ws.exists():
+        from ..core.errors import WorkspaceError
+        raise WorkspaceError(
+            f"workspace '{ws.name}' already exists ({ws.config_path})")
+    from ..core import config as core_config
+    source = str(ws.config_path)
+    selector = None
     if attach is not None:
         # `--attach SELECTOR` scaffolds an ATTACHED workspace from the attach
         # template (overlay-overridable). --here/--dir still make sense (cwd
         # resolution applies to attached workspaces too), handled below.
         selector = _attach_selector_from_flag(attach)
-        lifecycle.create_attached_workspace_files(ws, selector)
+        base_text = core_config.render_attach_template(ws.name, selector)
     else:
-        lifecycle.create_workspace_files(ws)
-    render.OUT.created(ws.name, str(ws.config_path), attached=attach is not None)
+        base_text = core_config.render_template(ws.name)
+    # Expand any template-declared `[[preset]]` entries (#57) into ordinary
+    # stamped blocks IN MEMORY -- all-or-nothing: any failure raises/exits here,
+    # before a single byte is written (no config file, no token, no state dir).
+    final_text, preset_announces, stamped_packs = _expand_template_presets(
+        ctx, base_text, source)
+    if attach is not None:
+        lifecycle.create_attached_workspace_files(ws, selector, text=final_text)
+    else:
+        lifecycle.create_workspace_files(ws, text=final_text)
+    # Host-prerequisite checks (#58) run only AFTER the atomic write succeeds, so
+    # a `fetch=true` provider check never execs a provider for a create that then
+    # aborts (finding 5). Advisory -- the stamp is durable, host state is fixable
+    # afterward. `do_fetch=True` (create is interactive, like `preset add`).
+    if stamped_packs:
+        from ..core import prereqs
+        for announce, (spec, provider, secret) in zip(preset_announces,
+                                                       stamped_packs):
+            announce["requires"] = [prereqs.summary(r) for r in prereqs.evaluate(
+                spec.requires, provider=provider, secret=secret, do_fetch=True)]
+    render.OUT.created(ws.name, str(ws.config_path), attached=attach is not None,
+                       presets=preset_announces)
     # Optional cwd-association (`--here`/`--dir`): record the directory this
     # workspace is "for" so `credp <verb>` resolves it from there (dirmatch).
     if directory is not None:
-        from ..core import config as core_config
         real = os.path.realpath(directory)
         if real == os.path.sep or real == os.path.realpath(os.path.expanduser("~")):
             say(f"note: {directory} is too broad -- cwd resolution ignores it")
@@ -288,6 +320,164 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
     if ctx.loose and pointer.read_default() is None:
         pointer.set_default(ws)
         say(f"set '{ws.name}' as the default workspace")
+
+
+# A `[[preset]]` array-of-tables header line (a trailing comment is allowed),
+# for the surgical strip of template-declared entries before writing the config.
+_PRESET_BLOCK_RE = re.compile(r"^\s*\[\[\s*preset\s*\]\]\s*(#.*)?$")
+# A `[preset.<child>]` sub-table header (e.g. `[preset.options]`, #59) that BELONGS
+# to the current `[[preset]]` element -- folded INTO its span so the strip removes
+# it too (mirrors the `[rule.headers]` child handling in `_block_spans`). TOML
+# permits whitespace around the dotted-key separator (`[preset . options]`), so the
+# pattern tolerates it too (N5) rather than letting the child header escape the
+# strip and fail create with a misleading survivor error.
+_PRESET_CHILD_RE = re.compile(r"^\s*\[\s*preset\s*\.\s*[^\[\]\n]+\]\s*(#.*)?$")
+
+
+def _strip_preset_blocks(text: str) -> str:
+    """Remove every `[[preset]]` block from `text` via surgical span removal (the
+    same `_block_spans` machinery `remove_binding` uses), so a template's expanded
+    entries never survive into the stamped `<name>.toml`. Also folds in an
+    immediately-adjacent run of comment-only lines above the header (a `# label`
+    that belongs to the block) plus one preceding blank separator, so a labelled
+    block leaves no orphan and no blank runs accumulate.
+
+    Line-based, NOT multiline-string aware: a `[[preset]]`-lookalike inside a
+    `\"\"\"...\"\"\"` value would be mis-stripped. This is the reason
+    `_expand_template_presets` re-parses the composed text afterward and fails
+    closed on the resulting invalid/`preset`-bearing TOML rather than writing it.
+    The comment fold is deliberately conservative (only lines DIRECTLY above the
+    header, no intervening blank), which can in a rare shape absorb a preceding
+    block's trailing comment -- an acceptable edge for the common labelled-block
+    case."""
+    from ..core.bindings import _block_spans
+
+    lines = text.splitlines(keepends=True)
+    for start, end in reversed(_block_spans(text, _PRESET_BLOCK_RE,
+                                            _PRESET_CHILD_RE)):
+        while start > 0 and lines[start - 1].lstrip().startswith("#"):
+            start -= 1
+        if start > 0 and lines[start - 1].strip() == "":
+            start -= 1
+        del lines[start:end]
+    return "".join(lines)
+
+
+# A `[[preset]]` header OR an inline `preset =` assignment, for detecting preset
+# references in a template we can't fully parse (finding 5) and (via the block
+# regex above) counting the block form.
+_PRESET_REF_RE = re.compile(r"^\s*(\[\[\s*preset\s*\]\]|preset\s*=)", re.M)
+
+
+def _expand_template_presets(ctx: Ctx, base_text: str, source: str):
+    """Expand template-declared `[[preset]]` entries (#57) into the final config
+    text: strip the `[[preset]]` blocks and stamp each pack's expansion through
+    the SAME `_expand_preset_into_text` core `preset add` uses. Returns
+    `(final_text, announces, stamped_packs)` -- `announces` is the per-entry
+    render metadata; `stamped_packs` is the `(literal_spec, provider, secret)` per
+    pack (option markers already substituted) so the caller can run the #58
+    host-prerequisite checks AFTER it writes (finding 5), never invoking a provider
+    for a create that then aborts.
+
+    All-or-nothing: everything is composed in memory and every failure raises/exits
+    before the caller writes, so a bad entry leaves no partial config. Entries are
+    expanded in declaration order and each is validated against the accumulating
+    text (prior stamps + the template's literal config), so cross-entry and
+    entry-vs-literal collisions fail here."""
+    from ..core.bindings import _block_spans
+    from ..core.errors import PresetTemplateError
+    from ..core.presets import (
+        apply_option_values, build_preset, get_preset, parse_template_presets,
+    )
+    from ..core.providers import find_provider
+
+    try:
+        raw = tomllib.loads(base_text)
+    except tomllib.TOMLDecodeError as e:
+        # A malformed template can't be inspected for presets. If it textually
+        # references presets, its entries can't be expanded -- fail create rather
+        # than silently writing a broken workspace with unexpanded preset text
+        # (finding 5). A malformed template with NO preset reference keeps the
+        # historical write-verbatim behavior (the parse error surfaces at `start`).
+        if _PRESET_REF_RE.search(base_text):
+            fail(f"{source}: template is malformed TOML ({e}); its preset "
+                 f"entries can't be expanded -- fix the template's `[[preset]]` "
+                 f"syntax")
+        return base_text, [], []
+
+    # Gate on the KEY'S PRESENCE, not on entries being non-empty: any `preset`
+    # key must be stripped/rejected here so it never survives into the stamped
+    # config (where every later command would reject it with a misleading
+    # "use preset add" remedy -- findings 1/2).
+    if "preset" not in raw:
+        return base_text, [], []
+
+    entries = parse_template_presets(raw, source)   # ConfigError on a bad entry
+
+    # Require the documented `[[preset]]` array-of-tables block form (finding 2,
+    # option b). The surgical stripper only removes `[[preset]]` HEADER blocks, so
+    # an inline `preset = [...]`/`preset = {...}` would survive strip. Each block
+    # yields exactly one entry, so a count mismatch means an inline spelling.
+    n_blocks = len(_block_spans(base_text, _PRESET_BLOCK_RE))
+    if n_blocks != len(entries):
+        fail(f"{source}: declare template presets as `[[preset]]` blocks, not an "
+             f"inline `preset = [...]` array/table")
+    if not entries:
+        # `preset = []` (or an empty inline form): key present, zero blocks --
+        # nothing to expand, but the inline key can't be surgically stripped and
+        # must not survive. Reject at create with the block-form remedy.
+        fail(f"{source}: the `preset` key is empty; remove it, or declare "
+             f"template presets as `[[preset]]` blocks")
+
+    text = _strip_preset_blocks(base_text)
+    announces: list[dict] = []
+    # (literal_spec, provider, secret) per stamped pack (option markers already
+    # substituted), so the host-prerequisite checks (#58) run AFTER the atomic
+    # write succeeds -- a `fetch=true` provider check execs a provider, and a later
+    # entry aborting create must not have invoked one for a create that then writes
+    # nothing (finding 5).
+    stamped_packs: list[tuple] = []
+    for entry in entries:
+        spec = get_preset(entry.name)               # CredproxyError on unknown pack
+        # Pack options (#59): explicit from the entry's `[preset.options]`, else
+        # prompt on loose+TTY, else default, else the structured missing error.
+        option_values = _resolve_preset_option_values(
+            ctx, spec, dict(entry.options or {}))
+        provider = secret = None
+        if spec.needs_credential:
+            def _missing(missing, _entry=entry):
+                # Prompting on loose+TTY handled inside the interactive resolver;
+                # here we're already past it -> the create-flavored structured error.
+                raise PresetTemplateError(_entry.name, missing)
+
+            provider, secret = _resolve_preset_credential_interactive(
+                ctx, spec, entry.provider, entry.secret, on_missing=_missing)
+            find_provider(provider)                 # ProviderError if it doesn't resolve
+        elif entry.provider or entry.secret:
+            shape = "container-only (mounts/env/setup)" if spec.has_container_half \
+                else "pure-rule"
+            fail(f"template preset '{entry.name}' is a {shape} pack with no "
+                 f"bindings -- it needs no provider/secret; remove those fields "
+                 f"from its `[[preset]]` entry")
+        exp = build_preset(entry.name, provider, secret, options=option_values)
+        literal_spec = apply_option_values(spec, option_values) \
+            if spec.options else spec
+        text, announce = _expand_preset_into_text(
+            text, exp, entry.name, source, context="create")
+        announces.append(announce)
+        stamped_packs.append((literal_spec, provider, secret))
+
+    # Post-strip safety net (backstops findings 1/2): the composed config must
+    # carry no top-level `preset` key. The stripper is line-based, so re-parse and
+    # fail closed (no write) if a `preset` key somehow survived -- a credproxy bug.
+    try:
+        recheck = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        recheck = {}
+    if "preset" in recheck:
+        fail(f"{source}: internal error -- a `preset` key survived template "
+             f"expansion (credproxy bug); nothing was written")
+    return text, announces, stamped_packs
 
 
 def do_bind_dir(ctx: Ctx, name: str | None, directory_flag: str | None) -> None:
@@ -969,89 +1159,436 @@ def _newly_intercepted(existing_hosts, new_hosts) -> list[str]:
     return out
 
 
+def _expand_preset_into_text(text: str, exp, preset_name: str, source: str,
+                             context: str = "add"):
+    """Shared preset expand-validate-compose core used by BOTH `preset add` and
+    `create`'s template-declared `[[preset]]` expansion (#57): validate a
+    `PresetExpansion` against the CURRENT TOML `text` (attach/container-half,
+    double-add guard, name/mount-target/env collisions, cross-binding/rule
+    semantic checks) and return `(new_text, announce)` -- the composed TOML plus
+    the render-ready announcement dict. Pure w.r.t. disk (no read/write); the
+    caller writes `new_text`. Raises via `fail()` on any conflict, so nothing is
+    written on failure -- the basis for `create`'s all-or-nothing guarantee.
+
+    Existing state is derived from `text` itself (parsed bindings/rules with
+    auto-names filled + the normalized container config), so `create` can feed the
+    ACCUMULATING text across multiple template entries and each is validated
+    against every prior stamp + the literal template config.
+
+    `context` (`"add"` | `"create"`) only flavors the duplicate-pack remedy: at
+    `preset add` the fix is to remove the stamped blocks; at `create` (template
+    `[[preset]]`) it's to remove the duplicate template entry."""
+    from ..core import bindings as core_bindings
+    from ..core import config as core_config
+    from ..core import preset_stamp
+    from ..core import rules as core_rules
+    from ..core.presets import mount_table
+
+    dup_remedy = (
+        "remove the duplicate `[[preset]]` entry from the template"
+        if context == "create"
+        else "remove the stamped blocks first to re-apply")
+
+    # Normalized container config from the current text; attach detection rides it
+    # (attached -> empty mounts/env, so the container-half loops below are no-ops).
+    # Defer host-bind existence (check_bind_exists=False): a prior stamp (or this
+    # pack's own option-fed mount) may name a source that need not exist until
+    # runtime (a socket dir, `~/.ssh/...-agent`) -- `start` existence-checks it.
+    cfg = core_config.load_config_from_text(text, source, check_bind_exists=False)
+    attached = cfg.get("attach") is not None
+
+    # An attached workspace has no credproxy-managed container, so it can't accept
+    # the container half (mounts/env/setup). Binding/rule-only packs still apply.
+    if attached and exp.has_container_half:
+        fail(f"preset '{preset_name}' carries container-half config "
+             f"(mounts/env/setup), but the workspace is attached -- its container "
+             f"is managed externally, so credproxy can't stamp a mount/env/setup "
+             f"for it. Only binding/rule-only packs apply to an attached workspace.")
+
+    # Double-add guard: any provenance marker for THIS preset already present
+    # (protects pure-container packs, which have no binding-name clash to trip).
+    if preset_stamp.already_applied(text, preset_name):
+        fail(f"preset '{preset_name}' is already applied here (its provenance "
+             f"marker is in the config; {dup_remedy})")
+
+    raw = tomllib.loads(text)
+    existing_b = core_bindings._with_auto_names(
+        core_bindings._parse_bindings(raw, source))
+    existing_r = core_rules._with_auto_names(core_rules._parse_rules(raw, source))
+    new_b, new_r = list(exp.bindings), list(exp.rules)
+
+    # Collision: a generated <preset>-<suffix> clashing with an existing name
+    # fails the WHOLE add before any write (no partial stamp).
+    btaken = {b.name for b in existing_b}
+    rtaken = {r.name for r in existing_r}
+    for b in new_b:
+        if b.name in btaken:
+            fail(f"preset '{preset_name}' would create binding '{b.name}', which "
+                 f"already exists (no changes made)")
+    for r in new_r:
+        if r.name in rtaken:
+            fail(f"preset '{preset_name}' would create rule '{r.name}', which "
+                 f"already exists (no changes made)")
+
+    # Container-half collisions (a no-op for attached, whose cfg mounts/env are
+    # empty and whose container half was rejected above). Normalize each new mount
+    # through the SAME config._parse_mount (bind kept literal) so the merged-set
+    # check matches load_config exactly.
+    env_to_stamp: list[tuple[str, str]] = []
+    skipped_env: list[str] = []
+    new_mount_norms = [
+        core_config._parse_mount(mount_table(m),
+                                 f"preset '{preset_name}' mount",
+                                 expand_bind=False)
+        for m in exp.mounts
+    ]
+    existing_targets = {m["target"].rstrip("/") or "/" for m in cfg["mounts"]}
+    for nm in new_mount_norms:
+        t = nm["target"].rstrip("/") or "/"
+        if t in existing_targets:
+            fail(f"preset '{preset_name}' would mount at {nm['target']!r}, which "
+                 f"is already mounted (no changes made)")
+    core_config.validate_mount_set(
+        cfg["mounts"] + new_mount_norms, source, cfg["user"])
+
+    # env: absent -> stamp; present-identical -> skip + note; present but
+    # DIFFERENT -> fail the whole add.
+    for k, v in exp.env:
+        if k in cfg["env"]:
+            if cfg["env"][k] == v:
+                skipped_env.append(k)
+                continue
+            fail(f"preset '{preset_name}' sets env {k}={v!r}, but env {k}="
+                 f"{cfg['env'][k]!r} is already set (different value; no changes made)")
+        env_to_stamp.append((k, v))
+
+    # Full semantic validation on the combined binding/rule sets (cross-binding
+    # /rule collisions, script resolution) before writing. Run UNCONDITIONALLY --
+    # even a pack that adds no bindings/rules must still validate the EXISTING set
+    # standalone, so a pre-existing invalidity (e.g. a duplicate binding name)
+    # surfaces here at `preset add`/`create`, not deferred to `start` (finding 7).
+    core_bindings.validate(existing_b + new_b, source)
+    core_rules.validate(existing_r + new_r, source)
+
+    existing_hosts = [h for b in existing_b for h in b.hosts] \
+        + [h for r in existing_r for h in r.hosts]
+    new_hosts = [h for b in new_b for h in b.hosts] \
+        + [h for r in new_r for h in r.hosts]
+    newly = _newly_intercepted(existing_hosts, new_hosts)
+
+    new_text = preset_stamp.compose(
+        text, preset_name, exp.rev,
+        bindings=new_b, rules=new_r,
+        mounts=list(exp.mounts), env_items=env_to_stamp,
+        setup=[dict(s) for s in exp.setup])
+
+    announce = {
+        "preset": preset_name,
+        "attached": attached,
+        "bindings": [{"name": b.name, "injector": b.injector,
+                      "provider": b.provider, "secret": b.secret,
+                      "hosts": list(b.hosts), "placeholder": b.placeholder,
+                      "env": b.env} for b in new_b],
+        "rules": [{"name": r.name, "hosts": list(r.hosts), "action": r.action,
+                   "script": r.script, "visible": r.effective_visible}
+                  for r in new_r],
+        "newly_intercepted": newly,
+        "mounts": [{"kind": m.kind, "source": m.value, "target": m.target}
+                   for m in exp.mounts],
+        "env": [{"key": k, "value": v} for k, v in env_to_stamp],
+        "skipped_env": skipped_env,
+        "setup": [dict(s) for s in exp.setup],
+        # A stamped container half drifts the spec hash. Gate on what was ACTUALLY
+        # stamped, not merely what the pack CARRIES: an env-only pack whose every
+        # key was skipped as present-identical wrote a byte-identical file (no
+        # drift). Mounts/setup are always stamped when present (a collision fails).
+        "stamped_container_half": bool(exp.mounts or exp.setup or env_to_stamp),
+    }
+    return new_text, announce
+
+
+def _parse_opt_flags(opts: list[str] | None) -> dict:
+    """Parse repeatable `--opt id=value` flags into `{id: value}` (values are raw
+    strings; coercion against each option's type happens in `resolve_options`). A
+    later `--opt` for the same id wins. Malformed (`no '='`, empty id) fails."""
+    out: dict = {}
+    for raw in opts or []:
+        if "=" not in raw:
+            fail(f"--opt expects id=value, got {raw!r}")
+        key, val = raw.split("=", 1)
+        key = key.strip()
+        if not key:
+            fail(f"--opt expects a non-empty id, got {raw!r}")
+        out[key] = val
+    return out
+
+
+def _resolve_preset_option_values(ctx: Ctx, spec, explicit: dict) -> dict:
+    """Resolve every pack `[[option]]` to a value in the settled order (#59):
+    explicit (`--opt`/template `[preset.options]`) -> prompt (loose+TTY only) ->
+    default -> structured fail. Returns `{id: value}` (empty for an option-less
+    pack). Raises `PresetOptionsError` (structured under `--json`) when a required
+    option can't be resolved without prompting."""
+    if not spec.options:
+        # An explicit --opt for a pack that declares no options is a typo worth
+        # surfacing (resolve_options rejects unknown ids), so still route through it.
+        if not explicit:
+            return {}
+    from ..core.errors import PresetOptionsError
+    from ..core.presets import option_summary, resolve_options
+    from . import prompt as prompt_mod
+
+    ask = prompt_mod.ask_option if prompt_mod.prompting_enabled(ctx) else None
+    values, missing = resolve_options(spec, explicit, prompt=ask)
+    if missing:
+        raise PresetOptionsError(spec.name, [option_summary(o) for o in missing])
+    return values
+
+
+def _resolve_preset_credential_interactive(
+        ctx: Ctx, spec, provider_arg, secret_arg, *, on_missing):
+    """Resolve a pack's provider/secret with the shared defaulting, THEN prompt on
+    loose+TTY for anything still missing (decision 4: provider picker + secret with
+    a validate-at-prompt loop). Strict / loose-no-TTY don't prompt -- `on_missing`
+    (a callable taking the `missing` list) fires instead, rendering the caller's
+    own structured/human error. Returns `(provider, secret)`."""
+    from ..core.presets import resolve_preset_credential
+    from . import prompt as prompt_mod
+
+    provider, secret, missing = resolve_preset_credential(
+        spec, provider_arg, secret_arg)
+    if missing and prompt_mod.prompting_enabled(ctx):
+        if "provider" in missing:
+            provider = prompt_mod.ask_provider(spec.default_provider)
+            # Re-apply defaulting now the provider is known (a prompted provider
+            # equal to default_provider makes default_secret eligible).
+            provider, secret, missing = resolve_preset_credential(
+                spec, provider, secret_arg)
+        if "secret" in missing:
+            hint_default = (spec.default_secret
+                            if provider == spec.default_provider else None)
+            secret = prompt_mod.ask_secret(provider, hint_default)
+            missing = [m for m in missing if m != "secret"]
+    if missing:
+        on_missing(missing)   # renders + exits (fail / raise)
+    return provider, secret
+
+
 def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     """Apply a preset as a service setup pack: stamp its `[[binding]]` set AND its
     `[[rule]]` guardrails into the workspace, all-or-nothing. A pure-rule preset
     needs no provider/secret."""
-    from ..core import bindings as core_bindings
-    from ..core import rules as core_rules
     from ..core.presets import build_preset, get_preset
     from ..core.providers import find_provider
 
     spec = get_preset(a.preset)               # CredproxyError -> clean fail on unknown
 
+    # Pack options (#59): resolved before the credential so a bad --opt fails fast.
+    option_values = _resolve_preset_option_values(
+        ctx, spec, _parse_opt_flags(a.opt))
+
     provider = secret = None
     if spec.needs_credential:
-        # Provider: the explicit flag, else the preset's default.
-        provider = a.provider or spec.default_provider
-        if provider is None:
-            fail("preset '%s' has bindings but no default provider -- pass "
-                 "--provider" % a.preset)
-        # Secret: explicit, else the preset default -- but that default ref is
-        # only meaningful for the provider it was written for (a ref is a gh
-        # hostname for gh-cli, an env-var name for env, an op:// path for op), so
-        # any other provider must still pass --secret.
-        secret = _parse_secret_args(a.secret)
-        if secret is None:
-            if provider == spec.default_provider and spec.default_secret is not None:
-                secret = spec.default_secret
-            else:
-                fail("`preset add` needs --secret (its meaning depends on --provider)")
-        elif not isinstance(secret, str):
+        # Secret: explicit, else the preset default (applied in
+        # resolve_preset_credential -- the shared defaulting core create reuses).
+        secret_arg = _parse_secret_args(a.secret)
+        if secret_arg is not None and not isinstance(secret_arg, str):
             fail("`preset add` needs a single --secret REF")
+
+        def _missing(missing):
+            if "provider" in missing:
+                fail("preset '%s' has bindings but no default provider -- pass "
+                     "--provider" % a.preset)
+            fail("`preset add` needs --secret (its meaning depends on --provider)")
+
+        provider, secret = _resolve_preset_credential_interactive(
+            ctx, spec, a.provider, secret_arg, on_missing=_missing)
         find_provider(provider)
     elif a.provider or a.secret:
-        fail(f"preset '{a.preset}' is a pure-rule pack (no bindings) -- "
-             f"--provider/--secret don't apply")
+        # No bindings -> needs no credential. Name the pack's actual shape so the
+        # message is accurate for a pure-CONTAINER (mounts/env/setup) or
+        # pure-rule pack, not just a rule pack.
+        shape = "container-only (mounts/env/setup)" if spec.has_container_half \
+            else "pure-rule"
+        fail(f"preset '{a.preset}' is a {shape} pack with no bindings -- it "
+             f"needs no credential, so --provider/--secret don't apply")
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
 
+    from ..core.paths import atomic_write_text
+    from ..core.presets import apply_option_values
+
+    exp = build_preset(a.preset, provider, secret, options=option_values)
+    # Requires (#58) aren't stamped, so their option markers are substituted here
+    # (the literal spec) for the advisory prereq run below.
+    literal_spec = apply_option_values(spec, option_values) if spec.options else spec
+
     with ws.lock():                          # atomic read-validate-write
-        existing_b = core_bindings.load_bindings(ws)
-        existing_r = core_rules.load_rules(ws)
-        new_b, new_r = build_preset(a.preset, provider, secret)
+        text = ws.config_path.read_text()
+        new_text, announce = _expand_preset_into_text(
+            text, exp, a.preset, str(ws.config_path))
+        atomic_write_text(ws.config_path, new_text)
 
-        # Collision: a generated <preset>-<suffix> clashing with an existing name
-        # fails the WHOLE add before any write (no partial stamp).
-        btaken = {b.name for b in existing_b}
-        rtaken = {r.name for r in existing_r}
-        for b in new_b:
-            if b.name in btaken:
-                fail(f"preset '{a.preset}' would create binding '{b.name}', which "
-                     f"already exists in workspace '{ws.name}' (no changes made)")
-        for r in new_r:
-            if r.name in rtaken:
-                fail(f"preset '{a.preset}' would create rule '{r.name}', which "
-                     f"already exists in workspace '{ws.name}' (no changes made)")
+    attached = announce["attached"]
+    stamped_container_half = announce["stamped_container_half"]
+    # `preset add` is otherwise a pure config edit, so a missing/unreachable
+    # docker must not fail it: if we can't check, assume no container.
+    container_exists = False
+    if not attached and stamped_container_half:
+        from ..core.errors import CredproxyError
+        try:
+            container_exists = \
+                core_docker.container_status(ws.ws_container) is not None
+        except CredproxyError:
+            container_exists = False
+    # Host-prerequisite checks (#58): advisory here -- the stamp already landed
+    # (durable config), so a failing check reports + hints but never fails the
+    # add. `do_fetch=True` (a `fetch=true` provider check is an interactive user
+    # action, like `binding test`). Report ALL, not fail-first.
+    from ..core import prereqs
+    requires = [prereqs.summary(r) for r in prereqs.evaluate(
+        literal_spec.requires, provider=provider, secret=secret, do_fetch=True)]
+    render.OUT.preset_applied(
+        ws.name, announce["preset"], announce["bindings"], announce["rules"],
+        announce["newly_intercepted"], mounts=announce["mounts"],
+        env=announce["env"], skipped_env=announce["skipped_env"],
+        setup=announce["setup"],
+        recreate=(container_exists and stamped_container_half),
+        attached=attached, requires=requires)
 
-        # Full semantic validation on the combined sets (cross-binding/rule
-        # collisions, script resolution) before writing.
-        if new_b:
-            core_bindings.validate(existing_b + new_b, str(ws.config_path))
-        if new_r:
-            core_rules.validate(existing_r + new_r, str(ws.config_path))
 
-        existing_hosts = [h for b in existing_b for h in b.hosts] \
-            + [h for r in existing_r for h in r.hosts]
-        new_hosts = [h for b in new_b for h in b.hosts] \
-            + [h for r in new_r for h in r.hosts]
-        newly = _newly_intercepted(existing_hosts, new_hosts)
-
-        if new_b:
-            core_bindings.append_bindings(ws, new_b)
-        if new_r:
-            core_rules.append_rules(ws, new_r)
-
+def do_preset_refresh(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    """Re-expand stamped pack(s) against their current definitions and update the
+    workspace TOML: per-block update-cleanly / skip-hand-edited (with a diff) /
+    add / prune (only under --prune). No PRESET -> every applied pack; explicit
+    PRESET -> just that pack (error if unknown or not applied)."""
     from ..core import config as core_config
-    render.OUT.preset_applied(ws.name, a.preset, [{
-        "name": b.name, "injector": b.injector, "provider": b.provider,
-        "secret": b.secret, "hosts": list(b.hosts), "placeholder": b.placeholder,
-        "env": b.env,
-    } for b in new_b], [{
-        "name": r.name, "hosts": list(r.hosts), "action": r.action,
-        "script": r.script, "visible": r.effective_visible,
-    } for r in new_r], newly, attached=core_config.quick_attach(ws))
+    from ..core import preset_refresh, preset_stamp
+    from ..core.paths import atomic_write_text
+    from ..core.presets import load_presets
+
+    implicit = name is None
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    # --prune deletes stamped blocks (high recovery cost) -> destructive gate.
+    if a.prune:
+        _confirm_destructive(ctx, ws, implicit, "prune stamped blocks of")
+
+    source = str(ws.config_path)
+    with ws.lock():                          # atomic read-classify-write
+        text = ws.config_path.read_text()
+        applied = preset_stamp.applied_preset_names(text)
+        attached = core_config.quick_attach(ws)
+
+        if a.preset is not None:
+            if a.preset not in applied:
+                fail(f"preset '{a.preset}' is not applied to workspace "
+                     f"'{ws.name}' (no provenance marker); apply it first with "
+                     f"`preset add {a.preset}`")
+            targets = [a.preset]
+        else:
+            targets = applied
+            if not targets:
+                say(f"workspace '{ws.name}' has no applied presets -- nothing "
+                    f"to refresh")
+                render.OUT.preset_refreshed(
+                    ws.name, [], newly_intercepted=[], container_changed=False,
+                    attached=attached, skipped_unresolved=[],
+                    skipped_attached=[], container_exists=False)
+                return
+
+        known = load_presets()
+        results: list[dict] = []
+        skipped_unresolved: list[str] = []   # no longer in the registry
+        skipped_attached: list[str] = []     # container-half pack, attached ws
+        container_changed = False
+        cur = text
+        for pname in targets:
+            spec = known.get(pname)
+            if spec is None:
+                if a.preset is not None:
+                    fail(f"preset '{pname}' is no longer in the registry, so it "
+                         f"can't be refreshed (its stamped blocks remain)")
+                skipped_unresolved.append(pname)
+                continue
+            # An attached workspace can't accept a container-half refresh (its
+            # container is external) -- mirror `preset add`'s refusal.
+            if attached and (spec.has_container_half
+                             or _has_stamped_container_half(cur, pname)):
+                if a.preset is not None:
+                    fail(f"preset '{pname}' carries container-half config "
+                         f"(mounts/env/setup), but the workspace is attached -- "
+                         f"only binding/rule-only packs refresh on an attached "
+                         f"workspace")
+                skipped_attached.append(pname)
+                continue
+            res = preset_refresh.refresh_preset(
+                cur, pname, spec, prune=a.prune, source=source)
+            cur = res.new_text
+            container_changed = container_changed or res.container_changed
+            results.append({
+                "preset": res.preset,
+                "changed": res.changed,
+                "actions": [_refresh_action_dict(act) for act in res.actions],
+            })
+
+        newly = _newly_intercepted_between(text, cur) if cur != text else []
+        if cur != text:
+            atomic_write_text(ws.config_path, cur)
+
+    # Gate the container-drift restart hint on the workspace container actually
+    # EXISTING (mirrors `do_preset_add`): a never-created workspace shows no
+    # spurious "restart to apply" line. A missing/unreachable docker means we
+    # can't check -> assume no container.
+    container_exists = False
+    if not attached and container_changed:
+        from ..core.errors import CredproxyError
+        try:
+            container_exists = \
+                core_docker.container_status(ws.ws_container) is not None
+        except CredproxyError:
+            container_exists = False
+
+    render.OUT.preset_refreshed(
+        ws.name, results, newly_intercepted=newly,
+        container_changed=container_changed, attached=attached,
+        skipped_unresolved=skipped_unresolved,
+        skipped_attached=skipped_attached, container_exists=container_exists)
+
+
+def _refresh_action_dict(act) -> dict:
+    """One refresh action -> a JSON-clean dict. `diff` (set only for a
+    skipped-edited block) is omitted when null, per the `diff?` shape."""
+    d = {"kind": act.kind, "target": act.target, "action": act.action}
+    if act.diff is not None:
+        d["diff"] = act.diff
+    return d
+
+
+def _has_stamped_container_half(text: str, preset_name: str) -> bool:
+    """True iff `text` carries a stamped mounts/env/setup element for
+    `preset_name` (so refresh would touch the container half even if the current
+    definition no longer declares one -- e.g. a prune)."""
+    from ..core import preset_refresh
+    return any(s.kind in ("env", "mount", "setup")
+               for s in preset_refresh._locate(text, preset_name))
+
+
+def _newly_intercepted_between(old_text: str, new_text: str) -> list[str]:
+    """Hosts newly TLS-intercepted by a refresh: bindings/rules hosts present in
+    `new_text` but not already covered by `old_text`'s host set."""
+    from ..core import bindings as core_bindings
+    from ..core import rules as core_rules
+
+    def _hosts(text: str) -> list[str]:
+        raw = tomllib.loads(text)
+        bs = core_bindings._with_auto_names(
+            core_bindings._parse_bindings(raw, "refresh"))
+        rs = core_rules._with_auto_names(core_rules._parse_rules(raw, "refresh"))
+        return [h for b in bs for h in b.hosts] + [h for r in rs for h in r.hosts]
+
+    return _newly_intercepted(_hosts(old_text), _hosts(new_text))
 
 
 def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
@@ -1822,6 +2359,17 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     # pure-rule preset needs neither. Enforced (conditionally) in the handler.
     pa.add_argument("--provider", default=None)
     pa.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
+    # Pack `[[option]]` values, whole-field host-half parameters (#59). Repeatable
+    # `--opt id=value`; unresolved required options prompt on loose+TTY, else fail
+    # with the structured missing error.
+    pa.add_argument("--opt", action="append", metavar="ID=VALUE", default=None)
+
+    pr = psub.add_parser("refresh")
+    # Optional PRESET: omitted -> every applied pack; named -> just that one.
+    pr.add_argument("preset", metavar="PRESET", nargs="?", default=None)
+    # Delete stamped blocks whose definition counterpart vanished (else reported
+    # only). Gated like the destructive set on an implicit workspace.
+    pr.add_argument("--prune", action="store_true")
 
     return parser
 
@@ -1859,6 +2407,7 @@ _STRICT_HELP = (
     "  credproxy workspace NAME binding add|remove|list|test ...\n"
     "  credproxy workspace NAME rule add|remove|list|test ...   (traffic guardrails)\n"
     "  credproxy workspace NAME preset add PRESET   (service pack: bindings + rules)\n"
+    "  credproxy workspace NAME preset refresh [PRESET] [--prune]   (re-expand stamped packs)\n"
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
@@ -1896,6 +2445,7 @@ _LOOSE_HELP = (
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
     "  credp rule add|remove|list|test ...      (traffic guardrails)\n"
     "  credp preset add PRESET                  (service pack: bindings + rules)\n"
+    "  credp preset refresh [PRESET] [--prune]  (re-expand stamped packs)\n"
     "  credp binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
@@ -1938,17 +2488,30 @@ _BINDING_ADD_HELP = (
 
 _PRESET_ADD_HELP = (
     "credproxy workspace NAME preset add PRESET -- apply a service setup pack:\n"
-    "stamp its coordinated `[[binding]]` set AND its `[[rule]]` guardrails into\n"
-    "the workspace, all-or-nothing. `credproxy preset list` shows every pack.\n"
+    "stamp its `[[binding]]` set, its `[[rule]]` guardrails, AND its container\n"
+    "half (`[[mount]]`/`[env]`/`[[setup]]`) into the workspace, all-or-nothing.\n"
+    "`credproxy preset list` shows every pack.\n"
     "\n"
     "  --provider PROV   where binding values come from (a binding-bearing preset\n"
-    "                    may supply a default; a pure-rule pack needs none).\n"
+    "                    may supply a default; a rule/container-only pack needs none).\n"
     "  --secret REF      the reference the provider resolves (see `binding add`);\n"
     "                    may be defaulted by a preset for its default provider.\n"
     "\n"
-    "Expansion, not a link: it writes ordinary blocks (names `<preset>-<suffix>`);\n"
-    "edit/remove afterward is normal. A rule on a host with no binding flips that\n"
-    "host to TLS-intercepted -- `preset add` announces any such host.\n"
+    "Expansion, not a link: it writes ordinary blocks/config (names\n"
+    "`<preset>-<suffix>`); edit/remove afterward is normal. A binding/rule on a\n"
+    "host with no prior binding flips it to TLS-intercepted; the container half\n"
+    "changes the workspace spec (restart to apply if the container exists) --\n"
+    "`preset add` announces both. An attached workspace refuses a container-half\n"
+    "pack. Re-adding the same pack is refused (provenance guard).\n"
+    "\n"
+    "credproxy workspace NAME preset refresh [PRESET] [--prune] -- re-expand\n"
+    "stamped pack(s) against their CURRENT definitions and update the TOML. No\n"
+    "PRESET refreshes every applied pack. Per block: unchanged -> up to date;\n"
+    "definition changed but block unedited -> updated cleanly (new marker); block\n"
+    "hand-edited since stamping -> skipped with a diff (never overwritten); a\n"
+    "definition-new block -> added; a vanished block -> reported, and removed\n"
+    "only with --prune. The shared placeholder + provider/secret are preserved,\n"
+    "never regenerated. All-or-nothing; no live link (an operator-clock refresh).\n"
 )
 
 _BINDING_TEST_HELP = (
@@ -2370,6 +2933,8 @@ def _run_ws_verb(
     elif verb == "preset":
         if a.presetcmd == "add":
             do_preset_add(ctx, name, a)
+        elif a.presetcmd == "refresh":
+            do_preset_refresh(ctx, name, a)
 
 
 def _parse_create(argv: list[str]) -> argparse.Namespace:
@@ -2976,16 +3541,16 @@ def _dispatch_preset(ctx: Ctx, rest: list[str]) -> None:
     if not rest or _wants_help(rest) or rest[0] == "list":
         do_preset_list(ctx)
         return
-    if rest[0] == "add":
-        # Top-level `preset add` is the loose implicit-workspace form; strict
-        # requires the explicit `workspace NAME preset add`.
+    if rest[0] in ("add", "refresh"):
+        # Top-level `preset add`/`refresh` is the loose implicit-workspace form;
+        # strict requires the explicit `workspace NAME preset ...`.
         if not ctx.loose:
-            fail("`preset add` needs a workspace: "
-                 "`credproxy workspace NAME preset add PRESET`")
+            fail(f"`preset {rest[0]}` needs a workspace: "
+                 f"`credproxy workspace NAME preset {rest[0]}`")
         _run_ws_verb(ctx, None, ["preset", *rest], [])
         return
     fail(f"unknown preset command '{rest[0]}' (usage: credproxy preset list  |  "
-         f"credproxy workspace NAME preset add PRESET)")
+         f"credproxy workspace NAME preset add|refresh ...)")
 
 
 def _dispatch_dev(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:

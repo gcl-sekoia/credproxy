@@ -120,7 +120,8 @@ story and the no-fork bundle differ only in how the directory is named.
 
 The `<name>.toml` body a fresh `credproxy create` writes. Make it your canonical
 default workspace — your image, your `user`/`home`, your `setup`, even default
-`[[binding]]` blocks for org infrastructure. It is a **literal** workspace
+`[[binding]]` blocks (or `[[preset]]` entries, expanded at create — see below)
+for org infrastructure. It is a **literal** workspace
 config: every occurrence of the exact token `{name}` is replaced with the
 workspace name, and **nothing else** is touched — no `str.format`, so literal
 braces (`{ volume = ... }` inline tables, `${VAR}`, a stray `{foo}`) need no
@@ -149,16 +150,122 @@ name as a builtin (or a less-specific overlay) **replaces** it; a new name
 and a **preset** that wires it (`presets/org-guardrails.toml`, an optional
 `[[rule]]` array; see [`rules.md`](../reference/rules.md#distributing-a-policy-script--preset))
 travel together in the overlay, so a workspace applies the whole policy with one
-`credproxy workspace NAME preset add org-guardrails`. A preset can carry bindings,
-rules, or both — a **pure-rule** pack (no `[placeholder]`/provider) is a
-credential-free policy bundle.
+`credproxy workspace NAME preset add org-guardrails`. A preset can carry bindings
+(`[[part]]`), rules (`[[rule]]`), **and the container half** (`[[mount]]`, `[env]`,
+`[[setup]]`) — any subset. A **pure-rule** pack (no `[placeholder]`/provider) is a
+credential-free policy bundle; a **pure-container** pack (mounts/env/setup only)
+ships a service's setup without a credential.
+
+**A pack's files ride the pack's tier.** A `[[mount]]` in a preset that names an
+`overlay = "setup.d/x.sh"` source resolves within the pack's *own* tier — the
+stamp records the qualified form `overlay = "<tier>:setup.d/x.sh"` (the tier is
+an overlay basename, or `user`/`builtin`), so the file is pinned to the pack and
+unaffected by overlay reordering/shadowing. `[[setup]]` steps must declare an
+explicit `order` (packs are explicit about ordering); host-bind sources are baked
+as literal v1 defaults, existence-checked when the workspace starts. Each stamped
+block carries an inert `# credproxy:preset …` provenance comment, so re-applying
+the same pack is refused rather than duplicated.
+
+**Parameterize the host half with `[[option]]`.** A host-half value that differs
+per operator — a socket dir, an op:// path — is declared as an option and
+referenced as the **whole value** of a host-half field with a structural
+`{ option = "id" }` marker (a mount `bind`/`volume` source, or a `[[requires]]`
+`path`). It is never a token inside a string, and never a container-half field
+(`target`, `[env]` values, `[[setup]]`):
+
+```toml
+[[option]]
+id          = "sock_dir"
+type        = "string"                     # "string" | "enum" (with choices) | "bool"
+default     = "~/.ssh/credproxy-agent"     # optional; omit to make it required
+description = "host directory holding the signing agent's socket"
+
+[[mount]]
+bind   = { option = "sock_dir" }
+target = "/ssh-agent"
+```
+
+A value resolves at expansion time — explicit `--opt id=value` / a template
+`[preset.options]` table → a prompt (loose surface + terminal only) → the
+`default` → otherwise the add fails with a structured missing-options error. The
+resolved literal is stamped (the marker never reaches the workspace TOML), and
+`preset refresh` reads a mount-feeding option's value back from the stamped mount.
+An option used **only** in a `[[requires]]` path with no default can't be read
+back later, so give such an option a default (or also use it in a stamped mount).
+
+**Declare your pack's host prerequisites.** A pack often needs host state its
+container half can't provide — the `gh` CLI installed, a signing-agent socket
+dir, a set env var, a provider that can serve the secret. Declare each with a
+`[[requires]]` block so `preset add`/`create` check it (advisory — the pack still
+stamps) and `doctor` re-checks it (authoritative):
+
+```toml
+[[requires]]
+kind = "command"           # on the host PATH (shutil.which — looked up, never run)
+command = "gh"
+hint = "install the GitHub CLI: https://cli.github.com"
+
+[[requires]]
+kind = "path"              # host path exists (~ / $VARS expanded)
+path = "~/.ssh/credproxy-agent"
+
+[[requires]]
+kind = "env"               # host env var set and non-empty
+var = "SOME_VAR"
+
+[[requires]]
+kind = "provider"          # the provider chosen for this pack resolves
+fetch = true               # (optional) also test-fetch the secret; needs [[part]]
+hint = "authenticate: gh auth login"
+```
+
+The four kinds — `command` / `path` / `env` / `provider` — are the **whole set**,
+implemented by credproxy. **A pack never supplies a script to run** on the host,
+so activating an overlay from a fresh clone can't execute pack-authored code; the
+only host-executable is a [provider](../reference/providers.md), reached through
+the normal protocol for the `provider` kind. `doctor` finds which packs a
+workspace uses from the stamped provenance comments; a `fetch = true` check runs
+only under `doctor NAME --fetch`. See [the preset guide](../guide/06-presets.md#declaring-host-prerequisites).
+
+**A template can *declare* presets.** Instead of inlining literal `[[binding]]`
+blocks (which bypass preset machinery), a `workspace.template.toml` /
+`workspace.attach.template.toml` may carry `[[preset]]` entries that `create`
+expands through the **same** path as `preset add` — so each created workspace
+gets its own freshly generated shared placeholder, and the template shrinks from
+mechanism to intent:
+
+```toml
+# in your overlay's workspace.template.toml, alongside ordinary literal config
+[[preset]]
+name = "github"                     # complete defaults (gh-cli / github.com): nothing else needed
+
+[[preset]]
+name     = "claude-code"
+provider = "bw"
+secret   = "claude-code-oauth-token"
+```
+
+Each entry takes `name` (required) and optional `provider` / `secret` (a single
+ref, defaulting exactly as `preset add` does — the pack's `default_provider`,
+and `default_secret` only when the resolved provider *is* the default). The
+`[[preset]]` blocks are **consumed at create and never survive** into the stamped
+`<name>.toml` (the loader **rejects** `preset` in a workspace config — references
+live only in templates). Create is **all-or-nothing**: a defaults-less pack with
+no provider/secret, a name collision against a literal `[[binding]]`, or an
+attach template naming a container-half pack fails the whole create with nothing
+written (no config, no token, no state). There is **no prompting** — a missing
+field is a loud error naming exactly what to fill (or drop the entry and run
+`preset add` after). Leave `[[preset]]` out of the *builtin* templates so a bare
+`credproxy create` needs no provider login; template presets are for
+overlays/forks.
 
 **Template vs. preset — both exist on purpose.** Baking `[[binding]]`/`[[rule]]`
-blocks into `workspace.template.toml` applies them to **every** workspace at
-**create** time, all-or-nothing. A **preset** is the **per-service, composable,
-post-create** granularity: applied to the workspaces that need it, when they need
-it, and stacked with others. Use the template for "every box gets this"; use a
-preset for "this box also talks to service X."
+blocks (or now `[[preset]]` entries) into `workspace.template.toml` applies them
+to **every** workspace at **create** time, all-or-nothing. A **preset** applied
+with `preset add` is the **per-service, composable, post-create** granularity:
+applied to the workspaces that need it, when they need it, and stacked with
+others. Use the template for "every box gets this"; use a bare `preset add` for
+"this box also talks to service X."
 
 ## Shipping static files (overlay mounts)
 

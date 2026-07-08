@@ -169,8 +169,17 @@ class Renderer:
             print(f"  {k:<24}{short(v) if v else '(default)'}")
 
     # -- create / use / generic name ack --
-    def created(self, name: str, path: str, attached: bool = False) -> None:
+    def created(self, name: str, path: str, attached: bool = False,
+                presets: list[dict] | None = None) -> None:
         print(f"created workspace '{name}' at {path}")
+        # Template-declared `[[preset]]` entries (#57) were expanded and stamped
+        # into the fresh config -- announce each like `preset add` does (no
+        # recreate/push hint; the create hint below covers the follow-up).
+        for p in (presets or []):
+            self._preset_summary(
+                name, p["preset"], p["bindings"], p["rules"],
+                p["newly_intercepted"], p["mounts"], p["env"],
+                p["skipped_env"], p["setup"], p.get("requires"))
         # An ATTACHED workspace has no `start` (its containers are external);
         # the follow-up there is a config push.
         verb = "push" if attached else "start"
@@ -572,12 +581,22 @@ class Renderer:
         print("Service setup packs (bindings + guardrails). Apply with:")
         print("  credproxy workspace NAME preset add NAME [--provider P --secret REF]")
         for p in rows:
-            counts = f"{len(p['bindings'])} bindings, {len(p.get('rules') or [])} rules"
-            cred = "" if p.get("needs_credential", True) else "  [pure-rule; no credential]"
+            mounts = p.get("mounts") or []
+            penv = p.get("env") or []
+            setup = p.get("setup") or []
+            counts = [f"{len(p['bindings'])} bindings",
+                      f"{len(p.get('rules') or [])} rules"]
+            if mounts:
+                counts.append(f"{len(mounts)} mounts")
+            if penv:
+                counts.append(f"{len(penv)} env")
+            if setup:
+                counts.append(f"{len(setup)} setup")
+            cred = "" if p.get("needs_credential", True) else "  [no credential]"
             src = f"  [{p['source']}]" if p.get("source") else ""
             sh = p.get("shadows") or []
             shadow = f" (shadows {', '.join(sh)})" if sh else ""
-            print(f"\n{p['name']}  ({counts}){cred}{src}{shadow}")
+            print(f"\n{p['name']}  ({', '.join(counts)}){cred}{src}{shadow}")
             for b in p["bindings"]:
                 env = f"  env {b['env']}" if b.get("env") else ""
                 hosts = ", ".join(b["hosts"])
@@ -586,13 +605,38 @@ class Renderer:
                 act = r["action"] + (f":{r['script']}" if r.get("script") else "")
                 vis = "" if r.get("visible", True) else "  [hidden]"
                 print(f"  rule    {r['name']:<14} {act:<7} {', '.join(r['hosts'])}{vis}")
+            for m in mounts:
+                print(f"  mount   {m['kind']:<7} {m['source']} -> {m['target']}")
+            for e in penv:
+                print(f"  env     {e['key']} = {e['value']}")
+            for s in setup:
+                u = "" if s.get("user", "workspace") == "workspace" else f" ({s['user']})"
+                print(f"  setup   [{s['order']}] {s['run']}{u}")
+            unref = p.get("unreferenced_options") or []
+            if unref:
+                # Author-facing note (N6): these options resolve a value that no
+                # marker uses. A `bool` option has no marker sink yet by design.
+                print(f"  note: option(s) referenced by no marker (inert): "
+                      f"{', '.join(unref)}")
 
-    def preset_applied(self, ws: str, preset: str, bindings: list[dict],
-                       rules: list[dict], newly_intercepted: list[str],
-                       attached: bool = False) -> None:
+    def _preset_summary(self, ws: str, preset: str, bindings: list[dict],
+                        rules: list[dict], newly_intercepted: list[str],
+                        mounts: list[dict], env: list[dict],
+                        skipped_env: list[str], setup: list[dict],
+                        requires: list[dict] | None = None) -> None:
+        """The per-preset stamp summary (header + item lines + skipped-env /
+        newly-intercepted advisories), shared by `preset_applied` and `create`'s
+        per-entry announcement. No push hint / recreate warning -- those are the
+        caller's (they differ between add and create)."""
         nb, nr = len(bindings), len(rules)
-        print(f"applied preset '{preset}' to workspace '{ws}': "
-              f"{nb} binding(s), {nr} rule(s)")
+        parts = [f"{nb} binding(s)", f"{nr} rule(s)"]
+        if mounts:
+            parts.append(f"{len(mounts)} mount(s)")
+        if env:
+            parts.append(f"{len(env)} env var(s)")
+        if setup:
+            parts.append(f"{len(setup)} setup step(s)")
+        print(f"applied preset '{preset}' to workspace '{ws}': " + ", ".join(parts))
         for b in bindings:
             print(f"  binding {b['name']:<16} {b['injector']:<7} "
                   f"{', '.join(b['hosts'])}")
@@ -601,11 +645,108 @@ class Renderer:
             vis = "" if r.get("visible", True) else "  (hidden)"
             print(f"  rule    {r['name']:<16} {act:<7} "
                   f"{', '.join(r['hosts'])}{vis}")
+        for m in mounts:
+            print(f"  mount   {m['kind']:<7} {m['source']} -> {m['target']}")
+        for e in env:
+            print(f"  env     {e['key']} = {e['value']}")
+        for s in setup:
+            u = "" if s.get("user", "workspace") == "workspace" else f" ({s['user']})"
+            print(f"  setup   [{s['order']}] {s['run']}{u}")
+        if skipped_env:
+            say("env already set to the same value (left unchanged): "
+                + ", ".join(skipped_env))
         if newly_intercepted:
             say("newly intercepted (TLS-terminated) host(s): "
                 + ", ".join(newly_intercepted)
                 + " -- a workspace that hasn't bootstrapped the CA will see a "
                   "cert error there until it does")
+        # Host-prerequisite checks (#58): advisory here (the stamp landed), so
+        # print only the UNMET ones with their remedy. `doctor NAME` re-checks
+        # them authoritatively.
+        unmet = [rq for rq in (requires or []) if not rq.get("ok")]
+        for rq in unmet:
+            line = f"unmet prerequisite ({rq['kind']}): {rq['detail']}"
+            if rq.get("hint"):
+                line += f" -- {rq['hint']}"
+            say(line)
+        if unmet:
+            say(f"{len(unmet)} unmet prerequisite(s) above -- fix them, then "
+                f"`credproxy doctor {ws}` to re-check")
+
+    def preset_applied(self, ws: str, preset: str, bindings: list[dict],
+                       rules: list[dict], newly_intercepted: list[str],
+                       mounts: list[dict] | None = None,
+                       env: list[dict] | None = None,
+                       skipped_env: list[str] | None = None,
+                       setup: list[dict] | None = None,
+                       recreate: bool = False,
+                       attached: bool = False,
+                       requires: list[dict] | None = None) -> None:
+        self._preset_summary(ws, preset, bindings, rules, newly_intercepted,
+                             mounts or [], env or [], skipped_env or [],
+                             setup or [], requires or [])
+        if recreate:
+            say("container-half config changed the workspace spec -- "
+                f"restart to apply: credproxy workspace {ws} start")
+        _say_push_hint(ws, attached)
+
+    # -- preset refresh --
+    def preset_refreshed(self, ws: str, results: list[dict], *,
+                         newly_intercepted: list[str], container_changed: bool,
+                         attached: bool, skipped_unresolved: list[str],
+                         skipped_attached: list[str] | None = None,
+                         container_exists: bool = False) -> None:
+        skipped_attached = skipped_attached or []
+        # Human-readable action verbs (the JSON keeps the terse kebab forms).
+        verb = {"up-to-date": "up to date", "updated": "updated",
+                "skipped-edited": "skipped (hand-edited)",
+                "skipped-divergent": "skipped (bindings hand-edited apart)",
+                "skipped-collision": "skipped (collides with existing config)",
+                "added": "added",
+                "prunable": "vanished (use --prune to remove)",
+                "pruned": "pruned"}
+        any_change = False
+        for r in results:
+            acts = r["actions"]
+            tally: dict[str, int] = {}
+            for a in acts:
+                tally[a["action"]] = tally.get(a["action"], 0) + 1
+            summary = ", ".join(
+                f"{tally[k]} {verb[k]}" for k in
+                ("updated", "added", "pruned", "skipped-edited",
+                 "skipped-divergent", "skipped-collision",
+                 "prunable", "up-to-date") if k in tally)
+            if r["changed"]:
+                any_change = True
+            print(f"refreshed preset '{r['preset']}' in workspace '{ws}': "
+                  f"{summary or 'nothing to do'}")
+            for a in acts:
+                mark = verb[a["action"]]
+                print(f"  {a['kind']:<8} {a['target']:<16} {mark}")
+            for a in acts:
+                if a["action"] == "skipped-edited" and a.get("diff"):
+                    print(f"  --- diff for {a['kind']} {a['target']} "
+                          f"(hand-edited; not overwritten) ---")
+                    for ln in a["diff"].splitlines():
+                        print(f"  {ln}")
+        for name in skipped_unresolved:
+            say(f"preset '{name}' is no longer in the registry -- skipped "
+                f"(its stamped blocks are left as-is)")
+        for name in skipped_attached:
+            say(f"preset '{name}' carries container-half config (mounts/env/"
+                f"setup) -- skipped on this attached workspace (its container is "
+                f"external; only binding/rule-only packs refresh here)")
+        if newly_intercepted:
+            say("newly intercepted (TLS-terminated) host(s): "
+                + ", ".join(newly_intercepted)
+                + " -- a workspace that hasn't bootstrapped the CA will see a "
+                  "cert error there until it does")
+        if not any_change:
+            say("already up to date -- nothing written")
+            return
+        if container_changed and container_exists:
+            say("container-half config changed the workspace spec -- "
+                f"restart to apply: credproxy workspace {ws} start")
         _say_push_hint(ws, attached)
 
 
@@ -619,7 +760,13 @@ class JsonRenderer(Renderer):
         print(json.dumps(obj))
 
     def error(self, exc: Exception) -> None:
-        self._emit({"error": {"type": type(exc).__name__, "message": str(exc)}})
+        obj = {"type": type(exc).__name__, "message": str(exc)}
+        # An exception may attach structured fields (e.g. PresetTemplateError's
+        # {preset, missing}) so a --json consumer gets the shape, not just prose.
+        extra = getattr(exc, "json_fields", None)
+        if isinstance(extra, dict):
+            obj.update(extra)
+        self._emit({"error": obj})
 
     def workspace_list(self, rows: list[dict]) -> None:
         self._emit(rows)
@@ -627,8 +774,12 @@ class JsonRenderer(Renderer):
     def info(self, d: dict) -> None:
         self._emit(d)
 
-    def created(self, name: str, path: str, attached: bool = False) -> None:
-        self._emit({"name": name, "config_path": path})
+    def created(self, name: str, path: str, attached: bool = False,
+                presets: list[dict] | None = None) -> None:
+        obj = {"name": name, "config_path": path}
+        if presets:
+            obj["presets"] = presets
+        self._emit(obj)
 
     def used(self, name: str) -> None:
         self._emit({"default": name})
@@ -746,9 +897,30 @@ class JsonRenderer(Renderer):
 
     def preset_applied(self, ws: str, preset: str, bindings: list[dict],
                        rules: list[dict], newly_intercepted: list[str],
-                       attached: bool = False) -> None:
+                       mounts: list[dict] | None = None,
+                       env: list[dict] | None = None,
+                       skipped_env: list[str] | None = None,
+                       setup: list[dict] | None = None,
+                       recreate: bool = False,
+                       attached: bool = False,
+                       requires: list[dict] | None = None) -> None:
         self._emit({"workspace": ws, "preset": preset, "bindings": bindings,
-                    "rules": rules, "newly_intercepted": newly_intercepted})
+                    "rules": rules, "newly_intercepted": newly_intercepted,
+                    "mounts": mounts or [], "env": env or [],
+                    "skipped_env": skipped_env or [], "setup": setup or [],
+                    "recreate": recreate, "requires": requires or []})
+
+    def preset_refreshed(self, ws: str, results: list[dict], *,
+                         newly_intercepted: list[str], container_changed: bool,
+                         attached: bool, skipped_unresolved: list[str],
+                         skipped_attached: list[str] | None = None,
+                         container_exists: bool = False) -> None:
+        self._emit({"workspace": ws, "presets": results,
+                    "newly_intercepted": newly_intercepted,
+                    "container_changed": container_changed,
+                    "container_exists": container_exists,
+                    "skipped_unresolved": skipped_unresolved,
+                    "skipped_attached": skipped_attached or []})
 
     def provider_show(self, info: dict) -> None:
         self._emit(info)

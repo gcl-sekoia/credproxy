@@ -386,6 +386,42 @@ def test_config_declared_shows_only_file_keys(xdg, workspaces_dir):
     assert data["config"] == {"image": "alpine:3", "home": "/home/dev"}
 
 
+def test_config_typed_setup_effective_canonical(xdg, workspaces_dir):
+    """Under `--effective`, a typed `setup` table renders in CANONICAL form
+    (defaults filled: user->"workspace", order->0), while plain strings stay
+    strings."""
+    import json
+    (workspaces_dir / "w.toml").write_text(
+        'image = "alpine:3"\n'
+        'setup = [\n'
+        '  "echo hi",\n'
+        '  { run = "gh auth setup-git" },\n'          # bare table: defaults filled
+        ']\n')
+    ec, out, err = _run(["--json", "workspace", "w", "config"])
+    assert ec == 0, f"stderr: {err}"
+    setup = json.loads(out)["config"]["setup"]
+    assert setup[0] == "echo hi"                       # string stays a string
+    assert setup[1] == {"run": "gh auth setup-git", "user": "workspace",
+                        "order": 0}                    # defaults materialized
+
+
+def test_config_typed_setup_declared_literal(xdg, workspaces_dir):
+    """Under `--declared`, a typed `setup` table renders exactly as written (no
+    defaults filled), and strings stay strings."""
+    import json
+    (workspaces_dir / "w.toml").write_text(
+        'image = "alpine:3"\n'
+        'setup = [\n'
+        '  "echo hi",\n'
+        '  { run = "gh auth setup-git" },\n'
+        ']\n')
+    ec, out, err = _run(["--json", "workspace", "w", "config", "--declared"])
+    assert ec == 0, f"stderr: {err}"
+    setup = json.loads(out)["config"]["setup"]
+    assert setup[0] == "echo hi"                       # string stays a string
+    assert setup[1] == {"run": "gh auth setup-git"}    # literal, no user/order
+
+
 def test_config_reserved_name(xdg):
     """`config` is a reserved verb -> can't be a workspace name."""
     ec, _, err = _run(["workspace", "create", "config"])
