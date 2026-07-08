@@ -424,12 +424,22 @@ def load_config(ws: Workspace) -> dict:
     return load_config_from_text(ws.config_path.read_text(), str(ws.config_path))
 
 
-def load_config_from_text(text: str, source: str) -> dict:
+def load_config_from_text(text: str, source: str, *,
+                          check_bind_exists: bool = True) -> dict:
     """The text-based core of `load_config`: validate a workspace-config TOML
     STRING into the normalized dict. `source` is the path/label used in error
     messages. Used both by `load_config` (from disk) and by `create`'s in-memory
     all-or-nothing preset expansion (which validates the composed text before any
-    file exists)."""
+    file exists).
+
+    `check_bind_exists` (default True) is the preset re-load knob: the normal
+    load path (`start`/`load_config`) existence-checks every host-bind SOURCE, but
+    the preset expand/refresh VALIDATION re-loads (`_expand_preset_into_text`,
+    `preset_refresh._classify`) pass False so an option-fed bind source that need
+    not exist until runtime (a socket dir the agent creates, `~/.ssh/...-agent`)
+    doesn't fail those internal re-validations. The real existence check still
+    runs at `start`, where CLAUDE.md says it belongs -- this only defers it for
+    the in-memory composition passes, never for a config loaded to actually run."""
     try:
         raw = tomllib.loads(text)
     except Exception as e:
@@ -445,8 +455,9 @@ def load_config_from_text(text: str, source: str) -> dict:
     # attached configs).
     if "preset" in raw:
         raise ConfigError(
-            f"{source}: `[[preset]]` is a template-only key -- it expands at "
-            f"create time; on an existing workspace use "
+            f"{source}: `[[preset]]` (and its `[preset.options]` sub-table) is a "
+            f"template-only construct -- it expands at create time and must not "
+            f"appear in a workspace config; on an existing workspace use "
             f"`credproxy workspace NAME preset add ...`")
 
     # Reject unknown top-level keys (a typo silently no-ops otherwise). Mirror the
@@ -499,7 +510,8 @@ def load_config_from_text(text: str, source: str) -> dict:
     raw_mounts = raw.get("mounts") or []
     if not isinstance(raw_mounts, list):
         raise ConfigError(f"{source}: `mounts` must be an array")
-    mounts = [_parse_mount(m, f"{source}: mounts[{i}]")
+    mounts = [_parse_mount(m, f"{source}: mounts[{i}]",
+                           expand_bind=check_bind_exists)
               for i, m in enumerate(raw_mounts)]
     if home:
         mounts.insert(0, {"kind": "volume", "name": "home", "target": home,

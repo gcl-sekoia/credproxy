@@ -270,7 +270,7 @@ def test_loader_rejects_preset_in_workspace_config(xdg):
     d = workspaces_config_dir()
     d.mkdir(parents=True, exist_ok=True)
     (d / "w.toml").write_text('image = "x"\n[[preset]]\nname = "github"\n')
-    with pytest.raises(ConfigError, match="template-only key"):
+    with pytest.raises(ConfigError, match="template-only construct"):
         load_config(Workspace("w"))
 
 
@@ -282,7 +282,7 @@ def test_loader_rejection_message_points_at_preset_add(xdg):
     (d / "w.toml").write_text('image = "x"\n[[preset]]\nname = "github"\n')
     code, out, err = _run(["workspace", "w", "inspect"])
     assert code == 1
-    assert "template-only key" in err and "preset add" in err
+    assert "template-only construct" in err and "preset add" in err
 
 
 # ---- attached workspaces -----------------------------------------------------
@@ -528,7 +528,7 @@ def test_loader_rejects_preset_in_attached_config(xdg):
     d.mkdir(parents=True, exist_ok=True)
     (d / "att.toml").write_text(
         'attach = { container = "foo" }\n[[preset]]\nname = "github"\n')
-    with pytest.raises(ConfigError, match="template-only key"):
+    with pytest.raises(ConfigError, match="template-only construct"):
         load_config(Workspace("att"))
 
 

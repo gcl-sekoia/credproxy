@@ -536,10 +536,9 @@ def test_secret_validate_at_prompt_loops(xdg, monkeypatch):
 
 
 def test_refresh_preserves_option_value(xdg, tmp_path):
-    # A real (existing) bind source: `refresh` re-validates the full config, which
-    # existence-checks a bind mount source (unlike `add`).
+    # An option-fed bind source that need NOT exist yet (S4): refresh's validation
+    # re-loads defer bind existence to `start`, so no mkdir is needed here.
     agent = tmp_path / "agent"
-    agent.mkdir()
     _write_preset("gitsign", _OPT_PRESET)
     _make_ws("w")
     _run(["workspace", "w", "preset", "add", "gitsign",
@@ -554,8 +553,7 @@ def test_refresh_preserves_option_value(xdg, tmp_path):
 
 
 def test_refresh_option_value_survives_definition_change(xdg, tmp_path):
-    agent = tmp_path / "agent"
-    agent.mkdir()
+    agent = tmp_path / "agent"   # need not exist (S4: bind existence deferred)
     _write_preset("gitsign", _OPT_PRESET)
     _make_ws("w")
     _run(["workspace", "w", "preset", "add", "gitsign",
@@ -608,3 +606,453 @@ def test_doctor_requires_only_option_skips(xdg):
     checks = doctor._preset_requires_checks(Workspace("w"), fetch=False)
     notes = [c for c in checks if "used only here" in c.message]
     assert notes and all(c.ok for c in notes)
+
+
+# ============================================================================
+# #59 v3 review follow-ups (S1-S4, N1-N7)
+# ============================================================================
+
+
+# ---- S1: EOF at a required prompt fails closed (no infinite busy-loop) --------
+
+
+def test_eof_at_required_prompt_aborts_no_loop(xdg):
+    """A genuine EOF (closed stdin) at a required-value prompt ABORTS cleanly
+    rather than spinning forever re-prompting (S1). The real `ask_option` runs
+    against an exhausted stdin (readline() -> "" every call)."""
+    _write_preset("req", _OPT_REQUIRED)
+    _make_ws("w")
+    # loose + TTY -> prompting is ON; stdin is empty so the first read is EOF.
+    code, out, err = _run_loose(["workspace", "w", "preset", "add", "req"],
+                                stdin_text="", stdin_isatty=True)
+    assert code == 1
+    assert "EOF" in (out + err) or "aborted" in (out + err)
+    # fail-closed: nothing stamped.
+    assert "sock_dir" not in _config_text("w") or "option" not in _config_text("w")
+
+
+def test_eof_distinct_from_empty_line(xdg, monkeypatch):
+    """An ENTERED empty line (a bare Enter -> "\\n") at a required string prompt
+    RE-PROMPTS; only a genuine EOF ("" with no newline) aborts. Drives the real
+    `ask_option`: empty line, then a real value."""
+    from credproxy_cli.porcelain import prompt as prompt_mod
+    import io
+    import sys
+    _write_preset("req", _OPT_REQUIRED)
+    spec = _load("req")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n/second-try\n"))
+    val = prompt_mod.ask_option(spec.options[0])
+    assert val == "/second-try"
+
+
+# ---- S2: doctor report-all on a stale stamped option value -------------------
+
+
+_STALE_ENUM = """
+    [[option]]
+    id = "mode"
+    type = "enum"
+    choices = ["{choices}"]
+
+    [[mount]]
+    bind = { option = "mode" }
+    target = "/x"
+
+    [[requires]]
+    kind = "path"
+    path = { option = "mode" }
+    hint = "the chosen dir must exist"
+"""
+
+_GOOD_CMD = """
+    [[mount]]
+    bind = "/lit"
+    target = "/g"
+
+    [[requires]]
+    kind = "command"
+    command = "sh"
+    hint = "install a shell"
+"""
+
+
+def test_doctor_stale_enum_option_reports_and_continues(xdg):
+    """A stale stamped enum value (a choice later dropped from `choices`) makes
+    `coerce_option_value` raise during the doctor re-run; the sweep must report a
+    FAILING check for that pack and STILL run every other pack's checks (S2)."""
+    # Choices are existing dirs so the advisory add-time prereq (the option also
+    # feeds a `path` requires) passes cleanly.
+    _write_preset("stale", _STALE_ENUM.replace("{choices}", '/tmp", "/usr'))
+    _write_preset("good", _GOOD_CMD)
+    _make_ws("w")
+    assert _run(["workspace", "w", "preset", "add", "stale",
+                 "--opt", "mode=/tmp"])[0] == 0
+    assert _run(["workspace", "w", "preset", "add", "good"])[0] == 0
+    # Drop "/tmp" from the enum's choices -> the stamped value is now stale.
+    _write_preset("stale", _STALE_ENUM.replace("{choices}", "/usr"))
+    from credproxy_cli.core import doctor
+    from credproxy_cli.core.workspace import Workspace
+    checks = doctor._preset_requires_checks(Workspace("w"), fetch=False)
+    stale = [c for c in checks if "stale" in c.id]
+    good = [c for c in checks if "good" in c.id]
+    assert stale and any(not c.ok for c in stale)   # failing check emitted
+    assert good                                     # the OTHER pack still ran
+
+
+# ---- S3: refresh dead-ends with a refresh-appropriate remedy ------------------
+
+
+def test_refresh_unrecoverable_option_gives_refresh_remedy(xdg):
+    """When a refresh can't read back an option-fed mount's value (target changed)
+    and the option has no default, the error must cite the REFRESH remedy, not the
+    nonexistent `--opt` flag alone; and it must write nothing (S3)."""
+    _write_preset("gs", _OPT_REQUIRED)                # option-fed mount, target /ssh-agent
+    _make_ws("w")
+    assert _run(["workspace", "w", "preset", "add", "gs",
+                 "--opt", "sock_dir=/tmp/a"])[0] == 0
+    before = _config_text("w")
+    # Re-target the option-fed mount so read-back joins on a target that no longer
+    # matches the stamped mount.
+    _write_preset("gs", _OPT_REQUIRED.replace('target = "/ssh-agent"',
+                                              'target = "/moved"'))
+    code, out, err = _run(["workspace", "w", "preset", "refresh", "gs"])
+    assert code == 1
+    msg = out + err
+    assert "could not recover option" in msg
+    assert "restore the stamped mount" in msg or "re-add the pack" in msg
+    assert _config_text("w") == before             # fail-closed: no write
+
+
+# ---- S4: option-fed bind sources that don't exist yet -----------------------
+
+
+_NOPE_A = """
+    [[mount]]
+    bind = "/nope/a"
+    target = "/a"
+    [[setup]]
+    run = "echo a"
+    order = 1
+"""
+
+_NOPE_B = """
+    [[mount]]
+    bind = "/nope/b"
+    target = "/b"
+    [[setup]]
+    run = "echo b"
+    order = 2
+"""
+
+
+def test_refresh_option_fed_missing_bind_is_byte_for_byte_noop(xdg, tmp_path):
+    """Refresh of an option-fed pack whose bind source does NOT exist yet is a
+    clean no-op -- the config bytes are unchanged (S4a / N7)."""
+    agent = tmp_path / "does-not-exist"    # never created
+    _write_preset("gitsign", _OPT_PRESET)
+    _make_ws("w")
+    assert _run(["workspace", "w", "preset", "add", "gitsign",
+                 "--opt", f"sock_dir={agent}"])[0] == 0
+    before = _config_text("w")
+    code, out, err = _run(["workspace", "w", "preset", "refresh", "gitsign"])
+    assert code == 0, out + err
+    assert _config_text("w") == before             # byte-for-byte identical
+
+
+def test_multi_preset_create_with_missing_bind_sources(xdg):
+    """A multi-`[[preset]]` template create succeeds even when entry 1 stamps a
+    bind source that doesn't exist yet -- entry 2's validation re-load must not
+    existence-check it (S4b)."""
+    _write_preset("nopea", _NOPE_A)
+    _write_preset("nopeb", _NOPE_B)
+    _template(_MIN + textwrap.dedent("""
+        [[preset]]
+        name = "nopea"
+        [[preset]]
+        name = "nopeb"
+    """))
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 0, out + err
+    text = _config_text("proj")
+    assert 'bind = "/nope/a"' in text and 'bind = "/nope/b"' in text
+
+
+def test_second_preset_add_with_missing_bind_source(xdg):
+    """A second `preset add` on a workspace whose FIRST pack stamped a not-yet-
+    existing bind source succeeds -- the add's validation re-load defers bind
+    existence to `start` (S4c)."""
+    _write_preset("nopea", _NOPE_A)
+    _write_preset("nopeb", _NOPE_B)
+    _make_ws("w")
+    assert _run(["workspace", "w", "preset", "add", "nopea"])[0] == 0
+    code, out, err = _run(["workspace", "w", "preset", "add", "nopeb"])
+    assert code == 0, out + err
+    text = _config_text("w")
+    assert 'bind = "/nope/a"' in text and 'bind = "/nope/b"' in text
+
+
+# ---- N1: --yes suppresses prompting ------------------------------------------
+
+
+def test_yes_suppresses_prompt_for_required_option(xdg, monkeypatch):
+    """Under `--yes` on loose+TTY, a required option must NOT prompt -- it takes
+    the structured fail (explicit -> default -> fail), never asking (N1)."""
+    _write_preset("req", _OPT_REQUIRED)
+    _make_ws("w")
+    from credproxy_cli.porcelain import prompt as prompt_mod
+    called = []
+    monkeypatch.setattr(prompt_mod, "ask_option",
+                        lambda opt: called.append(opt) or "/x")
+    code, out, err = _run_loose(["workspace", "w", "preset", "add", "req", "--yes"],
+                                stdin_text="", stdin_isatty=True)
+    assert code == 1 and not called
+    assert "sock_dir" in (out + err)
+
+
+def test_yes_takes_default_without_prompt(xdg, monkeypatch):
+    """Under `--yes`, a defaulted option takes its default silently (no prompt)."""
+    _write_preset("gitsign", _OPT_PRESET)
+    _make_ws("w")
+    from credproxy_cli.porcelain import prompt as prompt_mod
+    called = []
+    monkeypatch.setattr(prompt_mod, "ask_option",
+                        lambda opt: called.append(opt) or "/x")
+    code, out, err = _run_loose(["workspace", "w", "preset", "add", "gitsign",
+                                 "--yes"], stdin_text="", stdin_isatty=True)
+    assert code == 0, out + err
+    assert not called
+    assert 'bind = "~/.ssh/credproxy-agent"' in _config_text("w")
+
+
+# ---- N2: option-fed requires path renders {option=id}, never None ------------
+
+
+def test_require_summary_renders_option_marker(xdg):
+    from credproxy_cli.core.presets import get_preset, require_summary
+    _write_preset("gitsign", _OPT_PRESET)
+    spec = get_preset("gitsign")
+    rq = next(r for r in spec.requires if r.kind == "path")
+    assert require_summary(rq)["path"] == "{option=sock_dir}"
+
+
+def test_preset_list_json_shows_option_marker_path(xdg):
+    _write_preset("gitsign", _OPT_PRESET)
+    code, out, err = _run(["--json", "preset", "list"])
+    assert code == 0, out + err
+    rows = json.loads(out)
+    gs = next(r for r in rows if r["name"] == "gitsign")
+    paths = [rq.get("path") for rq in gs["requires"]]
+    assert "{option=sock_dir}" in paths
+    assert None not in paths
+
+
+# ---- N3: doctor splits requires-only vs. mount-fed-but-unrecoverable ----------
+
+
+_OPT_MOUNT_AND_REQ = """
+    [[option]]
+    id = "sock_dir"
+    type = "string"
+    description = "host socket dir (required)"
+
+    [[mount]]
+    bind = { option = "sock_dir" }
+    target = "/ssh-agent"
+
+    [[requires]]
+    kind = "path"
+    path = { option = "sock_dir" }
+    hint = "start the agent"
+"""
+
+
+def test_doctor_note_splits_mount_retargeted(xdg):
+    """When an option feeds a MOUNT (recoverable in principle) but its stamped
+    mount was re-targeted, the skip-note says so -- not 'used only here' (N3)."""
+    _write_preset("gs", _OPT_MOUNT_AND_REQ)
+    _make_ws("w")
+    assert _run(["workspace", "w", "preset", "add", "gs",
+                 "--opt", "sock_dir=/tmp/a"])[0] == 0
+    # Re-target the option-fed mount so the read-back join misses.
+    _write_preset("gs", _OPT_MOUNT_AND_REQ.replace('target = "/ssh-agent"',
+                                                   'target = "/moved"'))
+    from credproxy_cli.core import doctor
+    from credproxy_cli.core.workspace import Workspace
+    checks = doctor._preset_requires_checks(Workspace("w"), fetch=False)
+    notes = [c for c in checks if "requires-opt" in c.id]
+    assert notes and all(c.ok for c in notes)
+    assert any("missing or re-targeted" in c.message for c in notes)
+    assert not any("used only here" in c.message for c in notes)
+
+
+# ---- N4: free-typed unknown provider re-prompts ------------------------------
+
+
+def test_provider_prompt_reprompts_on_unknown(xdg, monkeypatch):
+    """A free-typed name that isn't a registered provider re-prompts rather than
+    returning an unresolvable name that errors out the command (N4)."""
+    from credproxy_cli.porcelain import prompt as prompt_mod
+    import io
+    import sys
+    monkeypatch.setattr(sys, "stdin", io.StringIO("no-such-provider\nenv\n"))
+    got = prompt_mod.ask_provider(None)
+    assert got == "env"
+
+
+# ---- N5: [preset . options] with TOML-legal spacing is stripped --------------
+
+
+def test_template_preset_options_tolerates_spacing(xdg):
+    _write_preset("gitsign", _OPT_PRESET)
+    _template(_MIN + textwrap.dedent("""
+        [[preset]]
+        name = "gitsign"
+        [preset . options]
+        sock_dir = "/spaced/agent"
+    """))
+    code, out, err = _run(["workspace", "create", "proj"])
+    assert code == 0, out + err
+    text = _config_text("proj")
+    assert 'bind = "/spaced/agent"' in text
+    # The `[[preset]]`/`[preset . options]` template constructs were stripped
+    # (provenance `# credproxy:preset` markers legitimately remain).
+    assert "[[preset]]" not in text and "[preset" not in text
+
+
+# ---- N6: unreferenced option surfaced to the pack author ---------------------
+
+
+_UNREF_OPT = """
+    [[option]]
+    id = "used"
+    type = "string"
+    default = "/host"
+
+    [[option]]
+    id = "unused"
+    type = "bool"
+    default = true
+
+    [[mount]]
+    bind = { option = "used" }
+    target = "/x"
+"""
+
+
+def test_unreferenced_option_reported(xdg):
+    from credproxy_cli.core.presets import describe_presets
+    _write_preset("p", _UNREF_OPT)
+    rows = describe_presets()
+    p = next(r for r in rows if r["name"] == "p")
+    assert p["unreferenced_options"] == ["unused"]
+
+
+def test_preset_list_notes_unreferenced_option(xdg):
+    _write_preset("p", _UNREF_OPT)
+    code, out, err = _run(["preset", "list"])
+    assert code == 0, out + err
+    assert "inert" in out and "unused" in out
+
+
+# ---- N7: env/setup marker rejection + enum/bool --opt coercion ---------------
+
+
+def test_marker_in_env_rejected(xdg):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.presets import load_presets
+    _write_preset("p", """
+        [[option]]
+        id = "x"
+        type = "string"
+        default = "v"
+        [[mount]]
+        bind = "/lit"
+        target = "/x"
+        [env]
+        FOO = { option = "x" }
+    """)
+    with pytest.raises(ConfigError, match="env.FOO must be a non-empty string"):
+        load_presets()
+
+
+def test_marker_in_setup_run_rejected(xdg):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.presets import load_presets
+    _write_preset("p", """
+        [[option]]
+        id = "x"
+        type = "string"
+        default = "v"
+        [[setup]]
+        run = { option = "x" }
+        order = 1
+    """)
+    with pytest.raises(ConfigError, match="run` is required and must be a non-empty string"):
+        load_presets()
+
+
+def test_marker_in_setup_order_rejected(xdg):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.presets import load_presets
+    _write_preset("p", """
+        [[option]]
+        id = "x"
+        type = "string"
+        default = "v"
+        [[setup]]
+        run = "echo hi"
+        order = { option = "x" }
+    """)
+    with pytest.raises(ConfigError, match="order` must be an integer"):
+        load_presets()
+
+
+_ENUM_BOOL = """
+    [[option]]
+    id = "mode"
+    type = "enum"
+    choices = ["/opt/a", "/opt/b"]
+    [[option]]
+    id = "flag"
+    type = "bool"
+    default = false
+    [[mount]]
+    bind = { option = "mode" }
+    target = "/x"
+    [[requires]]
+    kind = "path"
+    path = { option = "mode" }
+    hint = "h"
+"""
+
+
+def test_opt_enum_rejects_non_choice(xdg):
+    _write_preset("p", _ENUM_BOOL)
+    _make_ws("w")
+    code, out, err = _run(["workspace", "w", "preset", "add", "p",
+                           "--opt", "mode=zzz", "--opt", "flag=false"])
+    assert code == 1
+    assert "not one of the choices" in (out + err)
+
+
+def test_opt_bool_rejects_garbage(xdg):
+    _write_preset("p", _ENUM_BOOL)
+    _make_ws("w")
+    code, out, err = _run(["workspace", "w", "preset", "add", "p",
+                           "--opt", "mode=/opt/a", "--opt", "flag=garbage"])
+    assert code == 1
+    assert "true/false" in (out + err)
+
+
+def test_opt_bool_accepts_uppercase_true(xdg):
+    from credproxy_cli.core.presets import resolve_options
+    _write_preset("p", _ENUM_BOOL)
+    spec = _load("p")
+    vals, missing = resolve_options(spec, {"mode": "/opt/a", "flag": "TRUE"})
+    assert missing == [] and vals["flag"] is True
+
+
+def test_opt_duplicate_id_last_wins(xdg):
+    from credproxy_cli.porcelain.cli import _parse_opt_flags
+    out = _parse_opt_flags(["mode=/opt/a", "mode=/opt/b"])
+    assert out["mode"] == "/opt/b"

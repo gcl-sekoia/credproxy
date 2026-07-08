@@ -612,6 +612,12 @@ class Renderer:
             for s in setup:
                 u = "" if s.get("user", "workspace") == "workspace" else f" ({s['user']})"
                 print(f"  setup   [{s['order']}] {s['run']}{u}")
+            unref = p.get("unreferenced_options") or []
+            if unref:
+                # Author-facing note (N6): these options resolve a value that no
+                # marker uses. A `bool` option has no marker sink yet by design.
+                print(f"  note: option(s) referenced by no marker (inert): "
+                      f"{', '.join(unref)}")
 
     def _preset_summary(self, ws: str, preset: str, bindings: list[dict],
                         rules: list[dict], newly_intercepted: list[str],

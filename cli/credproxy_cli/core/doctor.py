@@ -416,15 +416,44 @@ def _preset_requires_checks(ws: Workspace, *, fetch: bool,
         # option's value read back from the stamped mounts (or its default). An
         # option feeding ONLY the requires path (no stamped mount, no default) is
         # unrecoverable -> degrade that check to a skip-with-note (never crash).
-        resolved_requires, skipped_opt = _resolve_pack_requires(spec, text)
-        for j, rq in enumerate(skipped_opt):
+        # A stale stamped option value (e.g. an enum choice later dropped from the
+        # pack's `choices`) makes `coerce_option_value` raise -- catch it and emit
+        # a FAILING check for just this pack so the rest of the sweep still runs
+        # (report-all, the #58 contract; S2).
+        try:
+            resolved_requires, skipped_opt = _resolve_pack_requires(spec, text)
+        except (CredproxyError, tomllib.TOMLDecodeError) as e:
             out.append(Check(
-                f"ws:{ws.name}:preset:{pack}:requires-opt[{j}]", True,
-                f"[{ws.name}] preset '{pack}' requires ({rq.kind}): path is "
-                f"supplied by option '{rq.path_option}', which is used only here "
-                f"(nowhere stamped) -- can't recover its value, check skipped",
-                "give the option a default, or also use it in a stamped mount, so "
-                "its value is recoverable at doctor time"))
+                f"ws:{ws.name}:preset:{pack}:requires-opt", False,
+                f"[{ws.name}] preset '{pack}' requires: a stamped option value can't "
+                f"be resolved ({e})",
+                "re-add the pack with a valid --opt value (`preset add "
+                f"{pack} --opt ...`), or fix the pack's `[[option]]` definition"))
+            continue
+        # An option feeds a MOUNT source (recoverable via read-back) vs. feeds
+        # ONLY the requires path (nothing stamped to read back). The message splits
+        # on this: a requires-only option is unrecoverable BY DESIGN, but an option
+        # that DOES feed a mount whose stamp is gone/re-targeted is a repairable
+        # drift, not an inherent limitation (N3).
+        mount_fed = {m.source_option for m in spec.mounts if m.source_option}
+        for j, rq in enumerate(skipped_opt):
+            if rq.path_option in mount_fed:
+                msg = (f"[{ws.name}] preset '{pack}' requires ({rq.kind}): path is "
+                       f"supplied by option '{rq.path_option}', but its stamped "
+                       f"mount is missing or re-targeted -- can't recover its "
+                       f"value, check skipped")
+                hint = (f"restore the option-fed mount, or re-add the pack "
+                        f"(`preset add {pack} --opt {rq.path_option}=...`), so the "
+                        f"value is recoverable at doctor time")
+            else:
+                msg = (f"[{ws.name}] preset '{pack}' requires ({rq.kind}): path is "
+                       f"supplied by option '{rq.path_option}', which is used only "
+                       f"here (nowhere stamped) -- can't recover its value, check "
+                       f"skipped")
+                hint = ("give the option a default, or also use it in a stamped "
+                        "mount, so its value is recoverable at doctor time")
+            out.append(Check(
+                f"ws:{ws.name}:preset:{pack}:requires-opt[{j}]", True, msg, hint))
         results = prereqs.evaluate(resolved_requires, provider=provider,
                                    secret=_secret_ref(secret), do_fetch=fetch,
                                    fetched_refs=fetched_refs)

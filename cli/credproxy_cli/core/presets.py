@@ -763,9 +763,26 @@ def describe_presets() -> list[dict]:
             "setup": [dict(s) for s in spec.setup],
             "requires": [require_summary(rq) for rq in spec.requires],
             "options": [option_summary(o) for o in spec.options],
+            # Options no marker references (mount source / requires path). Purely
+            # advisory for the pack AUTHOR (N6): such an option is inert -- its
+            # value is prompted/defaulted but substituted nowhere. A `bool` option
+            # is inherently here (host-half markers are string/path/ref, never a
+            # bool), a documented gap: `bool` parses (per the locked spec) but has
+            # no marker sink yet.
+            "unreferenced_options": _unreferenced_option_ids(spec),
         }
         for spec in sorted(load_presets().values(), key=lambda s: s.name)
     ]
+
+
+def _unreferenced_option_ids(spec: PresetSpec) -> list[str]:
+    """Option ids no `{ option = "id" }` marker references (mount source or
+    requires path). An unreferenced option is a likely pack-author mistake (its
+    value is resolved but substituted nowhere) -- surfaced as a `preset list` note
+    (N6). Declaration order preserved."""
+    referenced = {m.source_option for m in spec.mounts if m.source_option}
+    referenced |= {rq.path_option for rq in spec.requires if rq.path_option}
+    return [o.id for o in spec.options if o.id not in referenced]
 
 
 def option_summary(o: _Option) -> dict:
@@ -786,7 +803,12 @@ def require_summary(rq: _Require) -> dict:
     carried, plus `fetch` for a provider check."""
     out: dict = {"kind": rq.kind, "hint": rq.hint}
     if rq.kind == "path":
-        out["path"] = rq.path
+        # An option-fed path (`path = { option = "id" }`) carries no literal until
+        # expansion; render the marker `{option=id}` (like a mount source does in
+        # `describe_presets`) so `preset list` shows which option feeds it -- never
+        # a bare `None` (N2).
+        out["path"] = (f"{{option={rq.path_option}}}" if rq.path_option
+                       else rq.path)
     elif rq.kind == "command":
         out["command"] = rq.command
     elif rq.kind == "env":
@@ -968,13 +990,18 @@ def _finalize_option_values(spec: PresetSpec, values: dict) -> dict:
     return out
 
 
-def _substitute_mount_options(spec: PresetSpec, values: dict) -> PresetSpec:
+def _substitute_mount_options(spec: PresetSpec, values: dict,
+                              context: str = "add") -> PresetSpec:
     """Substitute resolved option values into the MOUNT source markers only,
     returning a spec whose mounts are literal. Only options a mount references need
     a value (explicit or default) -- an option feeding ONLY a `[[requires]]` path is
     irrelevant here (requires aren't part of the expansion), so `refresh`, which
     can read back a mount-feeding option but not a requires-only one, still builds.
-    Each substituted source is re-validated through the shared `config._parse_mount`."""
+    Each substituted source is re-validated through the shared `config._parse_mount`.
+
+    `context` (`"add"` | `"refresh"`) flavors the unresolved-option remedy: at
+    `add`/`create` an option value comes from `--opt`; at `refresh` there is no
+    `--opt` flag and the value is read back from the stamped config (S3)."""
     from . import config as core_config
 
     new_mounts: list[_PresetMount] = []
@@ -982,7 +1009,7 @@ def _substitute_mount_options(spec: PresetSpec, values: dict) -> PresetSpec:
         if m.source_option is None:
             new_mounts.append(m)
             continue
-        literal = _resolve_one_option(spec, m.source_option, values)
+        literal = _resolve_one_option(spec, m.source_option, values, context)
         where = f"preset '{spec.name}' mount (option '{m.source_option}')"
         table = mount_table(replace(m, value=literal, source_option=None))
         core_config._parse_mount(table, where, expand_bind=False)
@@ -990,14 +1017,23 @@ def _substitute_mount_options(spec: PresetSpec, values: dict) -> PresetSpec:
     return replace(spec, mounts=tuple(new_mounts))
 
 
-def _resolve_one_option(spec: PresetSpec, oid: str, values: dict):
+def _resolve_one_option(spec: PresetSpec, oid: str, values: dict,
+                        context: str = "add"):
     """The final value for option `oid`: `values[oid]` (coerced) else its declared
-    default, else a ConfigError."""
+    default, else a ConfigError. `context` selects the remedy (see
+    `_substitute_mount_options`): `add`/`create` point at `--opt`; `refresh` points
+    at the read-back path (an option-fed mount was removed or its target changed)."""
     opt = next(o for o in spec.options if o.id == oid)
     if oid in values:
         return coerce_option_value(opt, values[oid], f"preset '{spec.name}' option")
     if opt.has_default:
         return opt.default
+    if context == "refresh":
+        raise ConfigError(
+            f"preset '{spec.name}': could not recover option '{oid}' from the "
+            f"stamped config (the option-fed mount was removed or its target "
+            f"changed); re-add the pack (`preset add {spec.name} --opt "
+            f"{oid}=...`) or restore the stamped mount")
     raise ConfigError(
         f"preset '{spec.name}': unresolved option '{oid}' (supply --opt {oid}=value)")
 
@@ -1105,7 +1141,8 @@ class PresetExpansion:
 
 def build_preset(preset: str, provider: str | None = None,
                  secret: str | None = None,
-                 options: dict | None = None) -> PresetExpansion:
+                 options: dict | None = None,
+                 context: str = "add") -> PresetExpansion:
     """Expand `preset` into a `PresetExpansion`. All bindings share one
     freshly-generated placeholder and resolve the same single-slot `secret` ref
     via `provider` (both None for a pack with no bindings). Each rule's `name` is
@@ -1116,12 +1153,14 @@ def build_preset(preset: str, provider: str | None = None,
     `[[option]]`s they are substituted into the host-half markers (mount source)
     BEFORE stamping, so the expansion is entirely literal. A missing value falls
     back to the option's default; an option with neither raises (porcelain resolves
-    + reports the structured missing error before reaching here)."""
+    + reports the structured missing error before reaching here). `context`
+    (`"add"` | `"refresh"`) flavors that unresolved-option remedy (S3: refresh has
+    no `--opt` flag, so its remedy points at the read-back/re-add path)."""
     spec = get_preset(preset)
     if spec.options:
         # Mount-only substitution: the expansion carries no requires, so a
         # requires-only option (which `refresh` can't read back) is never needed.
-        spec = _substitute_mount_options(spec, options or {})
+        spec = _substitute_mount_options(spec, options or {}, context)
     placeholder = spec.placeholder.generate() if spec.placeholder else None
     bindings = tuple(
         Binding(

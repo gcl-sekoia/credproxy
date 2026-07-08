@@ -327,8 +327,11 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
 _PRESET_BLOCK_RE = re.compile(r"^\s*\[\[\s*preset\s*\]\]\s*(#.*)?$")
 # A `[preset.<child>]` sub-table header (e.g. `[preset.options]`, #59) that BELONGS
 # to the current `[[preset]]` element -- folded INTO its span so the strip removes
-# it too (mirrors the `[rule.headers]` child handling in `_block_spans`).
-_PRESET_CHILD_RE = re.compile(r"^\s*\[\s*preset\.[^\[\]\n]+\]\s*(#.*)?$")
+# it too (mirrors the `[rule.headers]` child handling in `_block_spans`). TOML
+# permits whitespace around the dotted-key separator (`[preset . options]`), so the
+# pattern tolerates it too (N5) rather than letting the child header escape the
+# strip and fail create with a misleading survivor error.
+_PRESET_CHILD_RE = re.compile(r"^\s*\[\s*preset\s*\.\s*[^\[\]\n]+\]\s*(#.*)?$")
 
 
 def _strip_preset_blocks(text: str) -> str:
@@ -1188,7 +1191,10 @@ def _expand_preset_into_text(text: str, exp, preset_name: str, source: str,
 
     # Normalized container config from the current text; attach detection rides it
     # (attached -> empty mounts/env, so the container-half loops below are no-ops).
-    cfg = core_config.load_config_from_text(text, source)
+    # Defer host-bind existence (check_bind_exists=False): a prior stamp (or this
+    # pack's own option-fed mount) may name a source that need not exist until
+    # runtime (a socket dir, `~/.ssh/...-agent`) -- `start` existence-checks it.
+    cfg = core_config.load_config_from_text(text, source, check_bind_exists=False)
     attached = cfg.get("attach") is not None
 
     # An attached workspace has no credproxy-managed container, so it can't accept

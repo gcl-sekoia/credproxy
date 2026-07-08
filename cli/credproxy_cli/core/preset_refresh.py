@@ -452,7 +452,8 @@ def _classify(text: str, preset_name: str, spec: PresetSpec, *,
     # recoverable; a requires-only option isn't part of the expansion, so its
     # absence here is harmless. build_preset defaults any option it can't read.
     option_values = _read_back_options(stamped, spec)
-    exp = build_preset(preset_name, provider, secret, options=option_values)
+    exp = build_preset(preset_name, provider, secret, options=option_values,
+                       context="refresh")
     if placeholder is not None:
         # Preserve the SHARED placeholder read back from the file (a
         # definition-new part inherits it too, since build_preset shares one).
@@ -462,8 +463,10 @@ def _classify(text: str, preset_name: str, spec: PresetSpec, *,
 
     # Existing (current-file) identities, so an `added` item that would collide
     # with UNMANAGED config (a hand-declared mount target / env key) is reported
-    # rather than blindly stamped into a duplicate.
-    cfg = core_config.load_config_from_text(text, source)
+    # rather than blindly stamped into a duplicate. Defer host-bind existence
+    # (check_bind_exists=False): an option-fed bind source that need not exist
+    # until runtime must not fail this internal re-validation (`start` checks it).
+    cfg = core_config.load_config_from_text(text, source, check_bind_exists=False)
     existing_targets = {_norm_target(m["target"]) for m in cfg["mounts"]}
     existing_env = dict(cfg["env"])
 
@@ -649,8 +652,10 @@ def _verify(new_text: str, preset_name: str, spec: PresetSpec, *,
             f"preset refresh produced invalid TOML ({e}); no changes were "
             f"written")
     # Full re-validation (same parse/validate `start` runs): binding/rule name
-    # collisions, script resolution, mount set, env/setup shapes.
-    core_config.load_config_from_text(new_text, source)
+    # collisions, script resolution, mount set, env/setup shapes. Bind existence
+    # is deferred (check_bind_exists=False) -- an option-fed bind source may not
+    # exist until runtime; `start` is the enforcement point (S4).
+    core_config.load_config_from_text(new_text, source, check_bind_exists=False)
     core_bindings.validate(
         _bindings_with_auto_names(_parse_bindings(raw, source)), source)
     core_rules.validate(

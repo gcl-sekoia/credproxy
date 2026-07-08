@@ -16,16 +16,30 @@ import sys
 
 
 def prompting_enabled(ctx) -> bool:
-    """Prompting fires only on the loose surface with a real TTY on stdin. Strict
-    (scriptable) and loose-without-a-TTY both fail closed toward the structured
-    missing error -- never hang waiting on input."""
-    return ctx.loose and sys.stdin.isatty()
+    """Prompting fires only on the loose surface with a real TTY on stdin, and
+    NOT under `--yes`. Strict (scriptable) and loose-without-a-TTY both fail closed
+    toward the structured missing error -- never hang waiting on input. `--yes`
+    is a non-interactive intent (take explicit -> default -> structured fail), so
+    it suppresses prompting too (N1, mirroring the missing-proxy-image gate, where
+    `--yes` builds/defaults without asking)."""
+    return ctx.loose and sys.stdin.isatty() and not ctx.assume_yes
 
 
 def _ask(prompt: str) -> str:
-    """Write `prompt` to stderr and read one stripped line from stdin. EOF -> ""."""
+    """Write `prompt` to stderr and read one stripped line from stdin.
+
+    A GENUINE EOF (closed/exhausted stdin -- `readline()` returns `""` with NO
+    trailing newline) ABORTS the command via the structured `fail()` path (mirrors
+    the `_confirm_*` gates' EOF->abort), so a required-value loop can never spin
+    forever on a Ctrl-D (S1). An ENTERED empty line (`"\n"`) returns `""` and the
+    caller re-prompts -- the distinction is exactly readline's `""` (EOF) vs
+    `"\n"` (a bare Enter)."""
+    from .render import fail
     print(prompt, end="", file=sys.stderr, flush=True)
-    return sys.stdin.readline().strip()
+    line = sys.stdin.readline()
+    if line == "":                       # EOF: no newline, distinct from "\n"
+        fail("aborted: EOF at a required prompt (no input)")
+    return line.strip()
 
 
 # ---- pack options ------------------------------------------------------------
@@ -89,6 +103,7 @@ def ask_provider(default: str | None):
     from ..core.providers import list_providers
 
     providers = [p.name for p in list_providers()]
+    known = set(providers)
     for i, name in enumerate(providers, 1):
         mark = "  (default)" if name == default else ""
         print(f"  {i}) {name}{mark}", file=sys.stderr)
@@ -99,8 +114,15 @@ def ask_provider(default: str | None):
             return default
         if reply.isdigit() and 1 <= int(reply) <= len(providers):
             return providers[int(reply) - 1]
+        if reply in known:
+            return reply
         if reply:
-            return reply       # a free-typed name (resolved by the caller)
+            # A free-typed name that doesn't resolve: re-prompt rather than let
+            # `find_provider` error out the whole command (N4, symmetric with the
+            # secret validate-and-loop).
+            print(f"  unknown provider {reply!r} -- pick one of: "
+                  f"{', '.join(providers) or '(none registered)'}", file=sys.stderr)
+            continue
         print("  a provider is required", file=sys.stderr)
 
 
