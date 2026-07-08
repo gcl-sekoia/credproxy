@@ -64,9 +64,10 @@ def test_claude_code_is_the_umbrella_enablement_pack():
     orders = {s["order"]: s["run"] for s in exp.setup}
     assert "claude-code-setup.sh" in orders[20]
     assert "session-context.sh --install" in orders[50]
-    # Ships the session runner + its default fragments (credproxy + tools).
+    # Ships the session runner + its default fragments (credproxy, config-dir, tools).
     targets = {m.target for m in exp.mounts}
     assert {"/opt/session-context.sh", "/opt/session-context.d/10-credproxy.sh",
+            "/opt/session-context.d/15-claude-config.sh",
             "/opt/session-context.d/20-tools.sh"} <= targets
     # Keeps the claude CLI on the latest release.
     assert dict(exp.env)["MISE_MINIMUM_RELEASE_AGE_EXCLUDES"] == "claude"

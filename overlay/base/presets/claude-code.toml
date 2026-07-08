@@ -35,8 +35,8 @@ order = 20
 
 # SessionStart orientation: a Claude Code hook that concatenates every
 # /opt/session-context.d/*.sh fragment (this pack ships the credproxy `/setup`
-# summary + an installed-tools note read from toolchain's lists; a profile can drop
-# more, e.g. 50-example's example.sh).
+# summary, a redirected-CLAUDE_CONFIG_DIR note, and an installed-tools note read from
+# toolchain's lists; a profile can drop more, e.g. 50-example's example.sh).
 [[mount]]
 overlay = "session-context.sh"
 target  = "/opt/session-context.sh"
@@ -44,6 +44,12 @@ target  = "/opt/session-context.sh"
 [[mount]]
 overlay = "session-context.d/credproxy.sh"
 target  = "/opt/session-context.d/10-credproxy.sh"
+
+# Announce a redirected CLAUDE_CONFIG_DIR (e.g. the persist pack's /persist/claude);
+# inert when unset/default, so it ships in base regardless of which packs set it.
+[[mount]]
+overlay = "session-context.d/claude-config.sh"
+target  = "/opt/session-context.d/15-claude-config.sh"
 
 [[mount]]
 overlay = "session-context.d/tools.sh"
