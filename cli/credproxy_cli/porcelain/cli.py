@@ -1007,10 +1007,36 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
 
+    from ..core import config as core_config
+    from ..core import preset_stamp
+    from ..core.presets import mount_table
+
+    exp = build_preset(a.preset, provider, secret)
+    new_b, new_r = list(exp.bindings), list(exp.rules)
+
     with ws.lock():                          # atomic read-validate-write
+        attached = core_config.quick_attach(ws)
+        # An attached workspace has no credproxy-managed container, so it can't
+        # accept the container half (mounts/env/setup). Binding/rule-only packs
+        # still apply.
+        if attached and exp.has_container_half:
+            fail(f"preset '{a.preset}' carries container-half config "
+                 f"(mounts/env/setup), but workspace '{ws.name}' is attached -- "
+                 f"its container is managed externally, so credproxy can't stamp a "
+                 f"mount/env/setup for it. Only binding/rule-only packs apply to an "
+                 f"attached workspace.")
+
+        # Double-add guard: any provenance marker for THIS preset already present
+        # (protects pure-container packs, which have no binding-name clash to
+        # trip). Fail before any write.
+        if preset_stamp.already_applied(ws.config_path.read_text(), a.preset):
+            fail(f"preset '{a.preset}' is already applied to this workspace "
+                 f"'{ws.name}' (its provenance marker is in the config; remove "
+                 f"the stamped blocks first to re-apply)")
+
         existing_b = core_bindings.load_bindings(ws)
         existing_r = core_rules.load_rules(ws)
-        new_b, new_r = build_preset(a.preset, provider, secret)
+        cfg = core_config.load_config(ws) if not attached else None
 
         # Collision: a generated <preset>-<suffix> clashing with an existing name
         # fails the WHOLE add before any write (no partial stamp).
@@ -1025,8 +1051,44 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
                 fail(f"preset '{a.preset}' would create rule '{r.name}', which "
                      f"already exists in workspace '{ws.name}' (no changes made)")
 
-        # Full semantic validation on the combined sets (cross-binding/rule
-        # collisions, script resolution) before writing.
+        # Container-half collisions (managed workspaces only; attached is already
+        # rejected above if it carries any). Normalize each new mount through the
+        # SAME config._parse_mount (bind kept literal) so the merged-set check
+        # matches load_config exactly.
+        env_to_stamp: list[tuple[str, str]] = []
+        skipped_env: list[str] = []
+        if cfg is not None:
+            new_mount_norms = [
+                core_config._parse_mount(mount_table(m),
+                                         f"preset '{a.preset}' mount",
+                                         expand_bind=False)
+                for m in exp.mounts
+            ]
+            existing_targets = {m["target"].rstrip("/") or "/" for m in cfg["mounts"]}
+            for nm in new_mount_norms:
+                t = nm["target"].rstrip("/") or "/"
+                if t in existing_targets:
+                    fail(f"preset '{a.preset}' would mount at {nm['target']!r}, "
+                         f"which workspace '{ws.name}' already mounts (no changes made)")
+            core_config.validate_mount_set(
+                cfg["mounts"] + new_mount_norms, str(ws.config_path), cfg["user"])
+
+            # env: absent -> stamp; present-identical -> skip + note; present but
+            # DIFFERENT -> fail the whole add.
+            for k, v in exp.env:
+                if k in cfg["env"]:
+                    if cfg["env"][k] == v:
+                        skipped_env.append(k)
+                        continue
+                    fail(f"preset '{a.preset}' sets env {k}={v!r}, but workspace "
+                         f"'{ws.name}' already sets {k}={cfg['env'][k]!r} "
+                         f"(different value; no changes made)")
+                env_to_stamp.append((k, v))
+        else:
+            env_to_stamp = list(exp.env)
+
+        # Full semantic validation on the combined binding/rule sets (cross-binding
+        # /rule collisions, script resolution) before writing.
         if new_b:
             core_bindings.validate(existing_b + new_b, str(ws.config_path))
         if new_r:
@@ -1038,20 +1100,39 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
             + [h for r in new_r for h in r.hosts]
         newly = _newly_intercepted(existing_hosts, new_hosts)
 
-        if new_b:
-            core_bindings.append_bindings(ws, new_b)
-        if new_r:
-            core_rules.append_rules(ws, new_r)
+        preset_stamp.stamp(
+            ws, a.preset, exp.rev,
+            bindings=new_b, rules=new_r,
+            mounts=list(exp.mounts), env_items=env_to_stamp,
+            setup=[dict(s) for s in exp.setup])
 
-    from ..core import config as core_config
-    render.OUT.preset_applied(ws.name, a.preset, [{
-        "name": b.name, "injector": b.injector, "provider": b.provider,
-        "secret": b.secret, "hosts": list(b.hosts), "placeholder": b.placeholder,
-        "env": b.env,
-    } for b in new_b], [{
-        "name": r.name, "hosts": list(r.hosts), "action": r.action,
-        "script": r.script, "visible": r.effective_visible,
-    } for r in new_r], newly, attached=core_config.quick_attach(ws))
+    # A stamped container half drifts the spec hash; if the workspace container
+    # already exists, it must be recreated to apply -- announce with the remedy.
+    # `preset add` is otherwise a pure config edit, so a missing/unreachable
+    # docker must not fail it: if we can't check, assume no container.
+    container_exists = False
+    if not attached and exp.has_container_half:
+        from ..core.errors import CredproxyError
+        try:
+            container_exists = \
+                core_docker.container_status(ws.ws_container) is not None
+        except CredproxyError:
+            container_exists = False
+    render.OUT.preset_applied(
+        ws.name, a.preset,
+        [{"name": b.name, "injector": b.injector, "provider": b.provider,
+          "secret": b.secret, "hosts": list(b.hosts), "placeholder": b.placeholder,
+          "env": b.env} for b in new_b],
+        [{"name": r.name, "hosts": list(r.hosts), "action": r.action,
+          "script": r.script, "visible": r.effective_visible} for r in new_r],
+        newly,
+        mounts=[{"kind": m.kind, "source": m.value, "target": m.target}
+                for m in exp.mounts],
+        env=[{"key": k, "value": v} for k, v in env_to_stamp],
+        skipped_env=skipped_env,
+        setup=[dict(s) for s in exp.setup],
+        recreate=(container_exists and exp.has_container_half),
+        attached=attached)
 
 
 def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
@@ -1938,17 +2019,21 @@ _BINDING_ADD_HELP = (
 
 _PRESET_ADD_HELP = (
     "credproxy workspace NAME preset add PRESET -- apply a service setup pack:\n"
-    "stamp its coordinated `[[binding]]` set AND its `[[rule]]` guardrails into\n"
-    "the workspace, all-or-nothing. `credproxy preset list` shows every pack.\n"
+    "stamp its `[[binding]]` set, its `[[rule]]` guardrails, AND its container\n"
+    "half (`[[mount]]`/`[env]`/`[[setup]]`) into the workspace, all-or-nothing.\n"
+    "`credproxy preset list` shows every pack.\n"
     "\n"
     "  --provider PROV   where binding values come from (a binding-bearing preset\n"
-    "                    may supply a default; a pure-rule pack needs none).\n"
+    "                    may supply a default; a rule/container-only pack needs none).\n"
     "  --secret REF      the reference the provider resolves (see `binding add`);\n"
     "                    may be defaulted by a preset for its default provider.\n"
     "\n"
-    "Expansion, not a link: it writes ordinary blocks (names `<preset>-<suffix>`);\n"
-    "edit/remove afterward is normal. A rule on a host with no binding flips that\n"
-    "host to TLS-intercepted -- `preset add` announces any such host.\n"
+    "Expansion, not a link: it writes ordinary blocks/config (names\n"
+    "`<preset>-<suffix>`); edit/remove afterward is normal. A binding/rule on a\n"
+    "host with no prior binding flips it to TLS-intercepted; the container half\n"
+    "changes the workspace spec (restart to apply if the container exists) --\n"
+    "`preset add` announces both. An attached workspace refuses a container-half\n"
+    "pack. Re-adding the same pack is refused (provenance guard).\n"
 )
 
 _BINDING_TEST_HELP = (

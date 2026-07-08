@@ -149,9 +149,21 @@ name as a builtin (or a less-specific overlay) **replaces** it; a new name
 and a **preset** that wires it (`presets/org-guardrails.toml`, an optional
 `[[rule]]` array; see [`rules.md`](../reference/rules.md#distributing-a-policy-script--preset))
 travel together in the overlay, so a workspace applies the whole policy with one
-`credproxy workspace NAME preset add org-guardrails`. A preset can carry bindings,
-rules, or both — a **pure-rule** pack (no `[placeholder]`/provider) is a
-credential-free policy bundle.
+`credproxy workspace NAME preset add org-guardrails`. A preset can carry bindings
+(`[[part]]`), rules (`[[rule]]`), **and the container half** (`[[mount]]`, `[env]`,
+`[[setup]]`) — any subset. A **pure-rule** pack (no `[placeholder]`/provider) is a
+credential-free policy bundle; a **pure-container** pack (mounts/env/setup only)
+ships a service's setup without a credential.
+
+**A pack's files ride the pack's tier.** A `[[mount]]` in a preset that names an
+`overlay = "setup.d/x.sh"` source resolves within the pack's *own* tier — the
+stamp records the qualified form `overlay = "<tier>:setup.d/x.sh"` (the tier is
+an overlay basename, or `user`/`builtin`), so the file is pinned to the pack and
+unaffected by overlay reordering/shadowing. `[[setup]]` steps must declare an
+explicit `order` (packs are explicit about ordering); host-bind sources are baked
+as literal v1 defaults, existence-checked when the workspace starts. Each stamped
+block carries an inert `# credproxy:preset …` provenance comment, so re-applying
+the same pack is refused rather than duplicated.
 
 **Template vs. preset — both exist on purpose.** Baking `[[binding]]`/`[[rule]]`
 blocks into `workspace.template.toml` applies them to **every** workspace at

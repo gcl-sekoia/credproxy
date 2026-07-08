@@ -84,6 +84,58 @@ ship credential-free [rules](../concepts.md#rule) — guardrails like "block
 `DELETE` on this host" — and a preset can be rules only, with no credential at
 all. Rules are the next chapter.
 
+## Presets can carry the container half too
+
+A service often needs more than a token: a setup script, an env var, a mounted
+file. A preset can ship those as well — `[[mount]]`, `[env]`, and `[[setup]]`
+sections that stamp into the container-side of your workspace config, right
+alongside the bindings. A pack can be *only* container config, with no
+credential at all. A `github-auth` pack might look like this:
+
+```toml
+[placeholder]
+prefix = "ghp_"
+length = 40
+charset = "alnumeric"
+
+[[part]]
+suffix   = "api"
+injector = "bearer"
+hosts    = ["api.github.com"]
+env      = "GITHUB_TOKEN"
+
+[[mount]]
+overlay = "setup.d/github-auth.sh"   # a file the pack ships (see Overlays)
+target  = "/opt/github-auth.sh"
+
+[[setup]]
+run   = "bash /opt/github-auth.sh"
+order = 45                            # `order` is required in a pack
+```
+
+Applying it stamps the mount and the setup step next to the bindings — as plain
+config, still **expansion, not a link**:
+
+```console
+$ credp preset add github-auth
+applied preset 'github-auth' to workspace 'myproject': 1 binding(s), 0 rule(s), 1 mount(s), 1 setup step(s)
+  binding github-auth-api    bearer  api.github.com
+  mount   overlay user:setup.d/github-auth.sh -> /opt/github-auth.sh
+  setup   [45] bash /opt/github-auth.sh
+```
+
+The container half (`mounts`/`env`/`setup`) changes the workspace spec, so if
+the container already exists credproxy tells you to `start` again to apply it.
+Each stamped block carries an inert `# credproxy:preset …` provenance comment so
+a second `preset add` of the same pack is refused rather than duplicated. An
+[attached workspace](../advanced/composability.md) — whose container credproxy
+does not manage — refuses a container-half pack; binding/rule-only packs still
+apply there.
+
+Files a pack ships (that `setup.d/github-auth.sh`) live in the same layered
+registry as the pack itself and are resolved from the pack's own tier →
+[Overlays](../advanced/overlays.md).
+
 > [!WARNING]
 > Notice the `newly intercepted` line in the output. Adding a binding (or a rule)
 > for a host tells the proxy to open TLS to it. A workspace that has not

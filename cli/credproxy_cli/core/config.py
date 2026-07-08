@@ -152,12 +152,63 @@ def _bind_source(raw_src: str, where: str) -> str:
     return str(src)
 
 
+def _tier_roots() -> dict[str, Path]:
+    """Map each mount-source TIER *qualifier* -> its root dir: every configured
+    overlay by basename (from `paths.overlay_dirs()`), plus the reserved literals
+    `user` (the XDG config dir) and `builtin`. The reserved literals win over a
+    same-named overlay basename. This is the set a `TIER:REL` qualified overlay
+    source resolves against (see `_overlay_source`)."""
+    from .paths import BUILTIN_DIR, config_dir
+    roots: dict[str, Path] = {}
+    for label, base in overlay_dirs():
+        # labels are `overlay:<basename>` (deduped `overlay:<basename>#2`); the
+        # qualifier is the part after the colon.
+        roots[label.split(":", 1)[1]] = base
+    roots["user"] = config_dir()
+    roots["builtin"] = BUILTIN_DIR
+    return roots
+
+
+def _qualified_overlay_source(rel: str, where: str) -> str:
+    """Resolve a `TIER:REL` qualified overlay source: `TIER` names an overlay
+    basename or the literal `user`/`builtin` (see `_tier_roots`), `REL` a path
+    under exactly that root. Confinement (no `..`/symlink escape) and the
+    must-exist check apply per root, as for an unqualified source. This is how a
+    preset pins its shipped files to its own owning tier, immune to overlay
+    reordering/shadowing (see core/presets.py)."""
+    tier, _, sub = rel.partition(":")
+    roots = _tier_roots()
+    base = roots.get(tier)
+    if base is None:
+        known = ", ".join(sorted(roots)) or "(none)"
+        raise ConfigError(
+            f"{where} overlay source {rel!r}: unknown tier {tier!r} "
+            f"(known tiers: {known})")
+    base = base.resolve()
+    resolved = (base / sub).resolve()
+    if resolved != base and base not in resolved.parents:
+        raise ConfigError(
+            f"{where} overlay path {sub!r} escapes the {tier!r} tier dir")
+    if not resolved.exists():
+        raise ConfigError(
+            f"{where} overlay source {rel!r} not found (looked at {resolved})")
+    return str(resolved)
+
+
 def _overlay_source(rel: str, where: str) -> str:
-    """Resolve an overlay-relative bind source across the configured overlays,
-    searched in declared order (first overlay containing `rel` wins). Confined
-    within the winning overlay (no `..`/symlink escape) and required to exist.
-    The user tier and builtin do NOT participate -- mounts search the overlays
-    only. The not-found error names every overlay searched."""
+    """Resolve an overlay-relative bind source. A `TIER:REL` form (the prefix
+    contains a `:`) pins resolution to exactly that tier (`_qualified_overlay_source`);
+    a bare `REL` is searched across the configured overlays, in declared order
+    (first overlay containing `rel` wins), confined within the winning overlay
+    (no `..`/symlink escape) and required to exist. The user tier and builtin do
+    NOT participate in the unqualified search -- only via an explicit qualifier.
+    The not-found error names every overlay searched.
+
+    A relative path never legitimately contains a `:`, so a `:` unambiguously
+    signals the qualified form; an unknown prefix is an error listing the known
+    tiers (rather than being silently treated as a path)."""
+    if ":" in rel:
+        return _qualified_overlay_source(rel, where)
     searched: list[Path] = []
     for _label, base in overlay_dirs():
         base = base.resolve()
@@ -175,13 +226,24 @@ def _overlay_source(rel: str, where: str) -> str:
     )
 
 
-def _parse_mount(m, where: str) -> dict:
+def _parse_mount(m, where: str, *, expand_bind: bool = True) -> dict:
     """One `mounts` entry -> a typed record
     `{kind: bind|volume|overlay, source|name, target, readonly}`.
 
     String form is a host bind (`"SRC:DST[:ro]"`). Table form has exactly one of
     `bind`/`volume`/`overlay`, plus an absolute `target` and optional `readonly`
-    (overlay mounts default to read-only -- they ship static assets)."""
+    (overlay mounts default to read-only -- they ship static assets).
+
+    The ONE mount parser -- both `load_config` (workspace TOML) and the preset
+    parser call it, so mount validation lives in a single place. `expand_bind`
+    (default True) is the one preset-path knob: a preset carries a host-bind
+    SOURCE as a literal v1 default (e.g. `~/.ssh/agent`) that need not exist on
+    the machine that loads the pack -- it is existence-checked when the stamped
+    workspace config is loaded at `start`, not at pack-parse time. With
+    `expand_bind=False` the bind source is validated as a non-empty string and
+    kept verbatim (no `~` expansion, no existence check); overlay sources are
+    still fully resolved+existence-checked (a pack's shipped files must be
+    present in its tier)."""
     if isinstance(m, str):
         parts = m.split(":")
         if len(parts) < 2 or len(parts) > 3 or (len(parts) == 3 and parts[2] != "ro"):
@@ -189,7 +251,8 @@ def _parse_mount(m, where: str) -> dict:
         target = parts[1]
         if not target.startswith("/"):
             raise ConfigError(f"{where} target must be absolute: {target!r}")
-        return {"kind": "bind", "source": _bind_source(parts[0], where),
+        source = _bind_source(parts[0], where) if expand_bind else parts[0]
+        return {"kind": "bind", "source": source,
                 "target": target, "readonly": len(parts) == 3}
 
     if not isinstance(m, dict):
@@ -219,7 +282,8 @@ def _parse_mount(m, where: str) -> dict:
         raise ConfigError(f"{where} {kind} must be a non-empty string")
 
     if kind == "bind":
-        return {"kind": "bind", "source": _bind_source(val, where),
+        source = _bind_source(val, where) if expand_bind else val
+        return {"kind": "bind", "source": source,
                 "target": target, "readonly": bool(ro)}
     if kind == "volume":
         if not _VOLUME_NAME_RE.match(val):
@@ -243,6 +307,39 @@ def _parse_mount(m, where: str) -> dict:
 # literals "workspace"/"root" in v1 (no arbitrary username), `order` to a
 # non-negative int -- see _parse_setup.
 _SETUP_KEYS = {"run", "user", "order"}
+
+
+def _parse_setup_table(entry: dict, where: str, *, require_order: bool) -> dict:
+    """Validate one typed `setup` TABLE and normalize it to
+    `{"run": str, "user": "workspace"|"root", "order": int}` (defaults filled).
+    The ONE typed-setup-step validator -- both the workspace-config setup parser
+    (`_parse_setup`, `require_order=False`) and the preset parser (which passes
+    `require_order=True`) call it, so the field rules live in a single place.
+
+    `require_order`: a preset `[[setup]]` step MUST declare `order` (packs are
+    explicit about cross-pack ordering; there is no per-workspace declaration
+    index to fall back on when several packs' steps interleave). A workspace
+    config defaults an omitted order to 0."""
+    extra = set(entry) - _SETUP_KEYS
+    if extra:
+        raise ConfigError(f"{where} unknown key(s): {', '.join(sorted(extra))}")
+    run = entry.get("run")
+    if not isinstance(run, str) or not run:
+        raise ConfigError(
+            f"{where} `run` is required and must be a non-empty string")
+    user = entry.get("user", "workspace")
+    if user not in ("workspace", "root"):
+        raise ConfigError(
+            f'{where} `user` must be "workspace" or "root", got {user!r}')
+    if require_order and "order" not in entry:
+        raise ConfigError(
+            f"{where} `order` is required in a preset setup step "
+            f"(a pack must be explicit about ordering)")
+    order = entry.get("order", 0)
+    # bool is an int subclass -- reject `order = true` explicitly.
+    if isinstance(order, bool) or not isinstance(order, int) or order < 0:
+        raise ConfigError(f"{where} `order` must be an integer >= 0")
+    return {"run": run, "user": user, "order": order}
 
 
 def _parse_setup(raw_setup, config_path) -> list:
@@ -271,24 +368,40 @@ def _parse_setup(raw_setup, config_path) -> list:
             continue
         if not isinstance(entry, dict):
             raise ConfigError(f"{where} must be a string or a table")
-        extra = set(entry) - _SETUP_KEYS
-        if extra:
-            raise ConfigError(f"{where} unknown key(s): {', '.join(sorted(extra))}")
-        run = entry.get("run")
-        if not isinstance(run, str) or not run:
-            raise ConfigError(
-                f"{where} `run` is required and must be a non-empty string")
-        user = entry.get("user", "workspace")
-        if user not in ("workspace", "root"):
-            raise ConfigError(
-                f'{where} `user` must be "workspace" or "root", got {user!r}')
-        order = entry.get("order", 0)
-        # bool is an int subclass -- reject `order = true` explicitly.
-        if isinstance(order, bool) or not isinstance(order, int) or order < 0:
-            raise ConfigError(f"{where} `order` must be an integer >= 0")
-        out.append({"run": run, "user": user, "order": order})
+        out.append(_parse_setup_table(entry, where, require_order=False))
     return out
 
+
+
+def validate_mount_set(mounts: list[dict], config_path, user: str | None) -> None:
+    """Cross-mount validation on a set of NORMALIZED mount records (`_parse_mount`
+    output): no two mounts on the same target, no two volumes with the same name,
+    and a `user_owned` volume requires a non-root `user` (it is chowned to it).
+    Factored so both `load_config` and the preset-add merge check (existing +
+    stamped mounts) run identical rules."""
+    seen_targets: set[str] = set()
+    seen_vols: set[str] = set()
+    for m in mounts:
+        t = m["target"].rstrip("/") or "/"
+        if t in seen_targets:
+            raise ConfigError(f"{config_path}: two mounts target {m['target']!r}")
+        seen_targets.add(t)
+        if m["kind"] == "volume":
+            if m["name"] in seen_vols:
+                raise ConfigError(
+                    f"{config_path}: two volumes named {m['name']!r} "
+                    f"('home' names the home volume)"
+                )
+            seen_vols.add(m["name"])
+
+    # `user_owned` volumes are chowned to `user`, so they need a non-root one --
+    # otherwise the flag is a silent no-op (root already owns everything).
+    if any(m["kind"] == "volume" and m.get("user_owned") for m in mounts) and (
+            not user or user.split(":", 1)[0] in ("root", "0")):
+        raise ConfigError(
+            f"{config_path}: a `user_owned` volume requires a non-root `user` "
+            f"(the volume is chowned to it)"
+        )
 
 
 def load_config(ws: Workspace) -> dict:
@@ -364,22 +477,6 @@ def load_config(ws: Workspace) -> dict:
         mounts.insert(0, {"kind": "volume", "name": "home", "target": home,
                           "readonly": False})
 
-    # No two mounts on the same target; no two volumes with the same name.
-    seen_targets: set[str] = set()
-    seen_vols: set[str] = set()
-    for m in mounts:
-        t = m["target"].rstrip("/") or "/"
-        if t in seen_targets:
-            raise ConfigError(f"{ws.config_path}: two mounts target {m['target']!r}")
-        seen_targets.add(t)
-        if m["kind"] == "volume":
-            if m["name"] in seen_vols:
-                raise ConfigError(
-                    f"{ws.config_path}: two volumes named {m['name']!r} "
-                    f"('home' names the home volume)"
-                )
-            seen_vols.add(m["name"])
-
     # env: inline table of string values
     env = raw.get("env") or {}
     if not isinstance(env, dict):
@@ -406,14 +503,10 @@ def load_config(ws: Workspace) -> dict:
     if user is not None and (not isinstance(user, str) or not user):
         raise ConfigError(f"{ws.config_path}: `user` must be a non-empty string")
 
-    # `user_owned` volumes are chowned to `user`, so they need a non-root one --
-    # otherwise the flag is a silent no-op (root already owns everything).
-    if any(m["kind"] == "volume" and m.get("user_owned") for m in mounts) and (
-            not user or user.split(":", 1)[0] in ("root", "0")):
-        raise ConfigError(
-            f"{ws.config_path}: a `user_owned` volume requires a non-root `user` "
-            f"(the volume is chowned to it)"
-        )
+    # No two mounts on the same target; no two volumes with the same name; and a
+    # `user_owned` volume needs a non-root `user` (validated together now that
+    # `user` is known).
+    validate_mount_set(mounts, ws.config_path, user)
 
     # exec_flags: escape hatch -- extra flags spliced into `docker exec` for
     # `enter` (e.g. ["--workdir", "/srv"], ["--env", "FOO=bar"]). credproxy keeps

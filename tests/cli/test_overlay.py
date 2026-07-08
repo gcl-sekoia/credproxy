@@ -191,10 +191,10 @@ def test_overlay_preset_is_resolvable(xdg, overlay):
     from credproxy_cli.core.presets import build_preset, load_presets
     assert "acme" in load_presets()
     assert "github" in load_presets()   # builtin still present
-    bindings, rules = build_preset("acme", "env", "ACME_TOKEN")
-    assert [b.name for b in bindings] == ["acme-api"]
-    assert bindings[0].hosts == ("api.acme.example",)
-    assert rules == []                  # binding-only preset
+    exp = build_preset("acme", "env", "ACME_TOKEN")
+    assert [b.name for b in exp.bindings] == ["acme-api"]
+    assert exp.bindings[0].hosts == ("api.acme.example",)
+    assert exp.rules == ()               # binding-only preset
 
 
 def test_overlay_shadows_overlay_preset(xdg, tmp_path, monkeypatch):

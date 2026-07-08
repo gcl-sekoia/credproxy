@@ -87,7 +87,8 @@ def test_preset_mixed_parses_bindings_and_rules(xdg):
     _write_raw_preset("gh-guarded", _MIXED)
     spec = get_preset("gh-guarded")
     assert spec.needs_credential is True
-    bindings, rules = build_preset("gh-guarded", "env", "GITHUB_TOKEN")
+    exp = build_preset("gh-guarded", "env", "GITHUB_TOKEN")
+    bindings, rules = list(exp.bindings), list(exp.rules)
     assert [b.name for b in bindings] == ["gh-guarded-api"]
     # suffix -> name; the params survive to the built Rule.
     assert [r.name for r in rules] == ["gh-guarded-readonly"]
@@ -113,9 +114,10 @@ def test_preset_pure_rule_needs_no_credential(xdg):
     _write_raw_preset("policy", _RULE_ONLY)
     spec = get_preset("policy")
     assert spec.needs_credential is False and spec.placeholder is None
-    bindings, rules = build_preset("policy")           # zero flags
-    assert bindings == []
-    assert [r.name for r in rules] == ["policy-guard"] and rules[0].action == "block"
+    exp = build_preset("policy")                       # zero flags
+    assert exp.bindings == ()
+    assert [r.name for r in exp.rules] == ["policy-guard"] \
+        and exp.rules[0].action == "block"
 
 
 def test_preset_binding_without_placeholder_rejected(xdg):

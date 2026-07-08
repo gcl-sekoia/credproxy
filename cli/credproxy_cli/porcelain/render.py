@@ -572,12 +572,22 @@ class Renderer:
         print("Service setup packs (bindings + guardrails). Apply with:")
         print("  credproxy workspace NAME preset add NAME [--provider P --secret REF]")
         for p in rows:
-            counts = f"{len(p['bindings'])} bindings, {len(p.get('rules') or [])} rules"
-            cred = "" if p.get("needs_credential", True) else "  [pure-rule; no credential]"
+            mounts = p.get("mounts") or []
+            penv = p.get("env") or []
+            setup = p.get("setup") or []
+            counts = [f"{len(p['bindings'])} bindings",
+                      f"{len(p.get('rules') or [])} rules"]
+            if mounts:
+                counts.append(f"{len(mounts)} mounts")
+            if penv:
+                counts.append(f"{len(penv)} env")
+            if setup:
+                counts.append(f"{len(setup)} setup")
+            cred = "" if p.get("needs_credential", True) else "  [no credential]"
             src = f"  [{p['source']}]" if p.get("source") else ""
             sh = p.get("shadows") or []
             shadow = f" (shadows {', '.join(sh)})" if sh else ""
-            print(f"\n{p['name']}  ({counts}){cred}{src}{shadow}")
+            print(f"\n{p['name']}  ({', '.join(counts)}){cred}{src}{shadow}")
             for b in p["bindings"]:
                 env = f"  env {b['env']}" if b.get("env") else ""
                 hosts = ", ".join(b["hosts"])
@@ -586,13 +596,33 @@ class Renderer:
                 act = r["action"] + (f":{r['script']}" if r.get("script") else "")
                 vis = "" if r.get("visible", True) else "  [hidden]"
                 print(f"  rule    {r['name']:<14} {act:<7} {', '.join(r['hosts'])}{vis}")
+            for m in mounts:
+                print(f"  mount   {m['kind']:<7} {m['source']} -> {m['target']}")
+            for e in penv:
+                print(f"  env     {e['key']} = {e['value']}")
+            for s in setup:
+                u = "" if s.get("user", "workspace") == "workspace" else f" ({s['user']})"
+                print(f"  setup   [{s['order']}] {s['run']}{u}")
 
     def preset_applied(self, ws: str, preset: str, bindings: list[dict],
                        rules: list[dict], newly_intercepted: list[str],
+                       mounts: list[dict] | None = None,
+                       env: list[dict] | None = None,
+                       skipped_env: list[str] | None = None,
+                       setup: list[dict] | None = None,
+                       recreate: bool = False,
                        attached: bool = False) -> None:
+        mounts, env, setup = mounts or [], env or [], setup or []
+        skipped_env = skipped_env or []
         nb, nr = len(bindings), len(rules)
-        print(f"applied preset '{preset}' to workspace '{ws}': "
-              f"{nb} binding(s), {nr} rule(s)")
+        parts = [f"{nb} binding(s)", f"{nr} rule(s)"]
+        if mounts:
+            parts.append(f"{len(mounts)} mount(s)")
+        if env:
+            parts.append(f"{len(env)} env var(s)")
+        if setup:
+            parts.append(f"{len(setup)} setup step(s)")
+        print(f"applied preset '{preset}' to workspace '{ws}': " + ", ".join(parts))
         for b in bindings:
             print(f"  binding {b['name']:<16} {b['injector']:<7} "
                   f"{', '.join(b['hosts'])}")
@@ -601,11 +631,24 @@ class Renderer:
             vis = "" if r.get("visible", True) else "  (hidden)"
             print(f"  rule    {r['name']:<16} {act:<7} "
                   f"{', '.join(r['hosts'])}{vis}")
+        for m in mounts:
+            print(f"  mount   {m['kind']:<7} {m['source']} -> {m['target']}")
+        for e in env:
+            print(f"  env     {e['key']} = {e['value']}")
+        for s in setup:
+            u = "" if s.get("user", "workspace") == "workspace" else f" ({s['user']})"
+            print(f"  setup   [{s['order']}] {s['run']}{u}")
+        if skipped_env:
+            say("env already set to the same value (left unchanged): "
+                + ", ".join(skipped_env))
         if newly_intercepted:
             say("newly intercepted (TLS-terminated) host(s): "
                 + ", ".join(newly_intercepted)
                 + " -- a workspace that hasn't bootstrapped the CA will see a "
                   "cert error there until it does")
+        if recreate:
+            say("container-half config changed the workspace spec -- "
+                f"restart to apply: credproxy workspace {ws} start")
         _say_push_hint(ws, attached)
 
 
@@ -746,9 +789,17 @@ class JsonRenderer(Renderer):
 
     def preset_applied(self, ws: str, preset: str, bindings: list[dict],
                        rules: list[dict], newly_intercepted: list[str],
+                       mounts: list[dict] | None = None,
+                       env: list[dict] | None = None,
+                       skipped_env: list[str] | None = None,
+                       setup: list[dict] | None = None,
+                       recreate: bool = False,
                        attached: bool = False) -> None:
         self._emit({"workspace": ws, "preset": preset, "bindings": bindings,
-                    "rules": rules, "newly_intercepted": newly_intercepted})
+                    "rules": rules, "newly_intercepted": newly_intercepted,
+                    "mounts": mounts or [], "env": env or [],
+                    "skipped_env": skipped_env or [], "setup": setup or [],
+                    "recreate": recreate})
 
     def provider_show(self, info: dict) -> None:
         self._emit(info)

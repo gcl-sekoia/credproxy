@@ -20,6 +20,7 @@ code. See docs/advanced/overlays.md and builtin/presets/github.toml.
 """
 from __future__ import annotations
 
+import hashlib
 import tomllib
 from dataclasses import dataclass, replace
 
@@ -45,13 +46,51 @@ class _PresetRule:
 
 
 @dataclass(frozen=True)
+class _PresetMount:
+    """One preset `[[mount]]`, in stamp-ready form. `value` is what gets stamped
+    into the workspace TOML for `kind`: a tier-QUALIFIED overlay rel
+    (`tier:setup.d/x.sh`, pinned to the pack's owning tier), a volume name, or a
+    literal host-bind source (baked v1 default, existence-checked at `start`, not
+    here). `readonly` is None when the pack didn't declare it (the stamp omits it,
+    load applies the per-kind default)."""
+    kind: str                    # "overlay" | "volume" | "bind"
+    value: str
+    target: str
+    readonly: bool | None
+    user_owned: bool = False
+
+
+def mount_table(pm: _PresetMount) -> dict:
+    """Reconstruct the raw mount TABLE from a `_PresetMount`, for re-normalizing
+    through `config._parse_mount` at add time (the merged-mount validation) and
+    for rendering the stamped inline table."""
+    t: dict = {pm.kind: pm.value, "target": pm.target}
+    if pm.readonly is not None:
+        t["readonly"] = pm.readonly
+    if pm.user_owned:
+        t["user_owned"] = True
+    return t
+
+
+@dataclass(frozen=True)
 class PresetSpec:
     name: str
-    # The shared, service-shaped sentinel -- None for a pure-rule preset (nothing
-    # to couple: rules carry no placeholder).
+    # The shared, service-shaped sentinel -- None for a preset with no bindings
+    # (a pure-rule or pure-container pack; nothing to couple).
     placeholder: Placeholder | None
     parts: tuple[_Part, ...]
     rules: tuple[_PresetRule, ...] = ()
+    # The container-half a pack may ALSO carry (stamped as ordinary literal
+    # config, expansion-not-a-link): managed mounts, env vars, ordered setup
+    # steps. Any of the five (parts/rules/mounts/env/setup) may be empty; the
+    # whole preset may not be.
+    mounts: tuple[_PresetMount, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()      # ordered (key, value) pairs
+    setup: tuple[dict, ...] = ()               # {"run", "user", "order"} dicts
+    # first-12-hex of sha256 over the preset DEFINITION FILE bytes, for the
+    # provenance marker (`rev=`); the pack files are pinned to a tier, this pins
+    # the stamp to a pack revision.
+    rev: str = ""
     # A canonical source so the common case needs no flags. `default_provider`
     # fills an omitted `--provider`. `default_secret` fills an omitted `--secret`
     # but ONLY when the resolved provider is `default_provider` -- a secret ref's
@@ -63,25 +102,53 @@ class PresetSpec:
     @property
     def needs_credential(self) -> bool:
         """A preset with bindings needs a provider/secret (and a placeholder);
-        a pure-rule pack needs none."""
+        a pure-rule / pure-container pack needs none."""
         return bool(self.parts)
 
+    @property
+    def has_container_half(self) -> bool:
+        """True iff the pack stamps any container-half config (mounts/env/setup)
+        -- the half an ATTACHED workspace can't accept and that drifts the spec
+        hash (triggering a recreate)."""
+        return bool(self.mounts or self.env or self.setup)
 
-def _parse_preset(path, name: str) -> PresetSpec:
+
+def _tier_qualifier(source_label: str) -> str:
+    """The mount-source TIER qualifier for a `layered_dirs` tier label: an overlay
+    label `overlay:<base>` -> `<base>`; the literal tiers `user`/`builtin` stay.
+    Mirrors `config._tier_roots`, the resolution side."""
+    return source_label.split(":", 1)[1] if source_label.startswith("overlay:") \
+        else source_label
+
+
+def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
     src = f"preset '{name}' ({path})"
     try:
-        raw = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as e:
+        data = path.read_bytes()
+        raw = tomllib.loads(data.decode())
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as e:
         raise ConfigError(f"{src}: unreadable ({e})")
+    rev = hashlib.sha256(data).hexdigest()[:12]
 
     parts_raw = raw.get("part") or []
     rules_raw = raw.get("rule") or []
+    mounts_raw = raw.get("mount") or []
+    env_raw = raw.get("env") or {}
+    setup_raw = raw.get("setup") or []
     if not isinstance(parts_raw, list):
         raise ConfigError(f"{src}: [[part]] must be an array of tables")
     if not isinstance(rules_raw, list):
         raise ConfigError(f"{src}: [[rule]] must be an array of tables")
-    if not parts_raw and not rules_raw:
-        raise ConfigError(f"{src}: needs at least one [[part]] or [[rule]]")
+    if not isinstance(mounts_raw, list):
+        raise ConfigError(f"{src}: [[mount]] must be an array of tables")
+    if not isinstance(env_raw, dict):
+        raise ConfigError(f"{src}: [env] must be a table")
+    if not isinstance(setup_raw, list):
+        raise ConfigError(f"{src}: [[setup]] must be an array of tables")
+    if not (parts_raw or rules_raw or mounts_raw or env_raw or setup_raw):
+        raise ConfigError(
+            f"{src}: needs at least one [[part]], [[rule]], [[mount]], [env], "
+            f"or [[setup]]")
 
     # [placeholder] is the BINDING coupling mechanism, required only when the
     # preset carries bindings; a pure-rule pack has nothing to couple.
@@ -124,15 +191,80 @@ def _parse_preset(path, name: str) -> PresetSpec:
                            hosts=tuple(hosts), env=env))
 
     rules = [_parse_preset_rule(r, i, src) for i, r in enumerate(rules_raw)]
+    mounts = [_parse_preset_mount(m, i, src, tier)
+              for i, m in enumerate(mounts_raw)]
+    env = _parse_preset_env(env_raw, src)
+    setup = [_parse_preset_setup(s, i, src) for i, s in enumerate(setup_raw)]
 
     return PresetSpec(
         name=name,
         placeholder=placeholder,
         parts=tuple(parts),
         rules=tuple(rules),
+        mounts=tuple(mounts),
+        env=tuple(env),
+        setup=tuple(setup),
+        rev=rev,
         default_provider=raw.get("default_provider"),
         default_secret=raw.get("default_secret"),
     )
+
+
+def _parse_preset_mount(m, i: int, src: str, tier: str) -> _PresetMount:
+    """One preset `[[mount]]` -> a `_PresetMount`. An unqualified `overlay` source
+    is QUALIFIED with the pack's owning `tier` (so it resolves within THIS pack's
+    tier, immune to overlay reorder/shadow) before being validated through the
+    SHARED `config._parse_mount` (bind sources kept literal -- a baked v1 default
+    checked at `start`, not here)."""
+    from . import config as core_config
+    where = f"{src} mount[{i}]"
+    if not isinstance(m, dict):
+        raise ConfigError(f"{where} must be a table")
+    table = dict(m)
+    ov = table.get("overlay")
+    if isinstance(ov, str) and ":" not in ov:
+        table["overlay"] = f"{tier}:{ov}"
+    # Validate shape (exactly one of overlay/volume/bind, absolute target,
+    # readonly bool, volume-name/user_owned rules) + resolve the overlay file.
+    norm = core_config._parse_mount(table, where, expand_bind=False)
+    kind = norm["kind"]
+    return _PresetMount(
+        kind=kind,
+        value=table[kind],                 # qualified overlay rel / name / literal bind
+        target=norm["target"],
+        readonly=table.get("readonly"),    # None when the pack didn't declare it
+        user_owned=bool(norm.get("user_owned")),
+    )
+
+
+def _parse_preset_env(env_raw: dict, src: str) -> list[tuple[str, str]]:
+    """A preset `[env]` table -> ordered (key, value) pairs. Values must be
+    non-empty strings (they stamp as `KEY = "value"`)."""
+    out: list[tuple[str, str]] = []
+    for k, v in env_raw.items():
+        if not isinstance(k, str) or not k:
+            raise ConfigError(f"{src}: [env] keys must be non-empty strings")
+        if not isinstance(v, str) or not v:
+            raise ConfigError(
+                f"{src}: env.{k} must be a non-empty string, got {v!r}")
+        out.append((k, v))
+    return out
+
+
+def _parse_preset_setup(s, i: int, src: str) -> dict:
+    """One preset `[[setup]]` step -> a normalized `{"run", "user", "order"}`
+    dict via the SHARED `config._parse_setup_table` -- with the extra pack rules
+    that `order` is REQUIRED and a bare command string is REJECTED (the root
+    string form is the workspace's escape hatch, never a pack's)."""
+    from . import config as core_config
+    where = f"{src} setup[{i}]"
+    if isinstance(s, str):
+        raise ConfigError(
+            f"{where} a preset setup step must be a table "
+            f'{{ run = "...", order = N }}, not a bare string')
+    if not isinstance(s, dict):
+        raise ConfigError(f"{where} must be a table")
+    return core_config._parse_setup_table(s, where, require_order=True)
 
 
 def _parse_preset_rule(entry, i: int, src: str) -> _PresetRule:
@@ -167,12 +299,13 @@ def load_presets() -> dict[str, PresetSpec]:
     """All resolvable presets keyed by name, user shadowing overlays shadowing
     builtin (least-specific first so the most-specific overwrites)."""
     seen: dict[str, PresetSpec] = {}
-    for _source, base in reversed(layered_dirs("presets")):
+    for source, base in reversed(layered_dirs("presets")):
         if not base.is_dir():
             continue
+        tier = _tier_qualifier(source)
         for path in sorted(base.iterdir()):
             if path.suffix == ".toml" and path.is_file():
-                seen[path.stem] = _parse_preset(path, path.stem)
+                seen[path.stem] = _parse_preset(path, path.stem, tier)
     return seen
 
 
@@ -241,20 +374,45 @@ def describe_presets() -> list[dict]:
                 }
                 for pr in spec.rules
             ],
+            "mounts": [
+                {"kind": m.kind, "source": m.value, "target": m.target}
+                for m in spec.mounts
+            ],
+            "env": [{"key": k, "value": v} for k, v in spec.env],
+            "setup": [dict(s) for s in spec.setup],
         }
         for spec in sorted(load_presets().values(), key=lambda s: s.name)
     ]
 
 
+@dataclass(frozen=True)
+class PresetExpansion:
+    """A preset expanded for stamping: the ordinary blocks/config it writes into
+    a workspace TOML. `rev` (the definition-file digest) rides every provenance
+    marker. Mounts/env/setup are the container half."""
+    name: str
+    rev: str
+    bindings: tuple[Binding, ...]
+    rules: tuple["core_rules.Rule", ...]
+    mounts: tuple[_PresetMount, ...]
+    env: tuple[tuple[str, str], ...]
+    setup: tuple[dict, ...]
+
+    @property
+    def has_container_half(self) -> bool:
+        return bool(self.mounts or self.env or self.setup)
+
+
 def build_preset(preset: str, provider: str | None = None,
-                 secret: str | None = None) -> tuple[list[Binding], list["core_rules.Rule"]]:
-    """Expand `preset` into its `(bindings, rules)`. All bindings share one
+                 secret: str | None = None) -> PresetExpansion:
+    """Expand `preset` into a `PresetExpansion`. All bindings share one
     freshly-generated placeholder and resolve the same single-slot `secret` ref
-    via `provider` (both None for a pure-rule preset). Each rule's `name` is
-    filled to `<preset>-<suffix>`. Raises CredproxyError on an unknown preset."""
+    via `provider` (both None for a pack with no bindings). Each rule's `name` is
+    filled to `<preset>-<suffix>`. Mounts/env/setup carry through verbatim.
+    Raises CredproxyError on an unknown preset."""
     spec = get_preset(preset)
     placeholder = spec.placeholder.generate() if spec.placeholder else None
-    bindings = [
+    bindings = tuple(
         Binding(
             name=f"{spec.name}-{part.suffix}",
             injector=part.injector,
@@ -265,6 +423,10 @@ def build_preset(preset: str, provider: str | None = None,
             env=part.env,
         )
         for part in spec.parts
-    ]
-    rules = [replace(pr.rule, name=f"{spec.name}-{pr.suffix}") for pr in spec.rules]
-    return bindings, rules
+    )
+    rules = tuple(replace(pr.rule, name=f"{spec.name}-{pr.suffix}")
+                  for pr in spec.rules)
+    return PresetExpansion(
+        name=spec.name, rev=spec.rev, bindings=bindings, rules=rules,
+        mounts=spec.mounts, env=spec.env, setup=spec.setup,
+    )
