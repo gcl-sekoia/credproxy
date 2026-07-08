@@ -310,6 +310,44 @@ def _kept_credential(text: str, stamped_names: set[str], source: str):
     return first.provider, first.secret, first.placeholder, divergent
 
 
+def _read_back_options(stamped: list[_Stamped], spec: PresetSpec) -> dict:
+    """Recover each mount-feeding option's value (#59) from the STAMPED mounts, by
+    the mount TARGET join key: for every definition mount whose source is an option
+    (`source_option`), read the literal `bind`/`volume` source of the stamped mount
+    at the same target. Raw (un-`~`-expanded) source text so a re-stamp round-trips
+    byte-identical. Options feeding only a `[[requires]]` path (unstamped) aren't
+    recoverable and aren't needed by the expansion, so they're simply absent."""
+    if not spec.options:
+        return {}
+    src_by_target: dict[str, str] = {}
+    for s in stamped:
+        if s.kind != "mount":
+            continue
+        d = _stamped_mount_table(s)
+        if d is None:
+            continue
+        for k in ("bind", "volume"):
+            if isinstance(d.get(k), str):
+                src_by_target[s.identity] = d[k]
+                break
+    values: dict = {}
+    for pm in spec.mounts:
+        if pm.source_option and _norm_target(pm.target) in src_by_target:
+            values[pm.source_option] = src_by_target[_norm_target(pm.target)]
+    return values
+
+
+def _stamped_mount_table(s: _Stamped) -> dict | None:
+    """Parse a located stamped mount (block body or bare inline element) back to a
+    dict, for reading its raw source. None if it doesn't parse."""
+    try:
+        if s.is_block:
+            return tomllib.loads(s.on_disk)["mounts"][0]
+        return tomllib.loads(f"__x = {s.on_disk}")["__x"]
+    except (tomllib.TOMLDecodeError, KeyError, IndexError):
+        return None
+
+
 # ---- rendering a definition item's would-be on-disk text ---------------------
 
 
@@ -409,7 +447,12 @@ def _classify(text: str, preset_name: str, spec: PresetSpec, *,
             f"`preset add {preset_name} --provider P --secret REF` instead of "
             f"refreshing")
 
-    exp = build_preset(preset_name, provider, secret)
+    # Read back option-derived values (#59) from the STAMPED mounts so a refresh
+    # preserves them (never re-prompts / resets). Only mount-feeding options are
+    # recoverable; a requires-only option isn't part of the expansion, so its
+    # absence here is harmless. build_preset defaults any option it can't read.
+    option_values = _read_back_options(stamped, spec)
+    exp = build_preset(preset_name, provider, secret, options=option_values)
     if placeholder is not None:
         # Preserve the SHARED placeholder read back from the file (a
         # definition-new part inherits it too, since build_preset shares one).

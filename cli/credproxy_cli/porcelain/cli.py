@@ -285,7 +285,7 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
     # stamped blocks IN MEMORY -- all-or-nothing: any failure raises/exits here,
     # before a single byte is written (no config file, no token, no state dir).
     final_text, preset_announces, stamped_packs = _expand_template_presets(
-        base_text, source)
+        ctx, base_text, source)
     if attach is not None:
         lifecycle.create_attached_workspace_files(ws, selector, text=final_text)
     else:
@@ -325,6 +325,10 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
 # A `[[preset]]` array-of-tables header line (a trailing comment is allowed),
 # for the surgical strip of template-declared entries before writing the config.
 _PRESET_BLOCK_RE = re.compile(r"^\s*\[\[\s*preset\s*\]\]\s*(#.*)?$")
+# A `[preset.<child>]` sub-table header (e.g. `[preset.options]`, #59) that BELONGS
+# to the current `[[preset]]` element -- folded INTO its span so the strip removes
+# it too (mirrors the `[rule.headers]` child handling in `_block_spans`).
+_PRESET_CHILD_RE = re.compile(r"^\s*\[\s*preset\.[^\[\]\n]+\]\s*(#.*)?$")
 
 
 def _strip_preset_blocks(text: str) -> str:
@@ -346,7 +350,8 @@ def _strip_preset_blocks(text: str) -> str:
     from ..core.bindings import _block_spans
 
     lines = text.splitlines(keepends=True)
-    for start, end in reversed(_block_spans(text, _PRESET_BLOCK_RE)):
+    for start, end in reversed(_block_spans(text, _PRESET_BLOCK_RE,
+                                            _PRESET_CHILD_RE)):
         while start > 0 and lines[start - 1].lstrip().startswith("#"):
             start -= 1
         if start > 0 and lines[start - 1].strip() == "":
@@ -361,14 +366,15 @@ def _strip_preset_blocks(text: str) -> str:
 _PRESET_REF_RE = re.compile(r"^\s*(\[\[\s*preset\s*\]\]|preset\s*=)", re.M)
 
 
-def _expand_template_presets(base_text: str, source: str):
+def _expand_template_presets(ctx: Ctx, base_text: str, source: str):
     """Expand template-declared `[[preset]]` entries (#57) into the final config
     text: strip the `[[preset]]` blocks and stamp each pack's expansion through
     the SAME `_expand_preset_into_text` core `preset add` uses. Returns
     `(final_text, announces, stamped_packs)` -- `announces` is the per-entry
-    render metadata; `stamped_packs` is the `(spec, provider, secret)` per pack so
-    the caller can run the #58 host-prerequisite checks AFTER it writes (finding
-    5), never invoking a provider for a create that then aborts.
+    render metadata; `stamped_packs` is the `(literal_spec, provider, secret)` per
+    pack (option markers already substituted) so the caller can run the #58
+    host-prerequisite checks AFTER it writes (finding 5), never invoking a provider
+    for a create that then aborts.
 
     All-or-nothing: everything is composed in memory and every failure raises/exits
     before the caller writes, so a bad entry leaves no partial config. Entries are
@@ -378,8 +384,7 @@ def _expand_template_presets(base_text: str, source: str):
     from ..core.bindings import _block_spans
     from ..core.errors import PresetTemplateError
     from ..core.presets import (
-        build_preset, get_preset, parse_template_presets,
-        resolve_preset_credential,
+        apply_option_values, build_preset, get_preset, parse_template_presets,
     )
     from ..core.providers import find_provider
 
@@ -423,21 +428,27 @@ def _expand_template_presets(base_text: str, source: str):
 
     text = _strip_preset_blocks(base_text)
     announces: list[dict] = []
-    # (spec, provider, secret) per stamped pack, so the host-prerequisite checks
-    # (#58) run AFTER the atomic write succeeds -- a `fetch=true` provider check
-    # execs a provider, and a later entry aborting create must not have invoked
-    # one for a create that then writes nothing (finding 5).
+    # (literal_spec, provider, secret) per stamped pack (option markers already
+    # substituted), so the host-prerequisite checks (#58) run AFTER the atomic
+    # write succeeds -- a `fetch=true` provider check execs a provider, and a later
+    # entry aborting create must not have invoked one for a create that then writes
+    # nothing (finding 5).
     stamped_packs: list[tuple] = []
     for entry in entries:
         spec = get_preset(entry.name)               # CredproxyError on unknown pack
+        # Pack options (#59): explicit from the entry's `[preset.options]`, else
+        # prompt on loose+TTY, else default, else the structured missing error.
+        option_values = _resolve_preset_option_values(
+            ctx, spec, dict(entry.options or {}))
         provider = secret = None
         if spec.needs_credential:
-            provider, secret, missing = resolve_preset_credential(
-                spec, entry.provider, entry.secret)
-            if missing:
-                # No prompting in v1: a defaults-less pack with no
-                # provider/secret fails create loudly (structured under --json).
-                raise PresetTemplateError(entry.name, missing)
+            def _missing(missing, _entry=entry):
+                # Prompting on loose+TTY handled inside the interactive resolver;
+                # here we're already past it -> the create-flavored structured error.
+                raise PresetTemplateError(_entry.name, missing)
+
+            provider, secret = _resolve_preset_credential_interactive(
+                ctx, spec, entry.provider, entry.secret, on_missing=_missing)
             find_provider(provider)                 # ProviderError if it doesn't resolve
         elif entry.provider or entry.secret:
             shape = "container-only (mounts/env/setup)" if spec.has_container_half \
@@ -445,11 +456,13 @@ def _expand_template_presets(base_text: str, source: str):
             fail(f"template preset '{entry.name}' is a {shape} pack with no "
                  f"bindings -- it needs no provider/secret; remove those fields "
                  f"from its `[[preset]]` entry")
-        exp = build_preset(entry.name, provider, secret)
+        exp = build_preset(entry.name, provider, secret, options=option_values)
+        literal_spec = apply_option_values(spec, option_values) \
+            if spec.options else spec
         text, announce = _expand_preset_into_text(
             text, exp, entry.name, source, context="create")
         announces.append(announce)
-        stamped_packs.append((spec, provider, secret))
+        stamped_packs.append((literal_spec, provider, secret))
 
     # Post-strip safety net (backstops findings 1/2): the composed config must
     # carry no top-level `preset` key. The stripper is line-based, so re-parse and
@@ -1288,16 +1301,85 @@ def _expand_preset_into_text(text: str, exp, preset_name: str, source: str,
     return new_text, announce
 
 
+def _parse_opt_flags(opts: list[str] | None) -> dict:
+    """Parse repeatable `--opt id=value` flags into `{id: value}` (values are raw
+    strings; coercion against each option's type happens in `resolve_options`). A
+    later `--opt` for the same id wins. Malformed (`no '='`, empty id) fails."""
+    out: dict = {}
+    for raw in opts or []:
+        if "=" not in raw:
+            fail(f"--opt expects id=value, got {raw!r}")
+        key, val = raw.split("=", 1)
+        key = key.strip()
+        if not key:
+            fail(f"--opt expects a non-empty id, got {raw!r}")
+        out[key] = val
+    return out
+
+
+def _resolve_preset_option_values(ctx: Ctx, spec, explicit: dict) -> dict:
+    """Resolve every pack `[[option]]` to a value in the settled order (#59):
+    explicit (`--opt`/template `[preset.options]`) -> prompt (loose+TTY only) ->
+    default -> structured fail. Returns `{id: value}` (empty for an option-less
+    pack). Raises `PresetOptionsError` (structured under `--json`) when a required
+    option can't be resolved without prompting."""
+    if not spec.options:
+        # An explicit --opt for a pack that declares no options is a typo worth
+        # surfacing (resolve_options rejects unknown ids), so still route through it.
+        if not explicit:
+            return {}
+    from ..core.errors import PresetOptionsError
+    from ..core.presets import option_summary, resolve_options
+    from . import prompt as prompt_mod
+
+    ask = prompt_mod.ask_option if prompt_mod.prompting_enabled(ctx) else None
+    values, missing = resolve_options(spec, explicit, prompt=ask)
+    if missing:
+        raise PresetOptionsError(spec.name, [option_summary(o) for o in missing])
+    return values
+
+
+def _resolve_preset_credential_interactive(
+        ctx: Ctx, spec, provider_arg, secret_arg, *, on_missing):
+    """Resolve a pack's provider/secret with the shared defaulting, THEN prompt on
+    loose+TTY for anything still missing (decision 4: provider picker + secret with
+    a validate-at-prompt loop). Strict / loose-no-TTY don't prompt -- `on_missing`
+    (a callable taking the `missing` list) fires instead, rendering the caller's
+    own structured/human error. Returns `(provider, secret)`."""
+    from ..core.presets import resolve_preset_credential
+    from . import prompt as prompt_mod
+
+    provider, secret, missing = resolve_preset_credential(
+        spec, provider_arg, secret_arg)
+    if missing and prompt_mod.prompting_enabled(ctx):
+        if "provider" in missing:
+            provider = prompt_mod.ask_provider(spec.default_provider)
+            # Re-apply defaulting now the provider is known (a prompted provider
+            # equal to default_provider makes default_secret eligible).
+            provider, secret, missing = resolve_preset_credential(
+                spec, provider, secret_arg)
+        if "secret" in missing:
+            hint_default = (spec.default_secret
+                            if provider == spec.default_provider else None)
+            secret = prompt_mod.ask_secret(provider, hint_default)
+            missing = [m for m in missing if m != "secret"]
+    if missing:
+        on_missing(missing)   # renders + exits (fail / raise)
+    return provider, secret
+
+
 def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     """Apply a preset as a service setup pack: stamp its `[[binding]]` set AND its
     `[[rule]]` guardrails into the workspace, all-or-nothing. A pure-rule preset
     needs no provider/secret."""
-    from ..core.presets import (
-        build_preset, get_preset, resolve_preset_credential,
-    )
+    from ..core.presets import build_preset, get_preset
     from ..core.providers import find_provider
 
     spec = get_preset(a.preset)               # CredproxyError -> clean fail on unknown
+
+    # Pack options (#59): resolved before the credential so a bad --opt fails fast.
+    option_values = _resolve_preset_option_values(
+        ctx, spec, _parse_opt_flags(a.opt))
 
     provider = secret = None
     if spec.needs_credential:
@@ -1306,13 +1388,15 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         secret_arg = _parse_secret_args(a.secret)
         if secret_arg is not None and not isinstance(secret_arg, str):
             fail("`preset add` needs a single --secret REF")
-        provider, secret, missing = resolve_preset_credential(
-            spec, a.provider, secret_arg)
-        if "provider" in missing:
-            fail("preset '%s' has bindings but no default provider -- pass "
-                 "--provider" % a.preset)
-        if "secret" in missing:
+
+        def _missing(missing):
+            if "provider" in missing:
+                fail("preset '%s' has bindings but no default provider -- pass "
+                     "--provider" % a.preset)
             fail("`preset add` needs --secret (its meaning depends on --provider)")
+
+        provider, secret = _resolve_preset_credential_interactive(
+            ctx, spec, a.provider, secret_arg, on_missing=_missing)
         find_provider(provider)
     elif a.provider or a.secret:
         # No bindings -> needs no credential. Name the pack's actual shape so the
@@ -1327,8 +1411,12 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     _require_exists(ws)
 
     from ..core.paths import atomic_write_text
+    from ..core.presets import apply_option_values
 
-    exp = build_preset(a.preset, provider, secret)
+    exp = build_preset(a.preset, provider, secret, options=option_values)
+    # Requires (#58) aren't stamped, so their option markers are substituted here
+    # (the literal spec) for the advisory prereq run below.
+    literal_spec = apply_option_values(spec, option_values) if spec.options else spec
 
     with ws.lock():                          # atomic read-validate-write
         text = ws.config_path.read_text()
@@ -1354,7 +1442,7 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     # action, like `binding test`). Report ALL, not fail-first.
     from ..core import prereqs
     requires = [prereqs.summary(r) for r in prereqs.evaluate(
-        spec.requires, provider=provider, secret=secret, do_fetch=True)]
+        literal_spec.requires, provider=provider, secret=secret, do_fetch=True)]
     render.OUT.preset_applied(
         ws.name, announce["preset"], announce["bindings"], announce["rules"],
         announce["newly_intercepted"], mounts=announce["mounts"],
@@ -2265,6 +2353,10 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     # pure-rule preset needs neither. Enforced (conditionally) in the handler.
     pa.add_argument("--provider", default=None)
     pa.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
+    # Pack `[[option]]` values, whole-field host-half parameters (#59). Repeatable
+    # `--opt id=value`; unresolved required options prompt on loose+TTY, else fail
+    # with the structured missing error.
+    pa.add_argument("--opt", action="append", metavar="ID=VALUE", default=None)
 
     pr = psub.add_parser("refresh")
     # Optional PRESET: omitted -> every applied pack; named -> just that one.

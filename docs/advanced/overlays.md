@@ -166,6 +166,33 @@ as literal v1 defaults, existence-checked when the workspace starts. Each stampe
 block carries an inert `# credproxy:preset …` provenance comment, so re-applying
 the same pack is refused rather than duplicated.
 
+**Parameterize the host half with `[[option]]`.** A host-half value that differs
+per operator — a socket dir, an op:// path — is declared as an option and
+referenced as the **whole value** of a host-half field with a structural
+`{ option = "id" }` marker (a mount `bind`/`volume` source, or a `[[requires]]`
+`path`). It is never a token inside a string, and never a container-half field
+(`target`, `[env]` values, `[[setup]]`):
+
+```toml
+[[option]]
+id          = "sock_dir"
+type        = "string"                     # "string" | "enum" (with choices) | "bool"
+default     = "~/.ssh/credproxy-agent"     # optional; omit to make it required
+description = "host directory holding the signing agent's socket"
+
+[[mount]]
+bind   = { option = "sock_dir" }
+target = "/ssh-agent"
+```
+
+A value resolves at expansion time — explicit `--opt id=value` / a template
+`[preset.options]` table → a prompt (loose surface + terminal only) → the
+`default` → otherwise the add fails with a structured missing-options error. The
+resolved literal is stamped (the marker never reaches the workspace TOML), and
+`preset refresh` reads a mount-feeding option's value back from the stamped mount.
+An option used **only** in a `[[requires]]` path with no default can't be read
+back later, so give such an option a default (or also use it in a stamped mount).
+
 **Declare your pack's host prerequisites.** A pack often needs host state its
 container half can't provide — the `gh` CLI installed, a signing-agent socket
 dir, a set env var, a provider that can serve the secret. Declare each with a

@@ -412,7 +412,20 @@ def _preset_requires_checks(ws: Workspace, *, fetch: bool,
         # remedy must point at the orphaned marker, not the pack's own prereq
         # hint (which is for the prerequisite, not a missing binding; finding 2a).
         missing_binding = provider is None and bool(spec.parts)
-        results = prereqs.evaluate(spec.requires, provider=provider,
+        # Requires with a `path = { option = "id" }` marker (#59): substitute the
+        # option's value read back from the stamped mounts (or its default). An
+        # option feeding ONLY the requires path (no stamped mount, no default) is
+        # unrecoverable -> degrade that check to a skip-with-note (never crash).
+        resolved_requires, skipped_opt = _resolve_pack_requires(spec, text)
+        for j, rq in enumerate(skipped_opt):
+            out.append(Check(
+                f"ws:{ws.name}:preset:{pack}:requires-opt[{j}]", True,
+                f"[{ws.name}] preset '{pack}' requires ({rq.kind}): path is "
+                f"supplied by option '{rq.path_option}', which is used only here "
+                f"(nowhere stamped) -- can't recover its value, check skipped",
+                "give the option a default, or also use it in a stamped mount, so "
+                "its value is recoverable at doctor time"))
+        results = prereqs.evaluate(resolved_requires, provider=provider,
                                    secret=_secret_ref(secret), do_fetch=fetch,
                                    fetched_refs=fetched_refs)
         for i, r in enumerate(results):
@@ -428,6 +441,20 @@ def _preset_requires_checks(ws: Workspace, *, fetch: bool,
                         f"stale `# credproxy:preset` marker")
             out.append(Check(cid, False, msg, hint))
     return out
+
+
+def _resolve_pack_requires(spec, text: str):
+    """Resolve a pack's `[[requires]]` for the doctor re-run, substituting any
+    `path = { option = "id" }` marker with the option's value read back from the
+    workspace's stamped mounts (#59). Returns `(resolved, skipped)` -- see
+    `presets.resolve_requires_for_check`."""
+    from . import preset_refresh
+    from .presets import resolve_requires_for_check
+    option_values = {}
+    if spec.options:
+        option_values = preset_refresh._read_back_options(
+            preset_refresh._locate(text, spec.name), spec)
+    return resolve_requires_for_check(spec, option_values)
 
 
 def _pack_credential(spec, binding_cred: dict) -> tuple[str | None, object]:

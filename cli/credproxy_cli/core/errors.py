@@ -73,3 +73,26 @@ class PresetTemplateError(ConfigError):
     @property
     def json_fields(self) -> dict:
         return {"preset": self.preset, "missing": self.missing}
+
+
+class PresetOptionsError(ConfigError):
+    """A preset expansion (`preset add` / template `[[preset]]`) can't resolve one
+    or more required pack `[[option]]`s (#59): no explicit `--opt`/`[preset.options]`
+    value, no default, and no prompt (strict, or loose without a TTY). Carries
+    `preset` + `missing` -- a list of `{id, type, description, enum?}` dicts -- so
+    `--json` serializes the structured `{preset, missing}` shape an agent re-invokes
+    against (`--opt id=value` per entry)."""
+
+    def __init__(self, preset: str, missing: list[dict]):
+        self.preset = preset
+        self.missing = list(missing)
+        ids = ", ".join(m["id"] for m in self.missing)
+        flags = " ".join(f"--opt {m['id']}=..." for m in self.missing)
+        super().__init__(
+            f"preset '{preset}' needs option value(s): {ids} -- supply {flags} "
+            f"(or a default in the pack, or run on the loose surface in a terminal "
+            f"to be prompted)")
+
+    @property
+    def json_fields(self) -> dict:
+        return {"preset": self.preset, "missing": self.missing}

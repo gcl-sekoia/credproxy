@@ -170,6 +170,55 @@ pack that no longer resolves in the registry errors for an explicit
 `refresh NAME` and is skipped-with-a-note when refreshing all; an attached
 workspace refuses a container-half refresh (same as `preset add`).
 
+## Pack options (host-half parameters)
+
+Some host-half values a pack can't hard-code — a signing agent's socket dir, an
+op:// path — differ per operator. A pack declares an `[[option]]` and references
+it as the **whole value** of a host-half field with a structural
+`{ option = "id" }` marker:
+
+```toml
+[[option]]
+id          = "sock_dir"
+type        = "string"                     # "string" | "enum" | "bool"
+default     = "~/.ssh/credproxy-agent"
+description = "host directory holding the signing agent's socket"
+
+[[mount]]
+bind   = { option = "sock_dir" }           # the whole source is the option
+target = "/ssh-agent"
+
+[[requires]]
+kind = "path"
+path = { option = "sock_dir" }             # reuse the same value here
+```
+
+An option supplies the **entire** value of a host-half field — a mount
+`bind`/`volume` source or a `[[requires]]` `path` — never a token inside a string
+(there is no `{opt.x}`-in-string, no conditionals, no interpolation). The
+container half (a mount `target`, `[env]` values, `[[setup]]` steps) is the pack
+author's fixed namespace, so an option marker there is rejected.
+
+Values resolve at expansion time in one order: an explicit `--opt id=value`
+(repeatable) → a prompt (only on the loose `credp` surface, in a terminal) → the
+declared `default` → otherwise the add fails listing the missing options.
+
+```console
+$ credp preset add git-signing --opt sock_dir=/run/user/1000/gcr
+```
+
+The resolved value is stamped as ordinary literal config
+(`bind = "/run/user/1000/gcr"`); the `{ option = … }` marker never reaches your
+workspace file, and `preset refresh` reads the value back from the stamped mount
+(so a refresh never re-prompts or resets it). On the strict `credproxy` surface
+(and on `credp` without a terminal), a required option with no `--opt` and no
+default fails with a structured error naming what to supply — never a prompt.
+
+The same loose-surface prompting can fill an omitted **provider**/**secret** (a
+picker over your registry and a free-text ref with an offered validate-now fetch),
+turning a typo'd secret into an immediate, fixable moment instead of a first-start
+face-plant.
+
 ## Declaring host prerequisites
 
 Some things a pack needs live on the **host**, not in the container: the `gh` CLI
