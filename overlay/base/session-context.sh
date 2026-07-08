@@ -22,12 +22,14 @@ if [ "${1:-}" = "--install" ]; then
     cmd="bash $self"
     settings="$(jq '.' "$settings_file" 2>/dev/null || echo '{}')"
     tmp="$(mktemp)"
-    # Idempotent: strip any prior copy of our hook (by command), then re-add.
+    # Idempotent + self-healing: strip ANY prior */session-context.sh hook (not just
+    # our exact command) before re-adding, so a changed mount path across overlay
+    # refactors doesn't leave stale, now-dead hook entries in a persisted settings.json.
     printf '%s\n' "$settings" \
       | jq --arg cmd "$cmd" '
           .hooks.SessionStart = (
             ((.hooks.SessionStart // [])
-              | map(select([.hooks[]?.command] | index($cmd) | not)))
+              | map(select((.hooks[0].command // "") | test("/session-context\\.sh$") | not)))
             + [{matcher:"startup|resume|compact", hooks:[{type:"command",command:$cmd}]}])' \
       > "$tmp" && mv "$tmp" "$settings_file" \
       || { rm -f "$tmp"; echo "session-context: failed to update $settings_file" >&2; exit 1; }
