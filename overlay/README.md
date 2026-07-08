@@ -18,22 +18,32 @@ conflicts on `git merge upstream`:
 mkdir overlay/acme-corp        # active immediately, labeled overlay:acme-corp
 ```
 
-**This repo is such a fork** — the overlays listed below are its additions. To build on
+**This repo is such a fork** — the three overlays below are its additions. To build on
 them without editing them (staying merge-clean against *this* fork), **layer instead of
-edit**: give your overlay a higher priority (earlier basename) and ship a same-named
-asset to **shadow** just the piece you want — exactly what `50-example` does to
-`claude-setup`'s empty default.
+edit**: give your overlay a higher priority (earlier basename) and ship a same-named asset
+to **shadow** just the piece you want — e.g. a `presets/github-auth.toml` of your own to
+override `base`'s, or a personal `workspace.template.toml`.
 
 ## What's here
 
-This fork populates the container with reusable pieces to compose, layer over, or fork:
+This fork ships three overlays, layered foundation → policy → profile:
 
-- **Lib overlays** — composable, single-purpose, inert building blocks, each with its own
-  README: `setup-runner`, `toolchain`, `git-signing`, `github-auth`, `claude-setup`,
-  `claude-managed-settings`, `claude-session-context`.
-- **`50-example`** — an opinionated worked profile that *composes* the libs; its
-  `workspace.template.toml` is what `credproxy create` stamps. A fork-me starting point
-  that also demonstrates each override style (additive fragment, file shadow, rule param).
+- **[`base`](base/README.md)** — a neutral, reusable **library of preset packs**
+  (`proxy-ca`, `toolchain`, `claude-code`, `github-auth`, `git-signing`), each a
+  self-contained [preset](../docs/guide/06-presets.md) carrying the
+  bindings/rules/mounts/env/setup/requires/options one concern needs (`claude-code` is an
+  umbrella: token + client config + session hook), plus a plain neutral
+  `workspace.template.toml`. Nothing opinionated.
+- **[`claude-managed-settings`](claude-managed-settings/README.md)** — a standalone,
+  opinionated **policy pack**: a hidden rule that rewrites Claude Code's server-managed
+  settings on the wire (strips org-pushed gates). Activate it when you want it.
+- **[`50-example`](50-example/README.md)** — an opinionated **profile** that *composes*
+  the other two: its `workspace.template.toml` (which shadows `base`'s — the `50-` prefix
+  sorts first) declares the packs as `[[preset]]` entries and adds glue (persist volume,
+  a fuller tool kit, opinionated Claude client defaults). A fork-me starting point.
+
+Apply any pack à la carte with `credproxy workspace NAME preset add PACK` (see
+`credproxy preset list`); each overlay's README has the details.
 
 ## Layout — inside your named overlay
 

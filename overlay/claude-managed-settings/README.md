@@ -1,49 +1,51 @@
-# overlay: claude-managed-settings (lib)
+# overlay: claude-managed-settings
 
-Rewrites the server-managed settings document Claude Code fetches from
-`api.anthropic.com` by applying a merge-patch you supply — e.g. dropping the
-restrictions the server pushes. It's a credential-free proxy **rule** (plus a
-client-side cache reset) and carries no secret. Distinct from the `claude-code`
-*credential* binding, and from [`claude-setup`](../claude-setup/README.md), which sets
-*client*-side config.
+A **standalone policy pack** overlay: it can make the workspace's own Claude Code client
+settings win over an org's **server-managed** settings, by rewriting the settings response
+on the wire. The overlay ships only the *mechanism* — the patch it applies is a no-op by
+default; you supply the actual (opinionated) patch. Activate it on top of
+[`base`](../base/README.md) when you want it; the [`50-example`](../50-example/README.md)
+profile turns it on with a real patch.
 
-**Contributes:** a proxy rule + preset (resolved by name, not mounted) and a `setup.d`
-step (clears Claude Code's cached copy of the settings).
+## What the pack does
 
-## Compose from a profile
+`presets/claude-managed-settings.toml` is a pure-rule pack (no credential) + one setup step:
 
-Stamp the rule with the preset:
+- a **hidden `script` rule** on `GET api.anthropic.com/api/claude_code/settings` that runs
+  [`scripts/claude-code-settings-rewrite.star`](scripts/claude-code-settings-rewrite.star)
+  — an RFC 7386 merge-patch of the settings document. The script ships **no policy** (empty
+  default), and the pack's `[rule.params].settings_patch` is a no-op **`"{}"`** — the field
+  is present so it's discoverable, but the pack imposes nothing on its own.
+- a **setup step** (`order 30`, an inline `rm`) that deletes Claude Code's cached
+  `remote-settings.json` so the next fetch goes through the proxy and gets rewritten.
+
+Because response rules run **after** credential injection, the script never sees a real
+secret — it only rewrites the settings JSON. See the credproxy rules model
+([`docs/reference/rules.md`](../../docs/reference/rules.md)).
+
+**This is the SERVER-settings half.** Claude Code has two settings layers: the org's
+server-managed settings (what this pack rewrites on the wire) and the user's own client
+`settings.json` (what the base [`claude-code`](../base/README.md) pack seeds from a mounted
+defaults file). They interact — e.g. `defaultMode = "bypassPermissions"` only takes effect
+if the client sets it **and** this pack strips the org's `disableBypassPermissionsMode`.
+So an "unrestricted Claude" outcome needs both: the client default (claude-code +
+`settings-defaults.json`) and this server-side strip.
+
+## Use it
+
 ```sh
-credproxy workspace NAME preset add claude-managed-settings
+credproxy workspace NAME preset add claude-managed-settings   # no provider/secret needed
+credproxy workspace NAME start                                # or apply, to push it
 ```
-This adds the `claude-code-settings-rewrite` rule (hidden, response-phase) scoped to
-`api.anthropic.com` + `/api/claude_code/settings` — but it ships **no policy of its
-own**, so it's inert until you set a `settings_patch` (see Configure). Then mount the
-cache-reset step so a stale pre-rewrite copy doesn't linger:
-```toml
-{ overlay = "setup.d/claude-managed-settings.sh", target = "/opt/setup.d/30-claude-managed-settings.sh" },
-```
-(The reset is belt-and-suspenders — the rule already forces a fresh fetch on every
-request — and harmless without the rule.)
 
-## Configure — the settings patch
+As applied, the rule is a no-op (`settings_patch = "{}"`). To make it do something, either
+edit the stamped `[[rule]]`'s `settings_patch` in the workspace's `<name>.toml`, or — the
+reusable way — **shadow this pack** from a higher-priority overlay with your own patch
+(`null` deletes a key, per merge-patch). The [`50-example`](../50-example/README.md)
+overlay does exactly that (`presets/claude-managed-settings.toml`), stripping the org-pushed
+permission / sandbox / env-scrub gates.
 
-The rewrite script ships an **empty** `DEFAULT_PATCH`, so with no config the rule forces
-a fresh fetch but changes nothing. Make it do something by setting `settings_patch` on
-the rule — a JSON [RFC 7386](https://www.rfc-editor.org/rfc/rfc7386) merge-patch string
-in a `[rule.params]` sub-table (`null` deletes a key, anything else replaces it):
-```toml
-[[rule]]
-# … the stamped rule …
-[rule.params]
-# strip the org-pushed env-scrub + permission/sandbox gates (what 50-example sets):
-settings_patch = '{"env": {"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": null}, "permissions": {"allow": null, "deny": null, "disableBypassPermissionsMode": null, "defaultMode": null}, "sandbox": {"enabled": null}}'
-```
-`"{}"` is an explicit no-op. Moving the patch out of the script keeps the lib generic —
-it imposes no policy until a profile asks it to.
+## Testing
 
-## Files
-- `scripts/claude-code-settings-rewrite.star` — the rule body.
-- `presets/claude-managed-settings.toml` — the preset that stamps it.
-- `setup.d/claude-managed-settings.sh` — the client-side cache reset.
-- `tests/` — testkit tests (`credproxy dev test`).
+`tests/` unit-tests both the pack's expansion and the rewrite script (via the
+[testkit](../../docs/advanced/overlays.md)); `credproxy dev test` runs them.

@@ -1,10 +1,24 @@
-# A pure-rule preset: `preset add claude-managed-settings` needs no provider or
-# secret. The stamped rule runs the claude-code-settings-rewrite script; with no
-# [rule.params] it applies that script's DEFAULT_PATCH.
+# preset: claude-managed-settings — patch Claude Code's SERVER-managed settings
+# on the wire. Pure-rule pack (no credential) + a client-side cache-clear step.
+#
+# The rule runs the claude-code-settings-rewrite script on the settings response.
+# The script ships NO policy (empty DEFAULT_PATCH) and this pack's patch is a
+# NO-OP "{}" by default — the field is present so you can see it and know where to
+# put a real patch, but the pack itself imposes nothing. Supply the actual
+# (opinionated) patch by shadowing this pack from a higher-priority overlay, the
+# way the 50-example profile does. The setup step deletes Claude's cached
+# remote-settings.json so the next fetch goes through the proxy and gets rewritten.
+
+[[setup]]
+run   = "rm -f \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/remote-settings.json\""   # drop the stale cached copy
+user  = "workspace"
+order = 30
 
 [[rule]]
-suffix = "rewrite"                       # rule name becomes claude-managed-settings-rewrite
+suffix = "rewrite"                                    # -> rule name claude-managed-settings-rewrite
 hosts  = ["api.anthropic.com"]
 path   = "/api/claude_code/settings"
 action = "script"
 script = "claude-code-settings-rewrite"
+[rule.params]
+settings_patch = "{}"    # no-op default; override by shadowing this pack (see 50-example)
