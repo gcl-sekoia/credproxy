@@ -3,5 +3,8 @@
     "defaultMode": "bypassPermissions"
   },
   "skipDangerousModePermissionPrompt": true,
-  "model": "opus"
+  "model": "opus",
+  "env": {
+    "CLAUDE_CODE_SHELL": "/bin/bash"
+  }
 }
