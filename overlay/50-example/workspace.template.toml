@@ -14,6 +14,19 @@ map_host_user = true
 
 shell = ["zsh", "--login"]
 
+# Extra host env vars forwarded into the workspace on `enter`/`exec` when set on
+# your host (bare names -- copied if present, skipped if not), on top of the
+# always-safe built-in set (color/hyperlink/emulator hints). These four are the
+# image-specific, double-edged ones: safe on this devcontainer base, but on a
+# MINIMAL image remove any that misbehave (listed one per line so that's easy).
+# Exec-only.
+forward_env = [
+  "TERM",      # terminal type -- a minimal image may lack its terminfo ("terminal not found")
+  "LANG",      # locale -- forwarding one the image hasn't generated -> setlocale warnings
+  "LC_ALL",    # locale (same caveat as LANG)
+  "LC_CTYPE",  # locale (same caveat as LANG)
+]
+
 workdir = "/workdir"
 mounts = [
   # The project to work on. EDIT before `start` (the placeholder path won't exist).

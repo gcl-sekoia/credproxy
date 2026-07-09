@@ -14,6 +14,14 @@ map_host_user = true
 
 shell = ["zsh", "--login"]
 
+# Extra host env vars forwarded into the workspace on `enter`/`exec` when set on
+# your host (bare names -- copied if present, skipped if not). credproxy always
+# forwards a safe set of terminal capability hints; these four are added because
+# they can misbehave on a MINIMAL image but are safe on this devcontainer base
+# (TERM needs its terminfo entry; the locale vars need the locale generated).
+# Trim this line on a stripped-down image. Exec-only.
+forward_env = ["TERM", "LANG", "LC_ALL", "LC_CTYPE"]
+
 workdir = "/workdir"
 mounts = [
   # The project to work on. EDIT THIS before `start`: point `bind` at your
