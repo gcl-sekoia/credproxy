@@ -133,12 +133,16 @@ a prompt to stdout would be parsed as part of the response and fail.
 The CLI uses a generous timeout (120s) precisely so an interactive prompt has
 time to be answered.
 
-The builtin `bw` (Bitwarden) provider is the canonical example: it reuses
-`$BW_SESSION` when the vault is already unlocked, and otherwise prompts for the
-master password on the terminal. Because the CLI batches every binding on a
-provider into one invocation and `bw` reads the whole vault in a single
-`bw list items`, that prompt (and the decrypt behind it) happens **once** per
-resolve no matter how many bindings draw from the vault.
+The builtin `bw` (Bitwarden) provider is the canonical example. It reads the
+vault **in-process** in pure Python (no `bw` subprocess): with a live
+`$BW_SESSION` it decrypts via the session key, otherwise it prompts once for the
+master password and derives the keys locally (PBKDF2 vaults). It falls back to
+the `bw` CLI — a single `bw list items`, which prompts+unlocks on the terminal —
+only for an argon2 vault with no session, a `totp` ref (which needs a generated
+code, not the stored secret), or when there's no terminal to prompt on. Either
+way, because the CLI batches every binding on a provider into one invocation, the
+prompt (and the decrypt behind it) happens **once** per resolve no matter how
+many bindings draw from the vault.
 
 A provider that wraps an already-authenticated session need not be interactive
 at all: the builtin `gh-cli` provider returns `gh auth token --hostname <ref>`
