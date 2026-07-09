@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+# credproxy provider: bw (Bitwarden)  —  protocol: docs/reference/providers.md
+#
+# Reads secrets from a Bitwarden vault the `bw` CLI has logged in, via two paths:
+#
+#   fast     -- decrypt the CLI's on-disk vault directly in pure Python (pybw.py),
+#               no `bw` subprocess -- ~ms vs the seconds a `bw list items` Node
+#               cold-start + decrypt costs. Uses the BW_SESSION key when unlocked
+#               (any KDF); otherwise prompts for the master password and derives
+#               the keys locally (PBKDF2 vaults).
+#   fallback -- argon2 with no session (the pure reader can't derive its keys), a
+#               `totp` ref (which needs a generated code, not the stored secret),
+#               no terminal to prompt on, or ANY unexpected fast-path error: shell
+#               out to the `bw` CLI. Byte-identical to a CLI-only provider, so the
+#               fast path only ever changes how fast a secret resolves, not which.
+#
+# Both paths resolve a ref the same way (id first, then a unique name; ambiguous
+# name -> error) and extract the same fields, so they can't disagree on a hit.
+#
+# Batch-aware: the CLI groups every ref on this provider into ONE invocation, so
+# each path loads/decrypts the vault at most once per resolve.
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pybw
+
+# ════ metadata ═══════════════════════════════════════════════════════
+NAME = "bw"
+DESCRIPTION = "Bitwarden (bw CLI)"
+PROTOCOL_VERSION = 1
+HELP = """\
+Reads secrets from Bitwarden.
+  ref:     <item>[#<field>] -- item by name or id; field defaults to `password`
+           (also username, uri, notes, totp, or a custom field name). `#` (not
+           `/`) delimits the field so item names may contain slashes.
+  example: --provider bw --secret github
+           --provider bw --secret "aws-prod#access_key_id"
+The vault is read locally in-process (fast): via the BW_SESSION key if unlocked,
+else by prompting for the master password and deriving the keys (PBKDF2 vaults).
+It falls back to the `bw` CLI for argon2 vaults with no session, `totp` refs (a
+generated code, not the stored secret), or when there's no terminal to prompt on.
+Requires `bw` on PATH and a logged-in account (`bw login`).
+"""
+
+
+class NotFound(Exception):
+    """A ref that doesn't resolve to an item/field -> exit 2."""
+
+
+class BwError(Exception):
+    """A backend failure (bw missing, locked-and-can't-unlock, crash) -> exit 1."""
+
+
+def _resolve(by_id, by_name, item_ref):
+    """id first, then a UNIQUE name; ambiguous name -> error. Shared by both
+    paths so they agree on which item a ref names."""
+    item = by_id.get(item_ref)
+    if item is None:
+        matches = by_name.get(item_ref, [])
+        if len(matches) > 1:
+            raise NotFound(f"{len(matches)} items named {item_ref!r}; reference it by id")
+        item = matches[0] if matches else None
+    if item is None:
+        raise NotFound(f"no Bitwarden item {item_ref!r}")
+    return item
+
+
+# ════ fast path: pure-Python, in-process read of the CLI's vault ══════════════
+_FAST = None        # pybw.Vault | False (unavailable) | None (not tried yet)
+_FAST_INDEX = None  # (by_id, by_name) over pybw.Item, built once
+
+
+def _fast_vault():
+    """A pybw.Vault decrypted in-process, or None when the pure reader can't
+    unlock -> the caller falls back to the `bw` CLI. Tries the BW_SESSION key
+    first (any KDF); with no usable session it prompts for the master password
+    and derives the keys locally, but ONLY for PBKDF2 vaults -- an argon2 vault
+    it can't derive is left to the CLI (which prompts once) rather than being
+    prompted here only to fail. Either way it's in-process: no `bw` subprocess.
+    Built once per invocation."""
+    global _FAST
+    if _FAST is not None:
+        return _FAST or None
+    _FAST = False
+    try:
+        data = pybw.read_appdata()
+    except Exception:
+        return None  # no local vault on disk -> CLI
+    session = os.environ.get("BW_SESSION")
+    if session:
+        try:
+            _FAST = pybw.Vault.from_session(data, session)
+            return _FAST
+        except Exception:
+            pass  # stale/invalid session -> try the master-password path below
+    try:
+        if pybw.kdf_type(data) != 0:  # not PBKDF2 -> can't derive; leave it to bw
+            return None
+        import getpass
+        pw = getpass.getpass("Bitwarden master password: ", stream=sys.stderr)
+        _FAST = pybw.Vault.from_password(data, pw)
+    except Exception:
+        _FAST = False  # no tty, wrong password, unexpected format -> CLI
+    return _FAST or None
+
+
+def _fast_get(vault, item_ref, field):
+    global _FAST_INDEX
+    if _FAST_INDEX is None:
+        by_id, by_name = {}, {}
+        for it in vault.items():
+            by_id[it.id] = it
+            name = it.name  # case-sensitive, matching the CLI's exact match
+            if name is not None:
+                by_name.setdefault(name, []).append(it)
+        _FAST_INDEX = (by_id, by_name)
+    item = _resolve(_FAST_INDEX[0], _FAST_INDEX[1], item_ref)
+    if field == "password":
+        v = item.password
+    elif field == "username":
+        v = item.username
+    elif field == "uri":
+        v = item.uri
+    elif field == "notes":
+        v = item.notes
+    else:
+        v = item.field(field)  # custom field by name
+    if v is None:
+        raise NotFound(f"item {item_ref!r} has no {field}")
+    return v
+
+
+# ════ fallback: the bw CLI (handles locked/argon2/totp) ═══════════════════════
+_CLI_INDEX = None  # (by_id, by_name) over decrypted cipher dicts from `bw list items`
+
+
+def _bw(args):
+    """Run `bw <args>`, capturing stdout. With a controlling terminal, wire bw's
+    stdin+stderr to SEPARATE /dev/tty handles (mirroring `</dev/tty 2>/dev/tty`)
+    so it can prompt for the master password when the vault is locked -- one
+    shared read+write handle wedges the prompt. Without a terminal (CI, a
+    `credproxy push` pipeline) run non-interactively so a locked vault fails fast
+    with guidance instead of hanging. The parent CLI snapshots+restores tty echo
+    around the fetch, so a bw killed mid-prompt can't leave the shell echo-off."""
+    tty_in = tty_err = None
+    try:
+        tty_in = open("/dev/tty", "r")
+        tty_err = open("/dev/tty", "w")
+    except OSError:
+        if tty_in is not None:
+            tty_in.close()
+        tty_in = tty_err = None
+    try:
+        if tty_in is not None:
+            return subprocess.run(["bw", *args], stdin=tty_in, stderr=tty_err,
+                                  stdout=subprocess.PIPE, text=True)
+        return subprocess.run(["bw", *args], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True)
+    except FileNotFoundError:
+        raise BwError("`bw` is not on PATH (install the Bitwarden CLI)")
+    finally:
+        for f in (tty_in, tty_err):
+            if f is not None:
+                f.close()
+
+
+def _cli_index():
+    global _CLI_INDEX
+    if _CLI_INDEX is None:
+        r = _bw(["list", "items"])
+        if r.returncode != 0:
+            detail = (r.stderr or "").strip()
+            raise BwError("`bw list items` failed" + (f": {detail}" if detail else
+                          " (vault locked with no terminal to unlock it, or logged "
+                          "out -- unlock with `bw unlock` and export BW_SESSION, or "
+                          "run `bw login`)"))
+        try:
+            items = json.loads(r.stdout)
+        except ValueError as e:
+            raise BwError(f"`bw list items` returned non-JSON: {e}")
+        by_id, by_name = {}, {}
+        for it in items:
+            by_id[it["id"]] = it
+            by_name.setdefault(it["name"], []).append(it)
+        _CLI_INDEX = (by_id, by_name)
+    return _CLI_INDEX
+
+
+def _cli_get(item_ref, field):
+    by_id, by_name = _cli_index()
+    item = _resolve(by_id, by_name, item_ref)
+    login = item.get("login") or {}
+    if field == "password":
+        v = login.get("password")
+    elif field == "username":
+        v = login.get("username")
+    elif field == "uri":
+        uris = login.get("uris") or []
+        v = uris[0].get("uri") if uris else None
+    elif field == "notes":
+        v = item.get("notes")
+    elif field == "totp":
+        # A TOTP is generated, not stored, so it needs its own `bw get totp`.
+        r = _bw(["get", "totp", item["id"]])
+        if r.returncode != 0 or not r.stdout.strip():
+            raise NotFound(f"item {item_ref!r} has no TOTP")
+        return r.stdout.strip()
+    else:
+        for f in item.get("fields") or []:
+            if f.get("name") == field:
+                return f.get("value") or ""
+        raise NotFound(f"item {item_ref!r} has no field {field!r}")
+    if v is None:
+        raise NotFound(f"item {item_ref!r} has no {field}")
+    return v
+
+
+# ════ dispatch: fast when we can, CLI when we must ════════════════════════════
+def get(ref):
+    item_ref, sep, field = ref.partition("#")
+    field = field if sep else "password"
+    if not item_ref:
+        raise NotFound(f"empty item in ref {ref!r}")
+    vault = _fast_vault()
+    if vault is not None and field != "totp":
+        try:
+            return _fast_get(vault, item_ref, field)
+        except NotFound:
+            raise  # definitive: the CLI reads the same vault and would agree
+        except Exception:
+            pass   # unexpected fast-path failure -> fall back to the CLI
+    return _cli_get(item_ref, field)
+
+
+# ════ protocol footer (identical for every provider — skip on a scan) ═
+def _fail(msg, code):
+    print(f"{NAME} provider: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def main():
+    try:
+        req = json.load(sys.stdin)
+    except Exception as e:
+        _fail(f"bad request JSON: {e}", 1)
+    if req.get("version") != PROTOCOL_VERSION:
+        _fail("unsupported version", 3)
+    op = req.get("op")
+    if op == "describe":
+        json.dump({"description": DESCRIPTION}, sys.stdout)
+    elif op == "help":
+        json.dump({"help": HELP}, sys.stdout)
+    elif op == "get":
+        values = {}
+        try:
+            for ref in req.get("secrets") or []:
+                values[ref] = get(ref)
+        except NotFound as e:
+            _fail(str(e), 2)
+        except BwError as e:
+            _fail(str(e), 1)
+        json.dump({"values": values}, sys.stdout)
+    else:
+        _fail("unsupported op", 3)
+
+
+main()
