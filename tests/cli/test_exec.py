@@ -68,6 +68,129 @@ def test_enter_and_exec_share_the_docker_exec_prefix():
     assert e[:e.index("cx") + 1] == x[:x.index("cx") + 1]
 
 
+# ---- host env forwarding (_forward_env_flags) --------------------------------
+
+
+def _forwarded_vars(cmd):
+    """The VAR names forwarded via `-e VAR` (no `=`) in a docker-exec argv."""
+    return [cmd[i + 1] for i, t in enumerate(cmd)
+            if t == "-e" and "=" not in cmd[i + 1]]
+
+
+def _host_env(monkeypatch, *names):
+    """Deterministically set exactly `names` on the host env for a forwarding
+    test (setting the rest of the default set to absent so `os.environ` filtering
+    is controlled, not inherited from the real test shell)."""
+    from credproxy_cli.core.engine.sessions import DEFAULT_FORWARD_ENV
+    for var in DEFAULT_FORWARD_ENV:
+        monkeypatch.delenv(var, raising=False)
+    for var in names:
+        monkeypatch.setenv(var, "1")
+
+
+def test_forward_env_default_set_forwarded(monkeypatch):
+    """A default-set var SET on the host is forwarded as a bare `-e VAR`, in the
+    canonical order (subsequence of DEFAULT_FORWARD_ENV)."""
+    from credproxy_cli.core.engine.sessions import _exec_cmd, DEFAULT_FORWARD_ENV
+    for var in DEFAULT_FORWARD_ENV:                 # all present -> full set
+        monkeypatch.setenv(var, "1")
+    cmd = _exec_cmd({}, "cx", ["id"], mode="raw", user_override=None, isatty=False)
+    fwd = _forwarded_vars(cmd)
+    for var in ("COLORTERM", "NO_COLOR", "FORCE_HYPERLINK", "WT_SESSION"):
+        assert var in fwd
+    assert fwd == list(DEFAULT_FORWARD_ENV)         # order preserved, nothing else
+
+
+def test_forward_env_omits_host_unset_vars(monkeypatch):
+    """A forwarded var NOT set on the host is omitted -- never emitted as a bare
+    `-e VAR`, which on docker would REMOVE the image-baked value (moby treats
+    `-e VAR` with no `=` as unset). This is the cross-runtime forward-if-set fix."""
+    from credproxy_cli.core.engine.sessions import _exec_cmd
+    _host_env(monkeypatch, "COLORTERM")             # only COLORTERM set
+    monkeypatch.delenv("LANG", raising=False)       # forward_env extra, unset on host
+    cmd = _exec_cmd({"forward_env": ["LANG"]}, "cx", ["id"],
+                    mode="raw", user_override=None, isatty=False)
+    fwd = _forwarded_vars(cmd)
+    assert fwd == ["COLORTERM"]                     # NO_COLOR, LANG, ... all unset
+    assert "LANG" not in fwd
+
+
+def test_forward_env_default_set_is_always_safe():
+    """The built-in default is the ALWAYS-SAFE set only: the image-specific
+    double-edged vars (TERM, locale) live in the template's `forward_env`, and
+    host-describing/host-path vars aren't forwarded at all."""
+    from credproxy_cli.core.engine.sessions import DEFAULT_FORWARD_ENV
+    for var in ("TERM", "LANG", "LC_ALL", "LC_CTYPE", "CI",
+                "WSL_DISTRO_NAME", "SSH_CONNECTION", "VSCODE_GIT_ASKPASS_MAIN",
+                "ALACRITTY_LOG", "TMUX", "STY"):
+        assert var not in DEFAULT_FORWARD_ENV
+
+
+def test_forward_env_extends_with_config(monkeypatch):
+    from credproxy_cli.core.engine.sessions import _exec_cmd
+    _host_env(monkeypatch, "COLORTERM")
+    monkeypatch.setenv("MY_VAR", "1")
+    monkeypatch.setenv("OTHER", "1")
+    cmd = _exec_cmd({"forward_env": ["MY_VAR", "OTHER"]}, "cx", ["id"],
+                    mode="raw", user_override=None, isatty=False)
+    fwd = _forwarded_vars(cmd)
+    assert fwd[-2:] == ["MY_VAR", "OTHER"]          # appended after the defaults
+
+
+def test_forward_env_pinned_in_env_is_not_forwarded(monkeypatch):
+    """A var explicitly set in config `env` wins over the ambient host value, so
+    it is dropped from the forward set. Covers both a default-set var and a
+    template-supplied `forward_env` one (e.g. TERM/locale)."""
+    from credproxy_cli.core.engine.sessions import _exec_cmd
+    _host_env(monkeypatch, "COLORTERM", "NO_COLOR")
+    monkeypatch.setenv("TERM", "xterm-kitty")
+    cmd = _exec_cmd({"forward_env": ["TERM"],
+                     "env": {"COLORTERM": "truecolor", "TERM": "xterm-256color"}},
+                    "cx", ["id"], mode="raw", user_override=None, isatty=False)
+    fwd = _forwarded_vars(cmd)
+    assert "COLORTERM" not in fwd and "TERM" not in fwd
+    assert "NO_COLOR" in fwd                         # untouched vars still forwarded
+
+
+def test_forward_env_deduplicated(monkeypatch):
+    """A `forward_env` entry already in the default set isn't emitted twice."""
+    from credproxy_cli.core.engine.sessions import _exec_cmd
+    _host_env(monkeypatch, "COLORTERM")
+    cmd = _exec_cmd({"forward_env": ["COLORTERM"]}, "cx", ["id"],
+                    mode="raw", user_override=None, isatty=False)
+    assert _forwarded_vars(cmd).count("COLORTERM") == 1
+
+
+def test_forward_env_before_exec_flags(monkeypatch):
+    """Forwarding lands before exec_flags so an explicit -e there wins (last-wins)."""
+    from credproxy_cli.core.engine.sessions import _exec_cmd
+    _host_env(monkeypatch, "COLORTERM")
+    cmd = _exec_cmd({"exec_flags": ["-e", "COLORTERM=truecolor"]}, "cx", ["id"],
+                    mode="raw", user_override=None, isatty=False)
+    # bare `-e COLORTERM` (forward) precedes explicit `-e COLORTERM=…` (override).
+    assert cmd.index("COLORTERM") < cmd.index("COLORTERM=truecolor")
+
+
+def test_forward_env_applies_to_enter_too(monkeypatch):
+    from credproxy_cli.core.engine.sessions import _enter_exec_cmd
+    _host_env(monkeypatch, "COLORTERM")
+    cmd = _enter_exec_cmd({}, "cx", ["cmd"], user_override=None, isatty=False)
+    assert "COLORTERM" in _forwarded_vars(cmd)
+
+
+def test_effective_config_shows_merged_forward_env():
+    """`config` (effective) reveals the built-in default names merged with the
+    declared extras and pin-filtered -- the one surface showing DEFAULT_FORWARD_ENV
+    (independent of the host env, since it's a config view, not a runtime probe)."""
+    from credproxy_cli.core.engine.sessions import effective_config, DEFAULT_FORWARD_ENV
+    out = effective_config({"image": "x", "forward_env": ["MY_VAR"],
+                            "env": {"COLORTERM": "truecolor"}})
+    assert "MY_VAR" in out["forward_env"]
+    assert "NO_COLOR" in out["forward_env"]          # a built-in default, surfaced
+    assert "COLORTERM" not in out["forward_env"]     # pinned in env -> dropped
+    assert set(DEFAULT_FORWARD_ENV) - {"COLORTERM"} <= set(out["forward_env"])
+
+
 # ---- exec_workspace: no auto-stop, but reaper-visible; exit mapping ----------
 
 
