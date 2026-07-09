@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+# credproxy provider: gcloud (Google Cloud SDK)  —  protocol: docs/reference/providers.md
+#
+# Prints a short-lived Google OAuth2 *access token* from the host's already
+# logged-in gcloud, exactly the gcloud analog of the builtin `gh-cli` provider:
+# the host holds the durable credential (a user refresh token or a service-account
+# key), this provider shells out to mint a ~1h access token, and credproxy injects
+# THAT on the wire with the `bearer` scheme. The refresh token / SA key never
+# enters the workspace; the workspace only ever sees an inert placeholder token.
+#
+# Pairs with the `gcloud` preset (`credp preset add gcloud`), which wires a
+# `bearer` binding on `*.googleapis.com` and sets CLOUDSDK_AUTH_ACCESS_TOKEN to the
+# placeholder so gcloud sends `Authorization: Bearer <placeholder>` and does NOT
+# try to refresh (no token-endpoint traffic — the only intercepted host is the API
+# glob). Because the token is resolved at push time and held statically, it EXPIRES
+# after ~1h: re-run `credp push` to mint a fresh one.
+import json
+import subprocess
+import sys
+
+# ════ metadata ═══════════════════════════════════════════════════════
+NAME = "gcloud"
+DESCRIPTION = "Google Cloud access token (gcloud CLI)"
+PROTOCOL_VERSION = 1
+HELP = """\
+Prints a short-lived Google access token from the host's gcloud login.
+  ref:  ''/'default'        -> the active gcloud account
+        'adc'               -> application-default credentials
+        '<account-email>'   -> that specific account
+        'impersonate:<sa>'  -> impersonate the given service-account email
+  The token lives ~1h; re-run `credp push` to refresh it. The host's durable
+  credential (refresh token / SA key) never enters the workspace.
+Requires `gcloud` on PATH and a login (`gcloud auth login`, or
+`gcloud auth activate-service-account`, or `gcloud auth application-default login`
+for the 'adc' ref). `print-access-token` is non-interactive.
+"""
+
+# ════ fetch one secret (the only provider-specific logic) ═════════════
+class NotFound(Exception):
+    """No usable login for this ref -> exit 2."""
+
+
+class GcloudError(Exception):
+    """A backend failure (gcloud missing / crash) -> exit 1."""
+
+
+# Cached for the lifetime of one invocation, so the same ref requested by
+# several bindings only shells out to `gcloud` once.
+_CACHE: dict[str, str] = {}
+
+
+def _argv(ref):
+    if ref == "adc":
+        return ["gcloud", "auth", "application-default", "print-access-token"]
+    if ref.startswith("impersonate:"):
+        sa = ref.split(":", 1)[1]
+        return ["gcloud", "auth", "print-access-token",
+                f"--impersonate-service-account={sa}"]
+    if ref in ("", "default"):
+        return ["gcloud", "auth", "print-access-token"]
+    # anything else is treated as an account email
+    return ["gcloud", "auth", "print-access-token", ref]
+
+
+def get(ref):
+    ref = ref.strip()
+    if ref in _CACHE:
+        return _CACHE[ref]
+    try:
+        r = subprocess.run(_argv(ref), capture_output=True, text=True)
+    except FileNotFoundError:
+        raise GcloudError("`gcloud` is not on PATH (install the Google Cloud SDK)")
+    if r.returncode != 0:
+        who = repr(ref) if ref not in ("", "default") else "the active account"
+        raise NotFound(
+            f"gcloud could not mint a token for {who} "
+            f"(try `gcloud auth login`): {r.stderr.strip()}"
+        )
+    token = _CACHE[ref] = r.stdout.strip()
+    if not token:
+        raise NotFound(f"gcloud returned an empty token for {ref or 'the active account'}")
+    return token
+
+
+# ════ protocol footer (identical for every provider — skip on a scan) ═
+def _fail(msg, code):
+    print(f"{NAME} provider: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def main():
+    try:
+        req = json.load(sys.stdin)
+    except Exception as e:
+        _fail(f"bad request JSON: {e}", 1)
+    if req.get("version") != PROTOCOL_VERSION:
+        _fail("unsupported version", 3)
+    op = req.get("op")
+    if op == "describe":
+        json.dump({"description": DESCRIPTION}, sys.stdout)
+    elif op == "help":
+        json.dump({"help": HELP}, sys.stdout)
+    elif op == "get":
+        values = {}
+        try:
+            for ref in req.get("secrets") or []:
+                values[ref] = get(ref)
+        except NotFound as e:
+            _fail(str(e), 2)
+        except GcloudError as e:
+            _fail(str(e), 1)
+        json.dump({"values": values}, sys.stdout)
+    else:
+        _fail("unsupported op", 3)
+
+
+main()

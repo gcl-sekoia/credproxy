@@ -9,7 +9,7 @@ from credproxy_cli.core.presets import build_preset, get_preset, load_preset_sou
 
 def test_base_packs_resolve_from_the_base_overlay():
     src = load_preset_sources()
-    for name in ("proxy-ca", "toolchain", "cache", "claude-code", "github-auth", "git-signing"):
+    for name in ("proxy-ca", "toolchain", "cache", "claude-code", "github-auth", "git-signing", "gcloud"):
         assert src.get(name) == "overlay:base", f"{name} resolved from {src.get(name)!r}"
 
 
@@ -41,6 +41,31 @@ def test_github_auth_two_parts_share_one_placeholder():
 
 def test_github_auth_declares_host_prereqs():
     spec = get_preset("github-auth")
+    kinds = {r.kind for r in spec.requires}
+    assert kinds == {"command", "provider"}
+    prov = next(r for r in spec.requires if r.kind == "provider")
+    assert prov.fetch is True
+
+
+def test_gcloud_injects_a_host_minted_access_token():
+    # Host-minted access token + bearer swap: the `gcloud` provider prints a
+    # short-lived token on the host, and this binding swaps it on *.googleapis.com.
+    exp = build_preset("gcloud", provider="gcloud", secret="default")
+    (api,) = exp.bindings
+    assert (api.name, api.injector, api.hosts, api.env) == \
+        ("gcloud-api", "bearer", ("*.googleapis.com",), "CLOUDSDK_AUTH_ACCESS_TOKEN")
+    assert api.provider == "gcloud" and api.secret == "default"
+    # ya29.* so client-side format sniffs pass; the proxy swaps it in transit.
+    assert api.placeholder.startswith("ya29.credproxy-") and len(api.placeholder) == 64
+    # gcloud ignores SSL_CERT_FILE/REQUESTS_CA_BUNDLE — it needs its own CA knob.
+    assert dict(exp.env)["CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE"] == "/tmp/proxy-ca.crt"
+    # Flagless off the host's active gcloud login.
+    spec = get_preset("gcloud")
+    assert spec.default_provider == "gcloud" and spec.default_secret == "default"
+
+
+def test_gcloud_declares_host_prereqs():
+    spec = get_preset("gcloud")
     kinds = {r.kind for r in spec.requires}
     assert kinds == {"command", "provider"}
     prov = next(r for r in spec.requires if r.kind == "provider")
