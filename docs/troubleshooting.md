@@ -159,6 +159,47 @@ never persisted — so multiple workspaces run at once without coordination. If 
 port error does appear, it is about your own image's published ports, not
 credproxy's admin port.
 
+## A preset's definition changed but my workspace didn't
+
+Expected. A `[[preset]]` block in your config is a durable **reference**, and its
+expansion is a **snapshot** pinned in the lockfile at the moment you added it. A
+pack whose definition changes upstream (a new host, an added rule, a dropped
+part) is **inert** until you re-expand it on your own clock:
+
+```sh
+credproxy workspace NAME preset refresh github --check   # preview the diff, writes nothing
+credproxy workspace NAME preset refresh github           # re-snapshot the expansion
+```
+
+Omit the pack name to refresh every reference in the file. (Editing the
+reference's **own** inputs — `provider`, `secret`, `[preset.options]`, `disable`,
+`[preset.override.*]` — re-expands automatically on the next resolve; only a
+change to the pack *definition* needs `refresh`.)
+
+## `inspect` says "reality-drift"
+
+The proxy is holding a config credproxy did not push. The proxy keeps its config
+on tmpfs, so a `stop`/`start` clears it, and a stateless `credproxy push` from
+elsewhere can also replace it — either way the live config generation is not the
+one credproxy last recorded pushing. It is not an error; heal it by re-pushing:
+
+```sh
+credproxy workspace NAME apply     # re-push the resolved config to the proxy
+```
+
+`config-drift` (the file has moved ahead of the proxy) is the same fix; `apply`
+covers both.
+
+## I deleted `lock.json`
+
+No harm — it holds only regenerable machine data. The next resolve (any `start`,
+`push`, `apply`, `binding add`, `binding test`, `resolve`, or `preset` command)
+re-mints each binding's placeholder and re-expands every `[[preset]]` reference
+from its **current** definition, then re-snapshots everything. The one visible
+consequence is that a regenerated placeholder value differs from the old one, so
+a workspace that is already running wants a fresh `apply` to pick it up. Your
+hand-owned TOML is untouched.
+
 ## Where the logs are
 
 The proxy writes one structured record per line. `docker logs` on the proxy

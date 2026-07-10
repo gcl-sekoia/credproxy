@@ -342,7 +342,8 @@ A shared script plus per-rule params is only half the story — the other half i
 *wiring it into a workspace in one command*. That's the **preset**: a preset's
 optional `[[rule]]` array ships the guardrails alongside (or instead of) a
 credential's bindings, so `credproxy workspace NAME preset add org-guardrails`
-stamps the whole policy — hosts, params, visibility — in one move. An org overlay
+applies the whole policy — hosts, params, visibility — in one move (a durable
+`[[preset]]` reference the resolver expands). An org overlay
 ships the `.star` under `scripts/` and the pack under `presets/` in the same
 overlay, and every workspace applies it identically. See the preset section in
 [`configuration.md`](configuration.md#bindings) and [`overlays.md`](../advanced/overlays.md);

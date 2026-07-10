@@ -85,8 +85,8 @@ all. Rules are the next chapter.
 
 A service often needs more than a token: a setup script, an env var, a mounted
 file. A preset can ship those as well — `[[mount]]`, `[env]`, and `[[setup]]`
-sections that stamp into the container-side of your workspace config, right
-alongside the bindings. A pack can be *only* container config, with no
+sections that the resolver merges into the container-side of your effective
+workspace config, right alongside the bindings. A pack can be *only* container config, with no
 credential at all. A `github-auth` pack might look like this:
 
 ```toml

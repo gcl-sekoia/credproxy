@@ -9,11 +9,15 @@ directly than run a command. New to credproxy? Follow [the
 guide](../guide/01-install.md) first; this page assumes you already know what a
 workspace and a binding are.
 
-A workspace is defined by a single TOML file. That file is the **source of
-truth**: imperative commands (`workspace create`, `binding add`, …) are sugar
-that edit it, and every change they make is something you could have typed into
-the file yourself. There is no hidden state and no separate "saved" copy — what
-the file says is what the workspace is.
+A workspace is defined by a single **hand-owned** TOML file — the source of
+intent. Imperative commands (`workspace create`, `binding add`, …) are sugar
+that only ever append a whole block at the end of the file or delete a whole
+named block, so every change they make is something you could have typed in
+yourself and your comments are never touched. Generated machine state — the
+inert placeholders and the snapshot of each `[[preset]]` reference's expansion —
+lives beside the file in a regenerable `lock.json` (described below), never
+inside the TOML; deleting the lock is safe (placeholders regenerate, presets
+re-expand from the current definitions).
 
 This doc covers both paths: the **file format** and the **CLI** that edits and
 applies it. For the netns/bootstrap side of a running workspace see
@@ -27,7 +31,7 @@ applies it. For the netns/bootstrap side of a running workspace see
 | `$XDG_CONFIG_HOME/credproxy/workspaces/<name>.toml` | the workspace config (this doc). Default `~/.config/credproxy/workspaces/`. The file existing **is** the workspace existing. |
 | `$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml` | your injector definitions (shadow the builtin ones) |
 | `$XDG_CONFIG_HOME/credproxy/providers/<name>` | your provider executables (shadow the builtin ones) |
-| `$XDG_STATE_HOME/credproxy/workspaces/<name>/` | runtime state — `auth.token`, `lock.json` (machine-owned generated data: binding placeholders), the last-applied spec/bindings, session pidfiles. Not hand-edited. Default `~/.local/state/credproxy/`. |
+| `$XDG_STATE_HOME/credproxy/workspaces/<name>/` | runtime state — `auth.token`, `lock.json` (machine-owned canonical JSON: binding placeholders + preset expansion snapshots + an `applied` section holding the last-pushed spec/bindings/rules metadata, the pushed config generation, and the setup-completed container id), `lifecycle.lock` (the per-workspace flock), session pidfiles. Not hand-edited. Default `~/.local/state/credproxy/`. |
 | `$XDG_STATE_HOME/credproxy/default-workspace` | the current default-workspace pointer (loose surface) |
 
 The config dir is editable; the state dir is owned by the tool. Point the two
@@ -401,10 +405,15 @@ substitute-family binding's `placeholder` — lives in the machine-owned
 - An explicit `placeholder` in the TOML always wins and is never copied into the
   lock.
 - Placeholder identity is keyed by name, so **renaming a binding regenerates its
-  placeholder** (and drops the stale lock entry). Delete `lock.json` and it all
-  regenerates safely.
+  placeholder** (and drops the stale lock entry).
 - `[[rule]]` names are hand-authored the same way (rules carry no placeholder, so
   they have no lock entry).
+
+`lock.json` is **safe to delete**: it holds only regenerable machine data. The
+next resolve re-mints placeholders (a binding with no explicit `placeholder`) and
+re-expands every `[[preset]]` reference from its **current** definition, then
+re-snapshots the lot. (The one visible consequence: a placeholder value changes
+if you delete the lock, so a workspace mid-flight would want a fresh `apply`.)
 
 #### Host patterns
 
