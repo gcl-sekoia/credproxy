@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .errors import InjectorError
+from ..errors import InjectorError
 
 
 @dataclass(frozen=True)

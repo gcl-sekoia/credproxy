@@ -13,7 +13,7 @@ def test_exec_cmd_default_uses_ca_trust_shim():
     """Default mode wraps CMD in the SAME env shim `enter -- CMD` uses, so the
     CA-trust env is sourced (the headline #31 fix -- `exec -- curl` must not fail
     TLS where `enter -- curl` succeeds)."""
-    from credproxy_cli.core.lifecycle import _exec_cmd, DEFAULT_ENTER_PRELUDE
+    from credproxy_cli.core.engine.lifecycle import _exec_cmd, DEFAULT_ENTER_PRELUDE
     cmd = _exec_cmd({"user": "dev", "home": "/home/dev"}, "cx",
                     ["curl", "https://api.github.com"],
                     mode="shim", user_override=None, isatty=False)
@@ -29,7 +29,7 @@ def test_exec_cmd_default_uses_ca_trust_shim():
 
 
 def test_exec_cmd_raw_is_direct_execve():
-    from credproxy_cli.core.lifecycle import _exec_cmd
+    from credproxy_cli.core.engine.lifecycle import _exec_cmd
     cmd = _exec_cmd({"home": "/h"}, "cx", ["gh", "auth", "status"],
                     mode="raw", user_override=None, isatty=False)
     # No shell wrapper: the command follows the container as raw argv.
@@ -38,7 +38,7 @@ def test_exec_cmd_raw_is_direct_execve():
 
 
 def test_exec_cmd_login_wraps_bash_login_shell():
-    from credproxy_cli.core.lifecycle import _exec_cmd
+    from credproxy_cli.core.engine.lifecycle import _exec_cmd
     cmd = _exec_cmd({}, "cx", ["gh", "x"], mode="login",
                     user_override=None, isatty=True)
     assert "--tty=true" in cmd
@@ -48,7 +48,7 @@ def test_exec_cmd_login_wraps_bash_login_shell():
 
 
 def test_exec_cmd_user_override_beats_config_user():
-    from credproxy_cli.core.lifecycle import _exec_cmd
+    from credproxy_cli.core.engine.lifecycle import _exec_cmd
     cmd = _exec_cmd({"user": "dev"}, "cx", ["id"], mode="raw",
                     user_override="root", isatty=False)
     # docker last-wins: only the override -u should be honoured (no config -u dev
@@ -60,7 +60,7 @@ def test_exec_cmd_user_override_beats_config_user():
 def test_enter_and_exec_share_the_docker_exec_prefix():
     """Regression guard: both verbs build the prefix through _docker_exec_argv, so
     they honour workdir/user/exec_flags/session booleans identically."""
-    from credproxy_cli.core.lifecycle import _exec_cmd, _enter_exec_cmd
+    from credproxy_cli.core.engine.lifecycle import _exec_cmd, _enter_exec_cmd
     cfg = {"user": "dev", "home": "/h", "exec_flags": ["--env", "X=1"]}
     e = _enter_exec_cmd(cfg, "cx", ["cmd"], user_override=None, isatty=False)
     x = _exec_cmd(cfg, "cx", ["cmd"], mode="raw", user_override=None, isatty=False)
@@ -91,7 +91,7 @@ def test_exec_registers_pidfile_but_never_auto_stops(tmp_path, monkeypatch):
     INITIATE a stop (no _maybe_auto_stop call) -- so a concurrent enter teardown
     can't stop the box under it, and exec itself causes no churn (#31.3)."""
     import subprocess
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
 
     ws = _fake_ws(tmp_path)
     seen = {"pidfile_existed_during_run": False, "auto_stop_called": False}
@@ -119,7 +119,7 @@ def test_exec_maps_signal_death_exit_code(tmp_path, monkeypatch):
     and the returned code matches the process's own exit (#31.2)."""
     import signal
     import subprocess
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
 
     ws = _fake_ws(tmp_path)
     monkeypatch.setattr(lifecycle, "_start_for_exec", lambda *a, **k: None)
@@ -133,7 +133,7 @@ def test_exec_maps_signal_death_exit_code(tmp_path, monkeypatch):
 def test_exec_fast_path_skips_start_when_both_running(tmp_path, monkeypatch):
     """Both containers running + no --push -> skip the full start reconciliation
     (no wait_for_ready / start_workspace); just exec (#31.4)."""
-    from credproxy_cli.core import lifecycle, docker
+    from credproxy_cli.core.engine import lifecycle, docker
 
     ws = _fake_ws(tmp_path)
     monkeypatch.setattr(docker, "container_status", lambda n: "running")
@@ -145,7 +145,7 @@ def test_exec_fast_path_skips_start_when_both_running(tmp_path, monkeypatch):
 
 
 def test_exec_fast_path_bypassed_by_push(tmp_path, monkeypatch):
-    from credproxy_cli.core import lifecycle, docker
+    from credproxy_cli.core.engine import lifecycle, docker
 
     ws = _fake_ws(tmp_path)
     monkeypatch.setattr(docker, "container_status", lambda n: "running")
@@ -157,7 +157,7 @@ def test_exec_fast_path_bypassed_by_push(tmp_path, monkeypatch):
 
 
 def test_exec_fast_path_bypassed_when_container_down(tmp_path, monkeypatch):
-    from credproxy_cli.core import lifecycle, docker
+    from credproxy_cli.core.engine import lifecycle, docker
 
     ws = _fake_ws(tmp_path)
     # proxy running, workspace container down -> full start.

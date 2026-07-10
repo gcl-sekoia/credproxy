@@ -68,7 +68,7 @@ from .bindings import (
     _toml_str,
 )
 from .config import inline_array_span, last_code_char_index
-from .errors import ConfigError
+from ..errors import ConfigError
 from .rules import _render_rule_block
 from .workspace import Workspace
 

@@ -26,9 +26,9 @@ import importlib.util
 import sys
 from dataclasses import dataclass
 
-from .errors import CredproxyError, DependencyError, ImageError
-from .injectors import list_injectors
-from .scripts import Script, find_script, list_scripts
+from ..errors import CredproxyError, DependencyError, ImageError
+from ..model.injectors import list_injectors
+from ..model.scripts import Script, find_script, list_scripts
 
 
 @dataclass(frozen=True)
@@ -147,7 +147,7 @@ print(json.dumps({"results": results}))
 
 
 def _add_proxy_to_path() -> None:
-    from .paths import PROXY_DIR
+    from ..paths import PROXY_DIR
     p = str(PROXY_DIR)
     if PROXY_DIR.is_dir() and p not in sys.path:
         sys.path.insert(0, p)
@@ -219,7 +219,7 @@ def _compile_in_image(plan: list[dict]) -> list[dict]:
 
     from . import docker as core_docker
     from .imageenv import ImageEnv
-    from .paths import IMAGE_TAG, PROXY_DIR
+    from ..paths import IMAGE_TAG, PROXY_DIR
 
     meta = ImageEnv.load()
     cmd = ["docker", "run", "--rm", "-i"]

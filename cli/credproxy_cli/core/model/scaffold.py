@@ -11,8 +11,8 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import CredproxyError
-from .paths import (
+from ..errors import CredproxyError
+from ..paths import (
     builtin_injectors_dir,
     builtin_providers_dir,
     injectors_config_dir,

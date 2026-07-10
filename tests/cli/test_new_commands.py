@@ -107,8 +107,8 @@ def test_current_no_default_json(xdg, workspaces_dir, tmp_path, monkeypatch):
 
 def test_current_reports_pointer(xdg, workspaces_dir, tmp_path, monkeypatch):
     (workspaces_dir / "proj.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("proj"))
     monkeypatch.chdir(tmp_path)  # no cwd association -> resolves to the default
 
@@ -127,7 +127,7 @@ def test_workspace_use_is_loose_only(xdg, workspaces_dir):
     """`workspace use` mutates the loose default pointer, so the strict surface
     must reject it (it's the scriptable contract); loose accepts it."""
     (workspaces_dir / "w.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import read_default
+    from credproxy_cli.core.model.pointer import read_default
 
     ec, out, err = _run(["workspace", "use", "w"])          # strict
     assert ec != 0 and "loose-only" in (out + err)

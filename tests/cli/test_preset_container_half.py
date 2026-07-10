@@ -38,7 +38,7 @@ def _pack_file(base, rel: str, body: str = "echo hi\n"):
 
 def _make_ws(name: str, content: str):
     from credproxy_cli.core.paths import workspaces_config_dir
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     wd = workspaces_config_dir()
     wd.mkdir(parents=True, exist_ok=True)
     (wd / f"{name}.toml").write_text(textwrap.dedent(content))
@@ -52,7 +52,7 @@ _WS_MIN = 'image = "python:3.12-slim"\nuser = "vscode"\n'
 
 
 def test_parse_accepts_mount_env_setup(xdg):
-    from credproxy_cli.core.presets import get_preset
+    from credproxy_cli.core.model.presets import get_preset
     base = _write_preset("cont", """
         [[mount]]
         overlay = "setup.d/x.sh"
@@ -78,7 +78,7 @@ def test_parse_accepts_mount_env_setup(xdg):
 
 def test_parse_rejects_empty_pack(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("empty", "default_provider = \"env\"\n")
     with pytest.raises(ConfigError, match="at least one"):
         load_presets()
@@ -86,7 +86,7 @@ def test_parse_rejects_empty_pack(xdg):
 
 def test_parse_setup_requires_order(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("noorder", '[[setup]]\nrun = "x"\n')
     with pytest.raises(ConfigError, match="order.*required"):
         load_presets()
@@ -94,7 +94,7 @@ def test_parse_setup_requires_order(xdg):
 
 def test_parse_setup_rejects_bare_string(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("strsetup", 'setup = ["do a thing"]\n')
     with pytest.raises(ConfigError, match="must be a table"):
         load_presets()
@@ -102,7 +102,7 @@ def test_parse_setup_rejects_bare_string(xdg):
 
 def test_parse_env_rejects_non_string_value(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("badenv", "[env]\nN = 7\n")
     with pytest.raises(ConfigError, match="must be a non-empty string"):
         load_presets()
@@ -110,7 +110,7 @@ def test_parse_env_rejects_non_string_value(xdg):
 
 def test_parse_env_rejects_empty_value(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("emptyenv", '[env]\nN = ""\n')
     with pytest.raises(ConfigError, match="non-empty string"):
         load_presets()
@@ -122,7 +122,7 @@ def test_parse_env_rejects_empty_value(xdg):
 def test_mount_validator_parity_with_workspace(xdg):
     """An invalid mount fails identically in a workspace config and a preset --
     both go through config._parse_mount."""
-    from credproxy_cli.core import config as core_config
+    from credproxy_cli.core.model import config as core_config
     from credproxy_cli.core.errors import ConfigError
     bad = {"volume": "cache", "overlay": "x", "target": "/c"}  # two kinds
     with pytest.raises(ConfigError, match="exactly one of bind/volume/overlay") as a:
@@ -132,7 +132,7 @@ def test_mount_validator_parity_with_workspace(xdg):
     # And the preset path surfaces the same underlying validator error.
     _write_preset("twokind",
                   '[[mount]]\nvolume = "cache"\nbind = "/x"\ntarget = "/c"\n')
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     with pytest.raises(ConfigError, match="exactly one of bind/volume/overlay"):
         load_presets()
 
@@ -140,14 +140,14 @@ def test_mount_validator_parity_with_workspace(xdg):
 def test_setup_validator_parity(xdg):
     """The preset path reuses config._parse_setup_table -- a bad `user` value
     fails the same way it does in a workspace config."""
-    from credproxy_cli.core import config as core_config
+    from credproxy_cli.core.model import config as core_config
     from credproxy_cli.core.errors import ConfigError
     with pytest.raises(ConfigError, match='must be "workspace" or "root"'):
         core_config._parse_setup_table({"run": "x", "user": "bob"}, "w",
                                        require_order=True)
     _write_preset("baduser",
                   '[[setup]]\nrun = "x"\nuser = "bob"\norder = 1\n')
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     with pytest.raises(ConfigError, match='must be "workspace" or "root"'):
         load_presets()
 
@@ -159,7 +159,7 @@ def test_qualified_source_resolves_per_tier(xdg, monkeypatch):
     """A pack in an overlay stamps `overlay = "<tier>:rel"`, pinned to that
     overlay's dir, and it resolves via config._overlay_source."""
     import os
-    from credproxy_cli.core import config as core_config
+    from credproxy_cli.core.model import config as core_config
     from credproxy_cli.core.paths import config_dir
     ov = config_dir() / "_ovdir"
     (ov / "presets").mkdir(parents=True)
@@ -170,7 +170,7 @@ def test_qualified_source_resolves_per_tier(xdg, monkeypatch):
 
 
 def test_qualified_source_user_and_builtin_tiers(xdg):
-    from credproxy_cli.core import config as core_config
+    from credproxy_cli.core.model import config as core_config
     from credproxy_cli.core.paths import config_dir
     _pack_file(config_dir(), "setup.d/z.sh")
     assert core_config._overlay_source("user:setup.d/z.sh", "w") \
@@ -181,14 +181,14 @@ def test_qualified_source_user_and_builtin_tiers(xdg):
 
 
 def test_qualified_source_unknown_tier(xdg):
-    from credproxy_cli.core import config as core_config
+    from credproxy_cli.core.model import config as core_config
     from credproxy_cli.core.errors import ConfigError
     with pytest.raises(ConfigError, match="unknown tier 'nope'"):
         core_config._overlay_source("nope:x.sh", "w")
 
 
 def test_qualified_source_escape_rejected(xdg):
-    from credproxy_cli.core import config as core_config
+    from credproxy_cli.core.model import config as core_config
     from credproxy_cli.core.errors import ConfigError
     with pytest.raises(ConfigError, match="escapes"):
         core_config._overlay_source("user:../../etc/passwd", "w")
@@ -203,7 +203,7 @@ def test_preset_qualifies_overlay_to_owning_overlay_tier(xdg, monkeypatch):
     (ov / "presets" / "acme-cont.toml").write_text(
         '[[mount]]\noverlay = "setup.d/a.sh"\ntarget = "/opt/a.sh"\n')
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
-    from credproxy_cli.core.presets import get_preset
+    from credproxy_cli.core.model.presets import get_preset
     spec = get_preset("acme-cont")
     assert spec.mounts[0].value == "acme:setup.d/a.sh"
 
@@ -232,8 +232,8 @@ def _install_cont_preset(name="cont", *, with_binding=False):
 
 
 def _stamp(ws, preset, provider=None, secret=None):
-    from credproxy_cli.core import preset_stamp
-    from credproxy_cli.core.presets import build_preset
+    from credproxy_cli.core.model import preset_stamp
+    from credproxy_cli.core.model.presets import build_preset
     exp = build_preset(preset, provider, secret)
     preset_stamp.stamp(ws, preset, exp.rev, bindings=list(exp.bindings),
                        rules=list(exp.rules), mounts=list(exp.mounts),
@@ -306,11 +306,11 @@ def test_stamp_file_ending_in_binding_block(xdg):
         placeholder = "ph_xyz"
     '''))
     _stamp(ws, "cont")
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     cfg = load_config(ws)   # would raise if a key nested under [[binding]]
     assert cfg["env"] == {"C_VAR": "one"}
     assert [m["target"] for m in cfg["mounts"]] == ["/opt/c.sh"]
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     assert {b.name for b in load_bindings(ws)} == {"manual"}
 
 
@@ -327,7 +327,7 @@ def test_stamp_appends_to_mounts_block_form(xdg):
     text = ws.config_path.read_text()
     assert "mounts = [" not in text            # no inline key introduced
     assert text.count("[[mounts]]") == 2
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     assert {m["target"] for m in load_config(ws)["mounts"]} == {"/cache", "/opt/c.sh"}
 
 
@@ -338,9 +338,9 @@ def test_roundtrip_all_loaders(xdg):
     _install_cont_preset("cont", with_binding=True)
     ws = _make_ws("w", _WS_MIN + '\nsetup = [\n  "echo pre",\n]\n')
     exp = _stamp(ws, "cont", "env", "GITHUB_TOKEN")
-    from credproxy_cli.core.bindings import load_bindings
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.bindings import load_bindings
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.rules import load_rules
     cfg = load_config(ws)
     assert cfg["env"] == {"C_VAR": "one"}
     assert {m["target"] for m in cfg["mounts"]} == {"/opt/c.sh"}
@@ -383,7 +383,7 @@ def test_env_identical_value_skipped(xdg):
     # C_VAR not re-stamped (only the original line present, no provenance on it).
     assert text.count('C_VAR = "one"') == 1
     assert "already set to the same value" in (out + err)
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     assert load_config(ws)["env"] == {"C_VAR": "one"}
 
 
@@ -418,7 +418,7 @@ def test_attached_allows_binding_only_pack(xdg):
     code, out, err = _run(["workspace", "attd", "preset", "add", "binonly",
                            "--provider", "env", "--secret", "TOK"])
     assert code == 0, out + err
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     assert {b.name for b in load_bindings(ws)} == {"binonly-api"}
 
 
@@ -444,7 +444,7 @@ def test_recreate_announced_only_when_container_exists(xdg, monkeypatch):
 
 def test_describe_includes_container_half(xdg):
     _install_cont_preset()
-    from credproxy_cli.core.presets import describe_presets
+    from credproxy_cli.core.model.presets import describe_presets
     row = next(p for p in describe_presets() if p["name"] == "cont")
     assert row["mounts"] == [{"kind": "overlay", "source": "user:setup.d/c.sh",
                               "target": "/opt/c.sh"}]
@@ -502,7 +502,7 @@ def test_comma_scanner_comment_only_last_line_no_mutation(xdg):
           '  # user note\n'
           '  { run = "bash /opt/c.sh", order = 45 },\n'
           ']\n')
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     # A bare-string setup entry stays a `str` (the escape-hatch form); the
     # stamped table normalizes to a dict.
     assert load_config(ws)["setup"] == [
@@ -558,7 +558,7 @@ def test_comma_scanner_commaless_element_with_trailing_comment(xdg):
           '  { run = "x", order = 1 },  # note\n'
           '  { run = "bash /opt/c.sh", order = 45 },\n'
           ']\n')
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     assert [s["order"] for s in load_config(ws)["setup"]] == [1, 45]
 
 
@@ -567,7 +567,7 @@ def test_comma_scanner_commaless_element_with_trailing_comment(xdg):
 
 def test_span_scanner_is_shared(xdg):
     """`preset_stamp` reuses `config.inline_array_span` -- one scanner, no fork."""
-    from credproxy_cli.core import config, preset_stamp
+    from credproxy_cli.core.model import config, preset_stamp
     assert preset_stamp.inline_array_span is config.inline_array_span
     assert preset_stamp.last_code_char_index is config.last_code_char_index
     # And the mount-add path uses it for the `mounts` key.
@@ -595,7 +595,7 @@ def test_block_marker_sha_matches_on_disk_block(xdg):
     sha_in_marker = _re.search(r"sha=(\w+)", marker).group(1)
     # The binding is the last block -> its on-disk text runs to EOF.
     block_text = "".join(lines[bi:])
-    from credproxy_cli.core.preset_stamp import _sha12
+    from credproxy_cli.core.model.preset_stamp import _sha12
     assert _sha12(block_text) == sha_in_marker
     # And the marker line carries no phantom leading-newline in its hash input.
     assert block_text.startswith("[[binding]]\n")
@@ -611,7 +611,7 @@ def test_element_marker_sha_matches_bare_element(xdg):
     line = next(ln for ln in text.splitlines() if "credproxy:preset" in ln
                 and "run" in ln)
     sha_in_marker = _re.search(r"sha=(\w+)", line).group(1)
-    from credproxy_cli.core.preset_stamp import _sha12
+    from credproxy_cli.core.model.preset_stamp import _sha12
     assert _sha12('{ run = "bash /opt/c.sh", order = 45 }') == sha_in_marker
 
 
@@ -631,7 +631,7 @@ def test_setup_block_form_appends_block(xdg):
     text = ws.config_path.read_text()
     assert "setup = [" not in text
     assert text.count("[[setup]]") == 2
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     assert [s["order"] for s in load_config(ws)["setup"]] == [10, 45]
 
 
@@ -644,7 +644,7 @@ def test_env_header_tolerates_inner_whitespace(xdg):
     text = ws.config_path.read_text()
     assert 'C_VAR = "one"' in text
     assert text.count("env ]") == 1 and "[env]\n" not in text
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     assert load_config(ws)["env"] == {"EXIST": "yes", "C_VAR": "one"}
 
 
@@ -652,7 +652,7 @@ def test_inline_table_env_clear_error(xdg):
     """A top-level inline-table env fails with a CLEAR remedy, not the opaque
     verify abort."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.preset_stamp import compose
+    from credproxy_cli.core.model.preset_stamp import compose
     with pytest.raises(ConfigError, match="inline table / dotted keys"):
         compose(_WS_MIN + 'env = { TZ = "UTC" }\n', "p", "rev",
                 bindings=[], rules=[], mounts=[], env_items=[("C_VAR", "one")],
@@ -661,7 +661,7 @@ def test_inline_table_env_clear_error(xdg):
 
 def test_dotted_key_env_clear_error(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.preset_stamp import compose
+    from credproxy_cli.core.model.preset_stamp import compose
     with pytest.raises(ConfigError, match="inline table / dotted keys"):
         compose(_WS_MIN + 'env.TZ = "UTC"\n', "p", "rev",
                 bindings=[], rules=[], mounts=[], env_items=[("C_VAR", "one")],
@@ -676,7 +676,7 @@ def test_overlay_named_user_rejected(xdg, monkeypatch):
     qualifier -- loading its presets errors clearly."""
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.paths import config_dir
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     ov = config_dir() / "ovs" / "user"
     (ov / "presets").mkdir(parents=True)
     (ov / "presets" / "p.toml").write_text('[env]\nX = "y"\n')
@@ -688,7 +688,7 @@ def test_overlay_named_user_rejected(xdg, monkeypatch):
 def test_overlay_named_builtin_rejected(xdg, monkeypatch):
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.paths import config_dir
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     ov = config_dir() / "ovs" / "builtin"
     (ov / "presets").mkdir(parents=True)
     (ov / "presets" / "p.toml").write_text('[env]\nX = "y"\n')
@@ -703,7 +703,7 @@ def test_duplicate_basename_qualifier_rejected(xdg, monkeypatch):
     import os
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.paths import config_dir
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     a = config_dir() / "a" / "base"
     b = config_dir() / "b" / "base"        # same basename -> b gets `base#2`
     (a / "presets").mkdir(parents=True)
@@ -738,7 +738,7 @@ def test_no_recreate_hint_when_env_all_skipped(xdg, monkeypatch):
 
 
 def test_qualified_source_empty_subpath_rejected(xdg):
-    from credproxy_cli.core import config as core_config
+    from credproxy_cli.core.model import config as core_config
     from credproxy_cli.core.errors import ConfigError
     with pytest.raises(ConfigError, match="tier root dir"):
         core_config._overlay_source("user:", "w")
@@ -762,7 +762,7 @@ def test_container_only_pack_rejects_provider(xdg):
 
 
 def test_already_applied_ignores_marker_in_string_value(xdg):
-    from credproxy_cli.core.preset_stamp import already_applied
+    from credproxy_cli.core.model.preset_stamp import already_applied
     # A marker-looking substring inside a STRING VALUE (real `#` in a comment vs
     # a `#` inside a quoted value) must not trip the guard.
     text = 'note = "see # credproxy:preset name=foo rev=x sha=y here"\n'

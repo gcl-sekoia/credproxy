@@ -25,7 +25,7 @@ import os
 import shutil
 from dataclasses import dataclass
 
-from .errors import CredproxyError
+from ..errors import CredproxyError
 from .presets import _Require
 
 
@@ -121,7 +121,7 @@ def _check_provider(rq: _Require, provider: str | None, secret: str | None,
     marker-appropriate remedy (finding 2a), so the pack's own `hint` (which is for
     the prerequisite, not a missing binding) is deliberately NOT carried here."""
     from .bindings import Binding, test_binding
-    from .providers import find_provider
+    from ..providers import find_provider
 
     if not provider:
         return RequireResult(

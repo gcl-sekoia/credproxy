@@ -25,10 +25,10 @@ from dataclasses import dataclass, replace
 from typing import Callable
 
 from . import hostmatch
-from .errors import ConfigError, CredproxyError
+from ..errors import ConfigError, CredproxyError
 from .injectors import ENV_NAME_RE, Injector, find_injector
-from .paths import atomic_write_text as _atomic_write_text
-from .providers import fetch_many as provider_fetch_many
+from ..paths import atomic_write_text as _atomic_write_text
+from ..providers import fetch_many as provider_fetch_many
 from .schemes import location_key
 from .workspace import Workspace
 
@@ -250,7 +250,7 @@ def validate(bindings: list[Binding], source: str) -> None:
     injector/provider must resolve; and the binding's secret slots must match
     the scheme's. Names must already be materialized (non-None) for the
     uniqueness check; callers run this post-materialize."""
-    from .providers import find_provider
+    from ..providers import find_provider
 
     names: set[str] = set()
     # (host, location) -> {"unconditional": name|None, "by_ph": {placeholder: name}}.

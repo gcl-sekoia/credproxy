@@ -23,13 +23,13 @@ from test_porcelain import _run, _run_loose
 
 
 def _attach_ws(workspaces_dir, name: str, body: str):
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     (workspaces_dir / f"{name}.toml").write_text(body)
     return Workspace(name)
 
 
 def _managed_ws(workspaces_dir, name: str, body: str = 'image = "x"\n'):
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     (workspaces_dir / f"{name}.toml").write_text(body)
     return Workspace(name)
 
@@ -42,7 +42,7 @@ _FAKE_ENV = type("FakeEnv", (), {
 
 
 def _patch_imageenv(monkeypatch):
-    monkeypatch.setattr("credproxy_cli.core.imageenv.ImageEnv.load",
+    monkeypatch.setattr("credproxy_cli.core.engine.imageenv.ImageEnv.load",
                         classmethod(lambda cls, image=None: _FAKE_ENV))
 
 
@@ -50,7 +50,7 @@ def _patch_imageenv(monkeypatch):
 
 
 def test_attach_compose_project_normalizes(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     ws = _attach_ws(workspaces_dir, "cp", 'attach = { compose_project = "proj" }\n')
     cfg = load_config(ws)
     assert cfg["attach"] == {
@@ -59,27 +59,27 @@ def test_attach_compose_project_normalizes(xdg, workspaces_dir):
 
 
 def test_attach_container_selector(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     ws = _attach_ws(workspaces_dir, "c", 'attach = { container = "pbox" }\n')
     assert load_config(ws)["attach"] == {"container": "pbox"}
 
 
 def test_attach_admin_url_selector_strips_slash(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     ws = _attach_ws(workspaces_dir, "a",
                     'attach = { admin_url = "http://127.0.0.1:5000/" }\n')
     assert load_config(ws)["attach"] == {"admin_url": "http://127.0.0.1:5000"}
 
 
 def test_attach_discover_selector(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     ws = _attach_ws(workspaces_dir, "d",
                     'attach = { discover = "role=proxy,tier=dev" }\n')
     assert load_config(ws)["attach"] == {"discover": "role=proxy,tier=dev"}
 
 
 def test_attach_exactly_one_selector(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
     ws = _attach_ws(workspaces_dir, "two",
                     'attach = { container = "a", admin_url = "http://127.0.0.1:1" }\n')
@@ -91,7 +91,7 @@ def test_attach_exactly_one_selector(xdg, workspaces_dir):
 
 
 def test_attach_mutual_exclusion_names_offending_keys(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
     ws = _attach_ws(workspaces_dir, "mx",
                     'attach = { container = "p" }\nimage = "x"\nenv = { A = "b" }\n')
@@ -102,7 +102,7 @@ def test_attach_mutual_exclusion_names_offending_keys(xdg, workspaces_dir):
 
 
 def test_attach_bad_discover_rejected(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
     ws = _attach_ws(workspaces_dir, "bd", 'attach = { discover = "novalue" }\n')
     with pytest.raises(ConfigError, match="key=value"):
@@ -110,7 +110,7 @@ def test_attach_bad_discover_rejected(xdg, workspaces_dir):
 
 
 def test_attach_non_loopback_admin_rejected_at_load(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
     ws = _attach_ws(workspaces_dir, "nl",
                     'attach = { admin_url = "http://8.8.8.8:9" }\n')
@@ -119,8 +119,8 @@ def test_attach_non_loopback_admin_rejected_at_load(xdg, workspaces_dir):
 
 
 def test_attach_directory_and_bindings_still_valid(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.bindings import load_bindings
     ws = _attach_ws(workspaces_dir, "ok", (
         'attach = { container = "p" }\n'
         'directory = "/abs/proj"\n'
@@ -135,7 +135,7 @@ def test_attach_directory_and_bindings_still_valid(xdg, workspaces_dir):
 
 
 def test_require_loopback_accepts_and_rejects(xdg):
-    from credproxy_cli.core.push import require_loopback
+    from credproxy_cli.core.model.attach import require_loopback
     from credproxy_cli.core.errors import ConfigError
     require_loopback("http://127.0.0.1:9")
     require_loopback("http://localhost:9")
@@ -171,13 +171,13 @@ def test_gated_verbs_refuse_on_attached(xdg, workspaces_dir, argv):
 
 def test_delete_attached_removes_config_and_state_only(xdg, workspaces_dir,
                                                        monkeypatch):
-    from credproxy_cli.core.workspace import Workspace, ensure_token
+    from credproxy_cli.core.model.workspace import Workspace, ensure_token
     ws = _attach_ws(workspaces_dir, "svc", _ATTACH_TOML)
     ensure_token(ws)
     assert ws.config_path.exists() and ws.token_path.exists()
 
     rm_calls = []
-    monkeypatch.setattr("credproxy_cli.core.lifecycle.docker.docker_quiet",
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.docker.docker_quiet",
                         lambda argv: rm_calls.append(argv))
 
     ec, out, err = _run(["workspace", "svc", "delete"])
@@ -194,7 +194,7 @@ def test_apply_on_attached_is_push(xdg, workspaces_dir, monkeypatch):
     def fake_push(ws, notify=None, *, wait=False, timeout=120.0):
         called["ws"] = ws.name
         return "http://127.0.0.1:1234"
-    monkeypatch.setattr("credproxy_cli.core.lifecycle.push_workspace", fake_push)
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_workspace", fake_push)
 
     ec, out, err = _run(["workspace", "svc", "apply"])
     assert ec == 0
@@ -205,7 +205,7 @@ def test_apply_on_attached_is_push(xdg, workspaces_dir, monkeypatch):
 def test_inspect_attached_shows_target(xdg, workspaces_dir, monkeypatch):
     _attach_ws(workspaces_dir, "svc", _ATTACH_TOML)
     # attach target resolution is best-effort; make it resolve to a fake URL.
-    monkeypatch.setattr("credproxy_cli.core.lifecycle.resolve_admin_url",
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.resolve_admin_url",
                         lambda ws, notify=None: "http://127.0.0.1:5555")
     ec, out, err = _run(["workspace", "svc", "inspect"])
     assert ec == 0
@@ -215,7 +215,7 @@ def test_inspect_attached_shows_target(xdg, workspaces_dir, monkeypatch):
 
 def test_inspect_attached_json_carries_attach(xdg, workspaces_dir, monkeypatch):
     _attach_ws(workspaces_dir, "svc", _ATTACH_TOML)
-    monkeypatch.setattr("credproxy_cli.core.lifecycle.resolve_admin_url",
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.resolve_admin_url",
                         lambda ws, notify=None: "http://127.0.0.1:5555")
     ec, out, err = _run(["--json", "workspace", "svc", "inspect"])
     assert ec == 0
@@ -227,7 +227,7 @@ def test_inspect_attached_json_carries_attach(xdg, workspaces_dir, monkeypatch):
 def test_rule_test_live_routes_through_target(xdg, workspaces_dir, monkeypatch):
     """`rule test --live` on an attached workspace resolves the attach target and
     POSTs to /admin/rule-test there (the same target resolution as push)."""
-    from credproxy_cli.core.workspace import Workspace, ensure_token
+    from credproxy_cli.core.model.workspace import Workspace, ensure_token
     _attach_ws(workspaces_dir, "svc", (
         'attach = { admin_url = "http://127.0.0.1:7000" }\n'
         '[[rule]]\naction="block"\nhosts=["api.github.com"]\n'))
@@ -238,7 +238,7 @@ def test_rule_test_live_routes_through_target(xdg, workspaces_dir, monkeypatch):
         seen["admin_url"] = admin_url
         return {"method": method, "host": "api.github.com", "path": "/x",
                 "intercepted": True, "matches": []}
-    monkeypatch.setattr("credproxy_cli.core.push.rule_test", fake_rt)
+    monkeypatch.setattr("credproxy_cli.core.engine.push.rule_test", fake_rt)
 
     ec, out, err = _run(["workspace", "svc", "rule", "test", "GET",
                          "https://api.github.com/x", "--live"])
@@ -250,13 +250,13 @@ def test_rule_test_live_routes_through_target(xdg, workspaces_dir, monkeypatch):
 
 
 def test_resolve_admin_url_admin_url_verbatim(xdg):
-    from credproxy_cli.core import push
+    from credproxy_cli.core.engine import push
     assert push.resolve_admin_url({"admin_url": "http://127.0.0.1:9"}) \
         == "http://127.0.0.1:9"
 
 
 def test_resolve_admin_url_container(xdg, monkeypatch):
-    from credproxy_cli.core import push
+    from credproxy_cli.core.engine import push
     _patch_imageenv(monkeypatch)
     monkeypatch.setattr(push.docker, "resolve_host_port",
                         lambda name, port: 54321)
@@ -265,7 +265,7 @@ def test_resolve_admin_url_container(xdg, monkeypatch):
 
 
 def test_resolve_admin_url_discover_single(xdg, monkeypatch):
-    from credproxy_cli.core import push
+    from credproxy_cli.core.engine import push
     _patch_imageenv(monkeypatch)
     monkeypatch.setattr(push.docker, "docker_output", lambda args: "onlyproxy\n")
     monkeypatch.setattr(push.docker, "resolve_host_port", lambda name, port: 40000)
@@ -274,7 +274,7 @@ def test_resolve_admin_url_discover_single(xdg, monkeypatch):
 
 
 def test_resolve_admin_url_discover_no_match(xdg, monkeypatch):
-    from credproxy_cli.core import push
+    from credproxy_cli.core.engine import push
     from credproxy_cli.core.errors import ConfigError
     _patch_imageenv(monkeypatch)
     monkeypatch.setattr(push.docker, "docker_output", lambda args: "\n")
@@ -283,7 +283,7 @@ def test_resolve_admin_url_discover_no_match(xdg, monkeypatch):
 
 
 def test_resolve_admin_url_discover_ambiguous(xdg, monkeypatch):
-    from credproxy_cli.core import push
+    from credproxy_cli.core.engine import push
     from credproxy_cli.core.errors import ConfigError
     _patch_imageenv(monkeypatch)
     monkeypatch.setattr(push.docker, "docker_output", lambda args: "a\nb\n")
@@ -292,7 +292,7 @@ def test_resolve_admin_url_discover_ambiguous(xdg, monkeypatch):
 
 
 def test_discover_filters_one_per_pair(xdg, monkeypatch):
-    from credproxy_cli.core import push
+    from credproxy_cli.core.engine import push
     _patch_imageenv(monkeypatch)
     seen = {}
     monkeypatch.setattr(push.docker, "docker_output",
@@ -309,7 +309,7 @@ def test_discover_filters_one_per_pair(xdg, monkeypatch):
 
 def test_managed_push_proxy_stopped_errors_toward_start(xdg, workspaces_dir,
                                                         monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import WorkspaceError
     ws = _managed_ws(workspaces_dir, "m")
     _patch_imageenv(monkeypatch)
@@ -323,8 +323,8 @@ def test_managed_push_proxy_stopped_errors_toward_start(xdg, workspaces_dir,
 
 def test_push_managed_calls_engine_once_and_records(xdg, workspaces_dir,
                                                     monkeypatch):
-    from credproxy_cli.core import lifecycle, push as core_push
-    from credproxy_cli.core.workspace import ensure_token
+    from credproxy_cli.core.engine import lifecycle, push as core_push
+    from credproxy_cli.core.model.workspace import ensure_token
     ws = _managed_ws(workspaces_dir, "m")
     ensure_token(ws)
     monkeypatch.setattr(lifecycle, "resolve_admin_url",
@@ -351,10 +351,10 @@ def test_push_attached_discovers_and_posts(xdg, workspaces_dir, monkeypatch):
         '[[binding]]\ninjector="bearer"\nprovider="env"\n'
         'secret="GH"\nhosts=["api.github.com"]\n'))
     monkeypatch.setenv("GH", "secretval")
-    from credproxy_cli.core.workspace import Workspace, ensure_token
+    from credproxy_cli.core.model.workspace import Workspace, ensure_token
     ensure_token(Workspace("svc"))
     _patch_imageenv(monkeypatch)
-    from credproxy_cli.core import push as core_push
+    from credproxy_cli.core.engine import push as core_push
     monkeypatch.setattr(core_push.docker, "docker_output", lambda args: "theproxy\n")
     monkeypatch.setattr(core_push.docker, "resolve_host_port",
                         lambda name, port: 45678)
@@ -395,7 +395,7 @@ def _write_token(tmp_path) -> str:
 
 def test_stateless_push_happy_and_wire_parity(xdg, tmp_path, monkeypatch):
     monkeypatch.setenv("GH", "sekret")
-    from credproxy_cli.core import push as core_push
+    from credproxy_cli.core.engine import push as core_push
     posted = {}
 
     def fake_post(url, body, token):
@@ -448,7 +448,7 @@ def test_stateless_push_non_loopback_refused(xdg, tmp_path):
 
 def test_target_lock_waits_for_holder(xdg, monkeypatch):
     import fcntl
-    from credproxy_cli.core import push
+    from credproxy_cli.core.engine import push
     from credproxy_cli.core.paths import state_dir
     url = "http://127.0.0.1:9"
     import hashlib
@@ -477,7 +477,7 @@ def test_target_lock_waits_for_holder(xdg, monkeypatch):
 
 def test_two_sequential_stateless_pushes_both_send(xdg, tmp_path, monkeypatch):
     monkeypatch.setenv("GH", "v")
-    from credproxy_cli.core import push as core_push
+    from credproxy_cli.core.engine import push as core_push
     posts = []
     monkeypatch.setattr(core_push, "_http_post_json",
                         lambda url, body, token: posts.append(url) or (200, {"ok": True}))
@@ -494,7 +494,7 @@ def test_two_sequential_stateless_pushes_both_send(xdg, tmp_path, monkeypatch):
 
 
 def _resolve_ws(workspaces_dir, name="r"):
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     (workspaces_dir / f"{name}.toml").write_text(
         'image = "x"\n[[binding]]\ninjector="bearer"\nprovider="env"\n'
         'secret="GH"\nhosts=["api.github.com"]\n')
@@ -552,7 +552,7 @@ def test_create_attach_stamps_selector(xdg, workspaces_dir):
     text = (workspaces_dir / "svc.toml").read_text()
     assert 'attach = { compose_project = "myproj" }' in text
     # token is still created (it authenticates the push).
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     assert Workspace("svc").token_path.exists()
 
 
@@ -638,7 +638,7 @@ def _resp(status):
 
 
 def test_wait_for_health_polls_health_then_pushes(xdg, monkeypatch):
-    from credproxy_cli.core import push
+    from credproxy_cli.core.engine import push
     monkeypatch.setattr(push.time, "sleep", lambda _s: None)
     urls = []
     seq = [_http_503(), _resp(200)]
@@ -656,7 +656,7 @@ def test_wait_for_health_polls_health_then_pushes(xdg, monkeypatch):
 
 
 def test_wait_for_health_timeout_clean_error(xdg, monkeypatch):
-    from credproxy_cli.core import push
+    from credproxy_cli.core.engine import push
     from credproxy_cli.core.errors import ProxyError
     monkeypatch.setattr(push.time, "sleep", lambda _s: None)
     monkeypatch.setattr(push.urllib.request, "urlopen",

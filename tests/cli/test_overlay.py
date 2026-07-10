@@ -36,7 +36,7 @@ def test_overlay_template_shadows_builtin(xdg, overlay):
     (overlay / "workspace.template.toml").write_text(
         '# ACME workspace {name}\nimage = "acme/base:1"\n# acme-marker\n'
     )
-    from credproxy_cli.core.config import render_template
+    from credproxy_cli.core.model.config import render_template
     text = render_template("w")
     assert "acme-marker" in text
     assert "ACME workspace w" in text          # {name} substituted
@@ -51,7 +51,7 @@ def test_user_template_shadows_overlay_and_builtin(xdg, overlay):
     (xdg["config"] / "credproxy" / "workspace.template.toml").write_text(
         'image = "user/img:9"\n# user-marker\n'
     )
-    from credproxy_cli.core.config import render_template
+    from credproxy_cli.core.model.config import render_template
     text = render_template("w")
     assert "user-marker" in text
     assert 'image = "user/img:9"' in text
@@ -59,7 +59,7 @@ def test_user_template_shadows_overlay_and_builtin(xdg, overlay):
 
 def test_template_falls_through_to_builtin(xdg):
     """With no user or overlay template, the builtin default is used."""
-    from credproxy_cli.core.config import render_template
+    from credproxy_cli.core.model.config import render_template
     text = render_template("w")
     assert "credproxy workspace w start" in text  # builtin header, {name} filled
 
@@ -72,7 +72,7 @@ def test_overlay_template_shadows_overlay(xdg, tmp_path, monkeypatch):
     (a / "workspace.template.toml").write_text('image = "a/img"\n# a-marker\n')
     (b / "workspace.template.toml").write_text('image = "b/img"\n# b-marker\n')
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
-    from credproxy_cli.core.config import render_template
+    from credproxy_cli.core.model.config import render_template
     assert "a-marker" in render_template("w")
 
 
@@ -89,7 +89,7 @@ def test_scaffold_is_verbatim_except_name(xdg, overlay):
         'mounts = [{ volume = "cache", target = "/c" }]\n'
         '# literal { a = 1 } and {name} both here\n'
     )
-    from credproxy_cli.core.config import render_template
+    from credproxy_cli.core.model.config import render_template
     text = render_template("proj")
     assert 'image = "img:proj"' in text                        # {name} -> proj
     assert 'env = { FOO = "${VAR}", BRACE = "{foo}" }' in text  # untouched
@@ -104,7 +104,7 @@ def test_overlay_injector_is_found_and_sourced(xdg, overlay):
     """A new injector in the overlay resolves with an `overlay:<base>` source."""
     (overlay / "injectors").mkdir()
     (overlay / "injectors" / "acme.toml").write_text('scheme = "bearer"\n')
-    from credproxy_cli.core.injectors import find_injector, list_injectors
+    from credproxy_cli.core.model.injectors import find_injector, list_injectors
     inj = find_injector("acme")
     assert inj.source == "overlay:overlay"
     assert "acme" in {i.name for i in list_injectors()}
@@ -114,7 +114,7 @@ def test_overlay_injector_shadows_builtin(xdg, overlay):
     """A same-named overlay injector shadows the builtin one."""
     (overlay / "injectors").mkdir()
     (overlay / "injectors" / "bearer.toml").write_text('scheme = "basic"\n')
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
     inj = find_injector("bearer")
     assert inj.source == "overlay:overlay"
     assert inj.scheme == "basic"   # the overlay's, not the builtin bearer
@@ -127,7 +127,7 @@ def test_three_way_precedence(xdg, overlay):
     (overlay / "injectors" / "bearer.toml").write_text('scheme = "basic"\n')
     ud = _user_dir(xdg, "injectors")
     (ud / "bearer.toml").write_text('scheme = "body"\n')
-    from credproxy_cli.core.injectors import find_injector, list_injectors
+    from credproxy_cli.core.model.injectors import find_injector, list_injectors
     assert find_injector("bearer").source == "user"
     row = next(i for i in list_injectors() if i.name == "bearer")
     assert row.source == "user"
@@ -142,7 +142,7 @@ def test_overlay_shadows_overlay_injector(xdg, tmp_path, monkeypatch):
     (a / "injectors" / "tok.toml").write_text('scheme = "bearer"\n')
     (b / "injectors" / "tok.toml").write_text('scheme = "basic"\n')
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
-    from credproxy_cli.core.injectors import find_injector, list_injectors
+    from credproxy_cli.core.model.injectors import find_injector, list_injectors
     assert find_injector("tok").source == "overlay:a"
     row = next(i for i in list_injectors() if i.name == "tok")
     assert row.shadows == ("overlay:b",)
@@ -171,7 +171,7 @@ def test_overlay_shadows_overlay_script(xdg, tmp_path, monkeypatch):
     (a / "scripts" / "guard.star").write_text("# a\n")
     (b / "scripts" / "guard.star").write_text("# b\n")
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
-    from credproxy_cli.core.scripts import find_script, list_scripts
+    from credproxy_cli.core.model.scripts import find_script, list_scripts
     assert find_script("guard").source_origin == "overlay:a"
     row = next(s for s in list_scripts() if s.name == "guard")
     assert row.shadows == ("overlay:b",)
@@ -188,7 +188,7 @@ def test_overlay_preset_is_resolvable(xdg, overlay):
         "[[part]]\nsuffix = \"api\"\ninjector = \"bearer\"\n"
         "hosts = [\"api.acme.example\"]\nenv = \"ACME_TOKEN\"\n"
     )
-    from credproxy_cli.core.presets import build_preset, load_presets
+    from credproxy_cli.core.model.presets import build_preset, load_presets
     assert "acme" in load_presets()
     assert "github" in load_presets()   # builtin still present
     exp = build_preset("acme", "env", "ACME_TOKEN")
@@ -205,7 +205,7 @@ def test_overlay_shadows_overlay_preset(xdg, tmp_path, monkeypatch):
     (a / "presets" / "pack.toml").write_text(body)
     (b / "presets" / "pack.toml").write_text(body)
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
-    from credproxy_cli.core.presets import load_preset_sources, describe_presets
+    from credproxy_cli.core.model.presets import load_preset_sources, describe_presets
     assert load_preset_sources()["pack"] == "overlay:a"
     row = next(r for r in describe_presets() if r["name"] == "pack")
     assert row["shadows"] == ["overlay:b"]

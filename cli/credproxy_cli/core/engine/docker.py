@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import subprocess
 
-from .errors import DependencyError, DockerError
+from ..errors import DependencyError, DockerError
 
 # One shared, actionable message for a missing `docker` binary. A brand-new user
 # without Docker would otherwise hit a raw FileNotFoundError traceback on their

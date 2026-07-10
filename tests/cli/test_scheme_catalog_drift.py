@@ -24,12 +24,12 @@ def _proxy_schemes():
 
 
 def test_catalog_keys_match_proxy_registry():
-    from credproxy_cli.core import schemes as cli_schemes
+    from credproxy_cli.core.model import schemes as cli_schemes
     assert set(cli_schemes.CATALOG) == set(_proxy_schemes().SCHEMES)
 
 
 def test_family_and_slots_match():
-    from credproxy_cli.core import schemes as cli_schemes
+    from credproxy_cli.core.model import schemes as cli_schemes
     proxy_schemes = _proxy_schemes()
     for name, spec in cli_schemes.CATALOG.items():
         s = proxy_schemes.SCHEMES[name]
@@ -40,7 +40,7 @@ def test_family_and_slots_match():
 def test_location_key_matches_proxy():
     """The CLI's collision check and the proxy's must agree for every scheme,
     using each scheme's default params."""
-    from credproxy_cli.core import schemes as cli_schemes
+    from credproxy_cli.core.model import schemes as cli_schemes
     proxy_schemes = _proxy_schemes()
     for name, spec in cli_schemes.CATALOG.items():
         params = dict(spec.param_defaults)
@@ -52,7 +52,7 @@ def test_location_key_matches_proxy():
 def test_uses_placeholder_matches_family():
     """uses_placeholder is the substitute/sign split; it must agree with the
     proxy's family for every scheme."""
-    from credproxy_cli.core import schemes as cli_schemes
+    from credproxy_cli.core.model import schemes as cli_schemes
     proxy_schemes = _proxy_schemes()
     for name, spec in cli_schemes.CATALOG.items():
         expected = proxy_schemes.SCHEMES[name].family == "substitute"
@@ -63,7 +63,7 @@ def test_required_params_match_proxy():
     """Required-param enforcement (e.g. oauth2-reseal's api_hosts) must match the
     proxy, so a binding the CLI accepts isn't rejected at proxy push (or vice
     versa)."""
-    from credproxy_cli.core import schemes as cli_schemes
+    from credproxy_cli.core.model import schemes as cli_schemes
     proxy_schemes = _proxy_schemes()
     for name, spec in cli_schemes.CATALOG.items():
         proxy_req = tuple(getattr(proxy_schemes.SCHEMES[name], "required_params", ()))

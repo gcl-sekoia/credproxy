@@ -5,7 +5,7 @@ need a way to test them the way the proxy actually runs them -- with the real
 manifest+script pairing, not a hand-built `ScriptedScheme(...)` that re-declares
 `family`/`slots`/`location` and can silently drift from the injector TOML. This
 module is that harness. It builds each scheme through the SAME path the wire/push
-loader uses (`core.injectors.find_injector` + `core.scripts.find_script` for the
+loader uses (`core.model.injectors.find_injector` + `core.model.scripts.find_script` for the
 metadata + source; `schemes.SCHEMES` for a built-in), so a manifest that
 disagrees with its script fails the test rather than a hand-rolled test passing
 against a config the proxy would reject.
@@ -285,13 +285,13 @@ def load_injector(name: str) -> InjectorHarness:
     with the script is caught. For a built-in scheme it returns the same singleton
     from `schemes.SCHEMES` the proxy dispatches on. Uniform either way."""
     _ensure_cli_importable()
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
     import schemes
 
     injector = find_injector(name)
     spec = injector.spec
     if injector.scheme == "script":
-        from credproxy_cli.core.scripts import find_script
+        from credproxy_cli.core.model.scripts import find_script
         from starlark_runtime import ScriptedScheme
 
         source = find_script(injector.script).source
@@ -334,7 +334,7 @@ def load_rule_script(name: str) -> object:
     `block`/`respond`). A script that references a forbidden primitive fails to
     compile HERE -- the same construction the proxy runs at push."""
     _ensure_cli_importable()
-    from credproxy_cli.core.scripts import find_script
+    from credproxy_cli.core.model.scripts import find_script
     from starlark_runtime import ScriptedScheme
 
     source = find_script(name).source

@@ -26,8 +26,8 @@ except ImportError:  # pragma: no cover - non-POSIX (e.g. Windows)
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import WorkspaceError
-from .paths import workspaces_config_dir, workspaces_state_dir
+from ..errors import WorkspaceError
+from ..paths import workspaces_config_dir, workspaces_state_dir
 
 # Reentrancy depth of the per-workspace lifecycle lock held by THIS process,
 # keyed by lock-file path. flock would deadlock a process against itself on a
@@ -255,28 +255,6 @@ def list_names() -> list[str]:
     if not d.exists():
         return []
     return sorted(p.stem for p in d.iterdir() if p.suffix == ".toml" and p.is_file())
-
-
-@dataclass(frozen=True)
-class WorkspaceStatus:
-    name: str
-    running: bool
-    image: str
-
-
-def list_workspaces() -> list[WorkspaceStatus]:
-    """Structured status for every workspace: name, running?, image.
-
-    Docker is queried for the running state; image is read from the TOML."""
-    from . import docker
-    from .config import quick_image
-
-    out = []
-    for name in list_names():
-        ws = Workspace(name)
-        running = docker.container_status(ws.ws_container) == "running"
-        out.append(WorkspaceStatus(name, running, quick_image(ws)))
-    return out
 
 
 def ensure_token(ws: Workspace) -> None:

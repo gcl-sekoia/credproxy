@@ -19,7 +19,7 @@ _REAL_SUBPROCESS_RUN = subprocess.run
 
 
 def _write_ws(workspaces_dir: Path, name: str, content: str = 'image = "x"\n'):
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     p = workspaces_dir / f"{name}.toml"
     p.write_text(content)
     return Workspace(name)
@@ -49,7 +49,7 @@ def _write_applied_bindings(ws, bindings: list):
 def _make_binding_summary(name="b", injector="github", provider="env",
                            secret="X", hosts=("api.github.com",),
                            placeholder="ph", env=None):
-    from credproxy_cli.core.lifecycle import BindingSummary
+    from credproxy_cli.core.engine.lifecycle import BindingSummary
     return BindingSummary(
         name=name, injector=injector, provider=provider,
         secret=secret, hosts=hosts, placeholder=placeholder, env=env,
@@ -64,9 +64,9 @@ def _capture_docker_args(monkeypatch):
     neutralizes docker_quiet so create_ws_container's volume-labelling
     (_ensure_managed_volumes) doesn't reach a real daemon during these tests."""
     calls = []
-    monkeypatch.setattr("credproxy_cli.core.lifecycle.docker.docker",
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.docker.docker",
                         lambda args, **kw: calls.append(args))
-    monkeypatch.setattr("credproxy_cli.core.lifecycle.docker.docker_quiet",
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.docker.docker_quiet",
                         lambda args: None)
     return calls
 
@@ -75,8 +75,8 @@ def test_proxy_relabels_its_own_mounts(xdg, ws_factory, monkeypatch):
     """The proxy stays SELinux-confined: its token mount is relabeled private
     (:Z) so it can read it under enforcing SELinux, converted from --mount to
     -v (Docker rejects relabel= on --mount). It must NOT disable labeling."""
-    from credproxy_cli.core import lifecycle
-    from credproxy_cli.core.imageenv import ImageEnv
+    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.engine.imageenv import ImageEnv
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -93,7 +93,7 @@ def test_proxy_relabels_its_own_mounts(xdg, ws_factory, monkeypatch):
 def test_workspace_disables_selinux_labeling(xdg, ws_factory, monkeypatch):
     """The workspace runs with label=disable so user bind mounts work without
     relabeling (mutating) the user's own directories."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -111,7 +111,7 @@ def test_host_uid_gid_injected_into_workspace_env(xdg, ws_factory, monkeypatch):
     if not hasattr(os, "getuid"):
         import pytest
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -125,7 +125,7 @@ def test_host_uid_gid_injected_into_workspace_env(xdg, ws_factory, monkeypatch):
 def test_workspace_name_injected_into_workspace_env(xdg, ws_factory, monkeypatch):
     """The workspace gets CREDPROXY_WORKSPACE=<name> so setup scripts / shell rc
     can read the name (e.g. a prompt label) instead of templating the literal."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -138,7 +138,7 @@ def test_workspace_name_injected_into_workspace_env(xdg, ws_factory, monkeypatch
 def test_user_injected_into_workspace_env_when_set(xdg, ws_factory, monkeypatch):
     """A configured `user` is exposed as CREDPROXY_USER so a root `setup` script
     can provision that user (useradd/chown) without templating the literal."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -151,7 +151,7 @@ def test_user_injected_into_workspace_env_when_set(xdg, ws_factory, monkeypatch)
 def test_user_not_injected_when_unset(xdg, ws_factory, monkeypatch):
     """No `user` -> no CREDPROXY_USER (the image default applies, no name to
     expose)."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -162,7 +162,7 @@ def test_user_not_injected_when_unset(xdg, ws_factory, monkeypatch):
 
 def test_config_env_overrides_host_uid_breadcrumb(xdg, ws_factory, monkeypatch):
     """A user's `env` is applied after the breadcrumbs, so it wins (last -e)."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -181,8 +181,8 @@ def test_map_host_user_injects_keepid_on_podman_rootless(xdg, ws_factory, monkey
     if not hasattr(os, "getuid"):
         import pytest
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import lifecycle
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    from credproxy_cli.core.engine import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless", lambda: True)
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -203,8 +203,8 @@ def test_map_host_user_keepid_targets_user_uid(xdg, ws_factory, monkeypatch):
     if not hasattr(os, "getuid"):
         import pytest
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import lifecycle
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    from credproxy_cli.core.engine import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless", lambda: True)
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -223,8 +223,8 @@ def test_run_flags_userns_overrides_map_host_user(xdg, ws_factory, monkeypatch):
     if not hasattr(os, "getuid"):
         import pytest
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import lifecycle
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    from credproxy_cli.core.engine import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless", lambda: True)
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -247,8 +247,8 @@ def test_run_flags_userns_overrides_map_host_user(xdg, ws_factory, monkeypatch):
 
 def test_map_host_user_noop_on_docker(xdg, ws_factory, monkeypatch):
     """map_host_user on a non-podman-rootless runtime injects nothing."""
-    from credproxy_cli.core import lifecycle
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: False)
+    from credproxy_cli.core.engine import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless", lambda: False)
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -283,9 +283,9 @@ def test_enrich_sysfs_with_keepid_adds_both_remedies(monkeypatch):
     if not hasattr(os, "getuid"):
         import pytest
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import DockerError
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless", lambda: True)
     out = lifecycle._enrich_ws_run_error(DockerError(_SYSFS_ERR), _keepid_cfg())
     msg = str(out)
     assert _SYSFS_ERR in msg                      # original text preserved
@@ -297,9 +297,9 @@ def test_enrich_sysfs_with_keepid_adds_both_remedies(monkeypatch):
 def test_enrich_sysfs_without_keepid_map_host_user_off(monkeypatch):
     """Same sysfs failure but map_host_user off -> credproxy emitted no keep-id,
     so the original error passes through unchanged."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import DockerError
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless", lambda: True)
     orig = DockerError(_SYSFS_ERR)
     out = lifecycle._enrich_ws_run_error(orig, _keepid_cfg(map_host_user=False))
     assert out is orig
@@ -313,9 +313,9 @@ def test_enrich_sysfs_with_run_flags_userns_override(monkeypatch):
     if not hasattr(os, "getuid"):
         import pytest
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import DockerError
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless", lambda: True)
     orig = DockerError(_SYSFS_ERR)
     out = lifecycle._enrich_ws_run_error(
         orig, _keepid_cfg(run_flags=["--userns=host"]))
@@ -329,9 +329,9 @@ def test_enrich_non_sysfs_failure_with_keepid(monkeypatch):
     if not hasattr(os, "getuid"):
         import pytest
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import DockerError
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless", lambda: True)
     orig = DockerError("docker run failed: Error: no such image: x")
     out = lifecycle._enrich_ws_run_error(orig, _keepid_cfg())
     assert out is orig
@@ -344,14 +344,14 @@ def test_emits_keep_id_predicate(monkeypatch):
     if not hasattr(os, "getuid"):
         import pytest
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import lifecycle
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    from credproxy_cli.core.engine import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless", lambda: True)
     assert lifecycle.emits_keep_id(_keepid_cfg()) is True
     assert lifecycle.emits_keep_id(_keepid_cfg(map_host_user=False)) is False
     assert lifecycle.emits_keep_id(_keepid_cfg(user="root")) is False
     assert lifecycle.emits_keep_id(_keepid_cfg(run_flags=["--userns=host"])) is False
     # Non-rootless-podman: no keep-id emitted regardless.
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: False)
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless", lambda: False)
     assert lifecycle.emits_keep_id(_keepid_cfg()) is False
 
 
@@ -366,9 +366,9 @@ def _hostname_value(args):
 def test_proxy_always_gets_hostname(xdg, ws_factory, monkeypatch):
     """The proxy always carries --hostname <sanitized name> on both runtimes --
     on Docker the workspace inherits it; on podman it names the proxy."""
-    from credproxy_cli.core import lifecycle
-    from credproxy_cli.core.workspace import hostname_for
-    from credproxy_cli.core.imageenv import ImageEnv
+    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.model.workspace import hostname_for
+    from credproxy_cli.core.engine.imageenv import ImageEnv
     ws = ws_factory("My_Proj")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -383,9 +383,9 @@ def test_proxy_always_gets_hostname(xdg, ws_factory, monkeypatch):
 def test_workspace_gets_hostname_on_podman(xdg, ws_factory, monkeypatch):
     """On podman the workspace carries its own --hostname (UTS is independent on
     a netns join, and podman accepts the flag on the joiner)."""
-    from credproxy_cli.core import lifecycle
-    from credproxy_cli.core.workspace import hostname_for
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman", lambda: True)
+    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.model.workspace import hostname_for
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman", lambda: True)
     ws = ws_factory("My_Proj")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -397,8 +397,8 @@ def test_workspace_gets_hostname_on_podman(xdg, ws_factory, monkeypatch):
 def test_workspace_no_hostname_on_docker(xdg, ws_factory, monkeypatch):
     """On Docker the workspace must NOT carry --hostname (Docker rejects it on a
     netns joiner); it inherits the proxy's hostname instead."""
-    from credproxy_cli.core import lifecycle
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman", lambda: False)
+    from credproxy_cli.core.engine import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman", lambda: False)
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -410,8 +410,8 @@ def test_workspace_no_hostname_on_docker(xdg, ws_factory, monkeypatch):
 def test_run_flags_hostname_suppresses_credproxy_flag(xdg, ws_factory, monkeypatch):
     """A --hostname in run_flags (space form) wins: credproxy adds none of its
     own, so only the user's value is present (run_flags is the escape hatch)."""
-    from credproxy_cli.core import lifecycle
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman", lambda: True)
+    from credproxy_cli.core.engine import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman", lambda: True)
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -426,8 +426,8 @@ def test_run_flags_hostname_suppresses_credproxy_flag(xdg, ws_factory, monkeypat
 
 def test_run_flags_hostname_equals_form_suppresses(xdg, ws_factory, monkeypatch):
     """The `--hostname=custom` single-token form also suppresses credproxy's."""
-    from credproxy_cli.core import lifecycle
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman", lambda: True)
+    from credproxy_cli.core.engine import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman", lambda: True)
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -454,12 +454,12 @@ def _nested_cfg(**over):
 
 
 def test_mount_parent_dirs_nested_yields_intermediate(xdg):
-    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    from credproxy_cli.core.engine.lifecycle import _mount_parent_dirs
     assert _mount_parent_dirs(_nested_cfg()) == ["/home/vscode/src"]
 
 
 def test_mount_parent_dirs_deep_nesting_yields_all_ancestors(xdg):
-    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    from credproxy_cli.core.engine.lifecycle import _mount_parent_dirs
     cfg = _nested_cfg(mounts=[{"source": "x", "target": "/home/vscode/a/b/proj",
                                "readonly": False}])
     assert _mount_parent_dirs(cfg) == ["/home/vscode/a", "/home/vscode/a/b"]
@@ -467,21 +467,21 @@ def test_mount_parent_dirs_deep_nesting_yields_all_ancestors(xdg):
 
 def test_mount_parent_dirs_one_level_under_home_is_empty(xdg):
     """A target whose parent IS the home volume fabricates nothing."""
-    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    from credproxy_cli.core.engine.lifecycle import _mount_parent_dirs
     cfg = _nested_cfg(mounts=[{"source": "x", "target": "/home/vscode/proj",
                                "readonly": False}])
     assert _mount_parent_dirs(cfg) == []
 
 
 def test_mount_parent_dirs_outside_home_skipped(xdg):
-    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    from credproxy_cli.core.engine.lifecycle import _mount_parent_dirs
     cfg = _nested_cfg(mounts=[{"source": "x", "target": "/srv/a/proj",
                                "readonly": False}])
     assert _mount_parent_dirs(cfg) == []
 
 
 def test_owns_user_mapping(xdg):
-    from credproxy_cli.core.lifecycle import _credproxy_owns_user_mapping
+    from credproxy_cli.core.engine.lifecycle import _credproxy_owns_user_mapping
     assert _credproxy_owns_user_mapping(_nested_cfg()) is True
     assert _credproxy_owns_user_mapping(_nested_cfg(map_host_user=False)) is False
     assert _credproxy_owns_user_mapping(_nested_cfg(user="root")) is False
@@ -497,14 +497,14 @@ def test_reserved_uid_check_rejects_user_uid(xdg):
     """user_uid == the proxy's reserved uid would run egress un-proxied (the
     netns loop-prevention rule exempts that uid) -- reject before start."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.lifecycle import _reserved_uid_check
+    from credproxy_cli.core.engine.lifecycle import _reserved_uid_check
     with pytest.raises(ConfigError, match="31337"):
         _reserved_uid_check({"user_uid": 31337}, _meta_uid())
 
 
 def test_reserved_uid_check_rejects_numeric_user(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.lifecycle import _reserved_uid_check
+    from credproxy_cli.core.engine.lifecycle import _reserved_uid_check
     with pytest.raises(ConfigError, match="31337"):
         _reserved_uid_check({"user": "31337"}, _meta_uid())
     with pytest.raises(ConfigError, match="31337"):
@@ -512,7 +512,7 @@ def test_reserved_uid_check_rejects_numeric_user(xdg):
 
 
 def test_reserved_uid_check_allows_normal_user(xdg):
-    from credproxy_cli.core.lifecycle import _reserved_uid_check
+    from credproxy_cli.core.engine.lifecycle import _reserved_uid_check
     _reserved_uid_check({"user_uid": 1000, "user": "vscode"}, _meta_uid())  # no raise
     _reserved_uid_check({}, _meta_uid())                                     # no user set
 
@@ -524,7 +524,7 @@ def test_chown_mount_parents_uses_mapped_uid(xdg, ws_factory, monkeypatch):
     if not hasattr(os, "getuid"):
         import pytest
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a"); ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
     lifecycle.chown_mount_parents(ws, _nested_cfg(user_uid=1000), lambda *_: None)
@@ -539,7 +539,7 @@ def test_chown_mount_parents_falls_back_to_host_uid(xdg, ws_factory, monkeypatch
     if not hasattr(os, "getuid"):
         import pytest
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a"); ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
     lifecycle.chown_mount_parents(ws, _nested_cfg(), lambda *_: None)  # no user_uid
@@ -562,7 +562,7 @@ def _uo_cfg(user="vscode", map_host_user=True, user_owned=True):
 def test_chown_user_owned_volumes_chowns_by_name(xdg, ws_factory, monkeypatch):
     """A user_owned volume is chowned -R to the `user` BY NAME (so a setup-
     provisioned user resolves), owner only."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a"); ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
     lifecycle.chown_user_owned_volumes(ws, _uo_cfg(user="dev"), lambda *_: None)
@@ -575,7 +575,7 @@ def test_chown_user_owned_volumes_chowns_by_name(xdg, ws_factory, monkeypatch):
 def test_chown_user_owned_volumes_independent_of_map_host_user(xdg, ws_factory, monkeypatch):
     """Unlike chown_mount_parents, this runs even without map_host_user -- the
     root-owned-volume gap exists on plain Docker too."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a"); ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
     lifecycle.chown_user_owned_volumes(ws, _uo_cfg(map_host_user=False), lambda *_: None)
@@ -583,7 +583,7 @@ def test_chown_user_owned_volumes_independent_of_map_host_user(xdg, ws_factory, 
 
 
 def test_chown_user_owned_volumes_noop_without_flag(xdg, ws_factory, monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a"); ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
     lifecycle.chown_user_owned_volumes(ws, _uo_cfg(user_owned=False), lambda *_: None)
@@ -591,7 +591,7 @@ def test_chown_user_owned_volumes_noop_without_flag(xdg, ws_factory, monkeypatch
 
 
 def test_chown_user_owned_volumes_noop_root_or_no_user(xdg, ws_factory, monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a"); ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
     lifecycle.chown_user_owned_volumes(ws, _uo_cfg(user=None), lambda *_: None)
@@ -600,7 +600,7 @@ def test_chown_user_owned_volumes_noop_root_or_no_user(xdg, ws_factory, monkeypa
 
 
 def test_chown_mount_parents_noop_without_mapping(xdg, ws_factory, monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a"); ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
     lifecycle.chown_mount_parents(ws, _nested_cfg(map_host_user=False), lambda *_: None)
@@ -608,7 +608,7 @@ def test_chown_mount_parents_noop_without_mapping(xdg, ws_factory, monkeypatch):
 
 
 def test_chown_mount_parents_noop_when_no_fabricated_parents(xdg, ws_factory, monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a"); ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
     cfg = _nested_cfg(mounts=[{"source": "x", "target": "/home/vscode/proj",
@@ -620,9 +620,9 @@ def test_chown_mount_parents_noop_when_no_fabricated_parents(xdg, ws_factory, mo
 def test_map_host_user_noop_without_user(xdg, ws_factory, monkeypatch):
     """map_host_user with no non-root `user` is a no-op (root already owns the
     mounts) and short-circuits before the runtime probe."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     probed = []
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless",
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless",
                         lambda: probed.append(True) or True)
     ws = ws_factory("a")
     ws.ensure_state_dir()
@@ -637,9 +637,9 @@ def test_map_host_user_noop_without_user(xdg, ws_factory, monkeypatch):
 def test_map_host_user_off_skips_probe_and_flag(xdg, ws_factory, monkeypatch):
     """With map_host_user off, no userns flag and the runtime probe isn't even
     consulted (no daemon round-trip on the common root workspace)."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     probed = []
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless",
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless",
                         lambda: probed.append(True) or True)
     ws = ws_factory("a")
     ws.ensure_state_dir()
@@ -654,7 +654,7 @@ def test_run_flags_spliced_before_structural_flags(xdg, ws_factory, monkeypatch)
     """run_flags are spliced into `docker run` ahead of credproxy's structural
     flags (--name, --network), so docker's last-wins parsing keeps credproxy in
     control of the netns and container name."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -672,7 +672,7 @@ def test_run_flags_spliced_before_structural_flags(xdg, ws_factory, monkeypatch)
 
 
 def test_drift_no_applied_record(xdg, workspaces_dir):
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "d1")
     cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": []}
@@ -685,7 +685,7 @@ def test_drift_no_applied_record(xdg, workspaces_dir):
 
 
 def test_drift_image_changed(xdg, workspaces_dir):
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "d2", 'image = "new_image"\n')
     ws.ensure_state_dir()
@@ -707,7 +707,7 @@ def test_drift_run_flags_changed(xdg, workspaces_dir):
     """Adding run_flags drifts against an applied spec that had none (the
     pre-run_flags spec normalizes a missing field to [], so this is also the
     backward-compat case)."""
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "drf")
     _write_applied_spec(ws)  # no run_flags key -> treated as []
@@ -726,7 +726,7 @@ def test_drift_run_flags_changed(xdg, workspaces_dir):
 def test_drift_no_run_flags_is_in_sync(xdg, workspaces_dir):
     """A workspace with no run_flags and a pre-run_flags applied spec is in sync
     (no false-positive drift from the missing field)."""
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "drf2")
     _write_applied_spec(ws)  # no run_flags key
@@ -737,7 +737,7 @@ def test_drift_no_run_flags_is_in_sync(xdg, workspaces_dir):
 
 
 def test_drift_env_added(xdg, workspaces_dir):
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "d3")
     _write_applied_spec(ws, env={})
@@ -751,7 +751,7 @@ def test_drift_env_added(xdg, workspaces_dir):
 
 
 def test_drift_setup_changed(xdg, workspaces_dir):
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "d4")
     _write_applied_spec(ws, setup=["old cmd"])
@@ -765,7 +765,7 @@ def test_drift_setup_changed(xdg, workspaces_dir):
 
 
 def test_drift_mounts_changed(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "d5")
     _write_applied_spec(ws, mounts=[])
@@ -782,7 +782,7 @@ def test_drift_mounts_changed(xdg, workspaces_dir, tmp_path):
 
 
 def test_drift_in_sync(xdg, workspaces_dir):
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "d6")
     _write_applied_spec(ws)
@@ -805,7 +805,7 @@ def test_drift_unknown_applied_bindings_when_running_is_drift(xdg, workspaces_di
     """A running workspace with configured bindings but no applied-bindings
     record (deleted/corrupt/legacy) can't be confirmed in sync -> drift, so
     apply re-pushes instead of silently skipping."""
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
     ws = _write_ws(workspaces_dir, "uk1")
     _write_applied_spec(ws)                       # spec known; bindings absent
     report = _compute_drift(ws, _CFG, [_make_binding_summary("b")], running=True)
@@ -814,7 +814,7 @@ def test_drift_unknown_applied_bindings_when_running_is_drift(xdg, workspaces_di
 
 
 def test_drift_unknown_applied_spec_when_running_is_drift(xdg, workspaces_dir):
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
     ws = _write_ws(workspaces_dir, "uk2")
     _write_applied_bindings(ws, [])               # bindings known; spec absent
     report = _compute_drift(ws, _CFG, [], running=True)
@@ -825,7 +825,7 @@ def test_drift_unknown_applied_spec_when_running_is_drift(xdg, workspaces_dir):
 def test_drift_unknown_state_not_running_is_in_sync(xdg, workspaces_dir):
     """Not running with no applied record is just "never started" -- no drift,
     even with configured bindings."""
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
     ws = _write_ws(workspaces_dir, "uk3")
     report = _compute_drift(ws, _CFG, [_make_binding_summary("b")], running=False)
     assert report.in_sync is True
@@ -835,7 +835,7 @@ def test_drift_unknown_state_not_running_is_in_sync(xdg, workspaces_dir):
 
 
 def test_drift_binding_added(xdg, workspaces_dir):
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "bd1")
     _write_applied_spec(ws)
@@ -851,7 +851,7 @@ def test_drift_binding_added(xdg, workspaces_dir):
 
 
 def test_drift_binding_removed(xdg, workspaces_dir):
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "bd2")
     _write_applied_spec(ws)
@@ -869,7 +869,7 @@ def test_drift_binding_removed(xdg, workspaces_dir):
 
 
 def test_drift_binding_changed(xdg, workspaces_dir):
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "bd3")
     _write_applied_spec(ws)
@@ -889,7 +889,7 @@ def test_drift_binding_changed(xdg, workspaces_dir):
 
 def test_drift_binding_hosts_order_insensitive(xdg, workspaces_dir):
     """Host order should not create false drift."""
-    from credproxy_cli.core.lifecycle import _compute_drift
+    from credproxy_cli.core.engine.lifecycle import _compute_drift
 
     ws = _write_ws(workspaces_dir, "bd4")
     _write_applied_spec(ws)
@@ -912,7 +912,7 @@ def test_drift_binding_hosts_order_insensitive(xdg, workspaces_dir):
 
 def test_apply_container_drift_is_deferred(xdg, workspaces_dir, monkeypatch):
     """Container-spec drift goes to deferred, not applied."""
-    from credproxy_cli.core.lifecycle import apply_config
+    from credproxy_cli.core.engine.lifecycle import apply_config
 
     ws = _write_ws(workspaces_dir, "app1", 'image = "new_image"\n')
     ws.ensure_state_dir()
@@ -921,15 +921,15 @@ def test_apply_container_drift_is_deferred(xdg, workspaces_dir, monkeypatch):
 
     # Stub docker and push so we don't need real containers.
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.docker.container_status",
+        "credproxy_cli.core.engine.lifecycle.docker.container_status",
         lambda name: "running",
     )
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.docker.resolve_host_port",
+        "credproxy_cli.core.engine.lifecycle.docker.resolve_host_port",
         lambda container, port: 39998,
     )
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.ImageEnv.load",
+        "credproxy_cli.core.engine.lifecycle.ImageEnv.load",
         classmethod(lambda cls: type("FakeEnv", (), {
             "http_port": 39998, "tmpfs": "/run/secrets",
             "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
@@ -937,7 +937,7 @@ def test_apply_container_drift_is_deferred(xdg, workspaces_dir, monkeypatch):
         })()),
     )
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.push_config",
+        "credproxy_cli.core.engine.lifecycle.push_config",
         lambda ws, port, notify=None: None,
     )
 
@@ -948,8 +948,8 @@ def test_apply_container_drift_is_deferred(xdg, workspaces_dir, monkeypatch):
 
 def test_apply_bindings_drift_is_applied(xdg, workspaces_dir, monkeypatch):
     """Bindings drift triggers a push and goes to applied."""
-    from credproxy_cli.core.lifecycle import apply_config, BindingSummary
-    from credproxy_cli.core.bindings import Binding
+    from credproxy_cli.core.engine.lifecycle import apply_config, BindingSummary
+    from credproxy_cli.core.model.bindings import Binding
 
     ws = _write_ws(workspaces_dir, "app2", """\
 image = "x"
@@ -967,15 +967,15 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     _write_applied_bindings(ws, [])  # binding not yet applied
 
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.docker.container_status",
+        "credproxy_cli.core.engine.lifecycle.docker.container_status",
         lambda name: "running",
     )
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.docker.resolve_host_port",
+        "credproxy_cli.core.engine.lifecycle.docker.resolve_host_port",
         lambda container, port: 39998,
     )
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.ImageEnv.load",
+        "credproxy_cli.core.engine.lifecycle.ImageEnv.load",
         classmethod(lambda cls: type("FakeEnv", (), {
             "http_port": 39998, "tmpfs": "/run/secrets",
             "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
@@ -994,7 +994,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
             env="GITHUB_TOKEN",
         )], [])
 
-    monkeypatch.setattr("credproxy_cli.core.lifecycle.push_config", fake_push)
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_config", fake_push)
 
     result = apply_config(ws)
     assert len(pushed) == 1
@@ -1005,8 +1005,8 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 def test_apply_pushes_when_applied_bindings_record_absent(xdg, workspaces_dir, monkeypatch):
     """A missing applied-bindings record (deleted/corrupt) must trigger a re-push,
     not be treated as 'in sync' and skipped."""
-    from credproxy_cli.core.lifecycle import apply_config
-    from credproxy_cli.core.bindings import Binding
+    from credproxy_cli.core.engine.lifecycle import apply_config
+    from credproxy_cli.core.model.bindings import Binding
 
     ws = _write_ws(workspaces_dir, "appx", """\
 image = "x"
@@ -1022,12 +1022,12 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     ws.ensure_state_dir()
     _write_applied_spec(ws)              # spec known; applied-bindings ABSENT
 
-    monkeypatch.setattr("credproxy_cli.core.lifecycle.docker.container_status",
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.docker.container_status",
                         lambda name: "running")
-    monkeypatch.setattr("credproxy_cli.core.lifecycle.docker.resolve_host_port",
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.docker.resolve_host_port",
                         lambda container, port: 39998)
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.ImageEnv.load",
+        "credproxy_cli.core.engine.lifecycle.ImageEnv.load",
         classmethod(lambda cls: type("FakeEnv", (), {
             "http_port": 39998, "tmpfs": "/run/secrets",
             "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
@@ -1044,7 +1044,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
             placeholder="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             env="GITHUB_TOKEN")], [])
 
-    monkeypatch.setattr("credproxy_cli.core.lifecycle.push_config", fake_push)
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_config", fake_push)
 
     result = apply_config(ws)
     assert len(pushed) == 1                       # re-pushed despite no drift detail
@@ -1053,11 +1053,11 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 def test_apply_not_running_raises(xdg, workspaces_dir, monkeypatch):
     from credproxy_cli.core.errors import WorkspaceError
-    from credproxy_cli.core.lifecycle import apply_config
+    from credproxy_cli.core.engine.lifecycle import apply_config
 
     ws = _write_ws(workspaces_dir, "app3")
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.docker.container_status",
+        "credproxy_cli.core.engine.lifecycle.docker.container_status",
         lambda name: None,
     )
 
@@ -1075,7 +1075,7 @@ def _make_session(ws, pid: int) -> None:
 
 
 def test_count_live_sessions_empty(xdg, workspaces_dir):
-    from credproxy_cli.core.lifecycle import _count_live_sessions
+    from credproxy_cli.core.engine.lifecycle import _count_live_sessions
 
     ws = _write_ws(workspaces_dir, "s1")
     assert _count_live_sessions(ws) == 0
@@ -1083,7 +1083,7 @@ def test_count_live_sessions_empty(xdg, workspaces_dir):
 
 def test_count_live_sessions_current_process(xdg, workspaces_dir):
     """Current process's pidfile counts as a live session."""
-    from credproxy_cli.core.lifecycle import _count_live_sessions
+    from credproxy_cli.core.engine.lifecycle import _count_live_sessions
 
     ws = _write_ws(workspaces_dir, "s2")
     pid = os.getpid()
@@ -1093,7 +1093,7 @@ def test_count_live_sessions_current_process(xdg, workspaces_dir):
 
 def test_count_live_sessions_exclude_pid(xdg, workspaces_dir):
     """exclude_pid omits our own session from the count."""
-    from credproxy_cli.core.lifecycle import _count_live_sessions
+    from credproxy_cli.core.engine.lifecycle import _count_live_sessions
 
     ws = _write_ws(workspaces_dir, "s3")
     pid = os.getpid()
@@ -1104,7 +1104,7 @@ def test_count_live_sessions_exclude_pid(xdg, workspaces_dir):
 
 def test_clean_stale_sessions(xdg, workspaces_dir):
     """Stale pidfiles (for non-existent PIDs) are removed."""
-    from credproxy_cli.core.lifecycle import _clean_stale_sessions
+    from credproxy_cli.core.engine.lifecycle import _clean_stale_sessions
 
     ws = _write_ws(workspaces_dir, "s4")
     # PID 1 is always alive; use a high unlikely PID for stale
@@ -1124,7 +1124,7 @@ def test_clean_stale_sessions(xdg, workspaces_dir):
 
 def test_clean_stale_ignores_invalid_filename(xdg, workspaces_dir):
     """Non-numeric pidfiles are cleaned up without crashing."""
-    from credproxy_cli.core.lifecycle import _clean_stale_sessions
+    from credproxy_cli.core.engine.lifecycle import _clean_stale_sessions
 
     ws = _write_ws(workspaces_dir, "s5")
     ws.sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -1149,7 +1149,7 @@ def _fake_run(calls, code=0):
 def test_effective_config_resolves_enter_time_defaults(xdg):
     """effective_config fills the enter-time defaults so they aren't null:
     workdir -> home, enter_prelude -> the default shim snippet."""
-    from credproxy_cli.core.lifecycle import effective_config, DEFAULT_ENTER_PRELUDE
+    from credproxy_cli.core.engine.lifecycle import effective_config, DEFAULT_ENTER_PRELUDE
     cfg = {"home": "/home/vscode", "workdir": None, "enter_prelude": None}
     eff = effective_config(cfg)
     assert eff["workdir"] == "/home/vscode"
@@ -1158,7 +1158,7 @@ def test_effective_config_resolves_enter_time_defaults(xdg):
 
 def test_effective_config_preserves_explicit_values(xdg):
     """Explicit values win, including an explicit "" enter_prelude (shim off)."""
-    from credproxy_cli.core.lifecycle import effective_config
+    from credproxy_cli.core.engine.lifecycle import effective_config
     eff = effective_config({"home": "/home/vscode", "workdir": "/code", "enter_prelude": ""})
     assert eff["workdir"] == "/code"
     assert eff["enter_prelude"] == ""
@@ -1166,7 +1166,7 @@ def test_effective_config_preserves_explicit_values(xdg):
 
 def test_effective_config_resolves_shell(xdg):
     """shell -> the login-shell default when unset, explicit when set."""
-    from credproxy_cli.core.lifecycle import effective_config, DEFAULT_ENTER_CMD
+    from credproxy_cli.core.engine.lifecycle import effective_config, DEFAULT_ENTER_CMD
     assert effective_config({"home": "/h"})["shell"] == DEFAULT_ENTER_CMD
     assert effective_config({"home": "/h", "shell": ["zsh"]})["shell"] == ["zsh"]
 
@@ -1174,7 +1174,7 @@ def test_effective_config_resolves_shell(xdg):
 def test_effective_config_resolves_user_uid(xdg):
     """user_uid -> the host uid (keep-id target) when unset, explicit when set."""
     import os
-    from credproxy_cli.core.lifecycle import effective_config
+    from credproxy_cli.core.engine.lifecycle import effective_config
     if hasattr(os, "getuid"):
         assert effective_config({"home": "/h"})["user_uid"] == os.getuid()
     assert effective_config({"home": "/h", "user_uid": 1000})["user_uid"] == 1000
@@ -1183,7 +1183,7 @@ def test_effective_config_resolves_user_uid(xdg):
 def test_run_setup_runs_every_call(xdg, ws_factory, monkeypatch):
     """run_setup has no per-spec skip: invoked twice (as it would be on two
     successive fresh containers), it re-runs all commands both times."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     calls = []
     monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run(calls))
     ws = ws_factory("a")
@@ -1200,7 +1200,7 @@ def test_run_setup_runs_every_call(xdg, ws_factory, monkeypatch):
 def test_run_setup_pins_root(xdg, ws_factory, monkeypatch):
     """Every setup exec carries `-u 0` so provisioning is root regardless of the
     container's default user (keep-id under map_host_user, or a baked USER)."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     calls = []
     monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run(calls))
     ws = ws_factory("a")
@@ -1211,7 +1211,7 @@ def test_run_setup_pins_root(xdg, ws_factory, monkeypatch):
 
 
 def test_run_setup_noop_without_commands(xdg, ws_factory, monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     calls = []
     monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run(calls))
     lifecycle.run_setup(ws_factory("a"), {}, notify=lambda *_: None)
@@ -1219,7 +1219,7 @@ def test_run_setup_noop_without_commands(xdg, ws_factory, monkeypatch):
 
 
 def test_run_setup_failure_raises(xdg, ws_factory, monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import DockerError
     monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run([], code=7))
     with pytest.raises(DockerError):
@@ -1252,7 +1252,7 @@ def _fake_run_typed(calls, home="/home/vscode", user_exists=True, code=0):
 
 
 def _bearer_binding():
-    from credproxy_cli.core.bindings import Binding
+    from credproxy_cli.core.model.bindings import Binding
     return Binding(name="gh", injector="bearer", provider="env", secret="TOK",
                    hosts=("api.github.com",), placeholder="ghp_x", env="GH_TOKEN")
 
@@ -1264,7 +1264,7 @@ def _exec_calls(calls):
 def test_run_setup_string_entry_unchanged_argv(xdg, ws_factory, monkeypatch):
     """A string entry is byte-for-byte today's argv: `-u 0`, no `-e`, `sh -lc`,
     even when bindings are present (strings get no injected env)."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     calls = []
     monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run_typed(calls))
     ws = ws_factory("a")
@@ -1279,7 +1279,7 @@ def test_run_setup_string_entry_unchanged_argv(xdg, ws_factory, monkeypatch):
 def test_run_setup_workspace_user_argv(xdg, ws_factory, monkeypatch):
     """A `user="workspace"` table runs as the config user with `-e HOME=<home>`
     (resolved in-container) and the binding env; `sh -lc`."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     calls = []
     monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run_typed(calls))
     ws = ws_factory("a")
@@ -1301,7 +1301,7 @@ def test_run_setup_root_table_gets_env_no_home(xdg, ws_factory, monkeypatch):
     """A `user="root"` table runs as `-u 0` with the binding env but NO HOME
     lookup (root inherits the image default) -- distinct from a string, which
     gets no env at all."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     calls = []
     monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run_typed(calls))
     ws = ws_factory("a")
@@ -1321,7 +1321,7 @@ def test_run_setup_workspace_user_falls_back_to_root(xdg, ws_factory, monkeypatc
     """`user="workspace"` with NO config `user` resolves to root (`-u 0`, no
     HOME lookup) -- the "unset/root -> run as-is" mirror -- but still a table, so
     it gets the binding env."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     calls = []
     monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run_typed(calls))
     ws = ws_factory("a")
@@ -1339,7 +1339,7 @@ def test_run_setup_execution_order(xdg, ws_factory, monkeypatch):
     """Steps run in (order, declaration index) order via a STABLE sort: lower
     `order` first regardless of position, equal orders keep declaration order,
     strings sort as order 0."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     calls = []
     monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run_typed(calls))
     ws = ws_factory("a")
@@ -1357,7 +1357,7 @@ def test_run_setup_execution_order(xdg, ws_factory, monkeypatch):
 def test_run_setup_missing_user_errors(xdg, ws_factory, monkeypatch):
     """A workspace-user step whose user doesn't exist in the container fails
     with a precise, actionable error naming the step index."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import DockerError
     calls = []
     monkeypatch.setattr(lifecycle.subprocess, "run",
@@ -1419,7 +1419,7 @@ def test_run_setup_home_resolved_per_step(xdg, ws_factory, monkeypatch):
     """TWO workspace-user steps trigger TWO separate in-container HOME lookups,
     interleaved with the execs (home, exec, home, exec) -- proving resolution is
     PER STEP, not hoisted once up front (which would give home, exec, exec)."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     fake = _FakeDocker(users={"vscode": "/home/vscode"})
     monkeypatch.setattr(lifecycle.subprocess, "run", fake.run)
     ws = ws_factory("a")
@@ -1437,7 +1437,7 @@ def test_run_setup_user_created_by_earlier_root_step(xdg, ws_factory, monkeypatc
     {run=..., user="workspace"}]`. The user `dev` is ABSENT until the root step
     runs, then PRESENT -- so the later workspace step's per-step lookup resolves
     the just-created user's HOME. A once-up-front lookup would have failed."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
 
     def on_exec(cmd):
         if "useradd dev" in cmd[-1]:      # the root step creates the user
@@ -1466,7 +1466,7 @@ def test_resolve_home_exec_failure_distinct_error(xdg, ws_factory, monkeypatch):
     hiccup) surfaces a DISTINCT DockerError carrying the stderr/returncode --
     NOT the misleading 'user does not exist, create it earlier' advice (the exec
     failing is unrelated to whether the user exists)."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import DockerError
     import subprocess as _sp
 
@@ -1533,7 +1533,7 @@ def test_resolve_home_numeric_user_via_fallback(xdg, ws_factory, monkeypatch, tm
     fallback's UID-field (field 3) match, so a getent-less busybox where uid
     1000 exists still resolves -- the old name-only `grep "^$1:"` reported it
     missing."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     passwd = "root:x:0:0::/root:/bin/sh\ndev:x:1000:1000::/home/dev:/bin/sh\n"
     monkeypatch.setattr(lifecycle.subprocess, "run",
                         _local_passwd_exec(passwd, tmp_path))
@@ -1546,7 +1546,7 @@ def test_resolve_home_dotted_user_literal(xdg, ws_factory, monkeypatch, tmp_path
     """A username with a `.` (regex-significant) matches LITERALLY: querying
     `foo.bar` must NOT match a `fooXbar` passwd entry (the old `grep "^foo.bar:"`
     regex WOULD have, `.` being any-char), and DOES match a real `foo.bar`."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a")
     # 'foo.bar' must not match 'fooXbar' -- proves the compare is literal.
     monkeypatch.setattr(lifecycle.subprocess, "run", _local_passwd_exec(
@@ -1561,7 +1561,7 @@ def test_resolve_home_dotted_user_literal(xdg, ws_factory, monkeypatch, tmp_path
 def test_binding_env_map_skip_rule(xdg):
     """binding_env_map applies the /exports.sh skip rule: only bindings with
     BOTH an effective env AND a placeholder are included."""
-    from credproxy_cli.core.bindings import Binding, binding_env_map
+    from credproxy_cli.core.model.bindings import Binding, binding_env_map
     have = Binding(name="a", injector="bearer", provider="env", secret="T",
                    hosts=("h",), placeholder="ph", env="TOK")
     no_ph = Binding(name="b", injector="bearer", provider="env", secret="T",
@@ -1576,7 +1576,7 @@ def test_binding_env_map_skip_rule(xdg):
 
 def test_config_fingerprint(xdg):
     from dataclasses import replace
-    from credproxy_cli.core.bindings import Binding, config_fingerprint
+    from credproxy_cli.core.model.bindings import Binding, config_fingerprint
     b = Binding(name="x", injector="bearer", provider="env", secret="TOK",
                 hosts=("api.github.com",), placeholder="credproxy_PH", env="GH")
     fp = config_fingerprint([b])
@@ -1589,7 +1589,7 @@ def test_config_fingerprint(xdg):
 
 
 def test_should_push_decision():
-    from credproxy_cli.core.lifecycle import _should_push
+    from credproxy_cli.core.engine.lifecycle import _should_push
     ok = {"loaded": True, "fingerprint": "x"}
     assert _should_push(True, False, ok, "x")                       # forced
     assert _should_push(False, True, None, "x")                     # proxy (re)started
@@ -1600,7 +1600,7 @@ def test_should_push_decision():
 
 
 def test_proxy_status_unreachable_is_none(xdg, ws_factory):
-    from credproxy_cli.core.proxy_http import proxy_status
+    from credproxy_cli.core.engine.proxy_http import proxy_status
     ws = ws_factory("a")
     ws.ensure_state_dir()
     ws.token_path.write_text("tok")
@@ -1609,7 +1609,7 @@ def test_proxy_status_unreachable_is_none(xdg, ws_factory):
 
 def test_enter_push_flag_threads(xdg, ws_factory, monkeypatch):
     from test_porcelain import _run
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws_factory("w")
     captured = {}
 
@@ -1627,7 +1627,7 @@ def test_enter_push_flag_threads(xdg, ws_factory, monkeypatch):
 def test_setup_marker_and_retry(xdg, ws_factory):
     """Setup gate keyed on container id: no marker (fresh OR a failed prior
     attempt) -> run; same id after success -> skip; new id (recreate) -> run."""
-    from credproxy_cli.core.lifecycle import (
+    from credproxy_cli.core.engine.lifecycle import (
         _read_setup_marker, _setup_needed, _write_setup_marker)
     ws = ws_factory("a")
     assert _read_setup_marker(ws) is None
@@ -1648,7 +1648,7 @@ def test_start_proxy_image_change_removes_workspace_before_proxy(xdg, workspaces
     netns) must be removed BEFORE the proxy, and the proxy removal must be CHECKED
     -- otherwise removing the proxy under the running workspace fails and the
     swallowed error collides on the re-create."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = _write_ws(workspaces_dir, "imgchg")
     ws.ensure_state_dir()
 
@@ -1668,7 +1668,7 @@ def test_start_proxy_image_change_removes_workspace_before_proxy(xdg, workspaces
     monkeypatch.setattr(lifecycle.docker, "docker",
                         lambda argv, **kw: calls.append(("checked", argv)))
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.ImageEnv.load",
+        "credproxy_cli.core.engine.lifecycle.ImageEnv.load",
         classmethod(lambda cls: type("FakeEnv", (), {
             "http_port": 39998, "tmpfs": "/run/secrets",
             "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
@@ -1693,7 +1693,7 @@ def _stub_recreate_deps(monkeypatch):
     """Capture docker_quiet `rm` calls and short-circuit start_workspace, so a
     recreate test exercises only recreate_workspace's own remove-then-start
     logic, not the full start path."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     rm_calls: list = []
     monkeypatch.setattr(lifecycle.docker, "docker_quiet",
                         lambda argv: rm_calls.append(argv))
@@ -1704,7 +1704,7 @@ def _stub_recreate_deps(monkeypatch):
 
 
 def test_recreate_removes_workspace_only_then_starts(xdg, workspaces_dir, monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = _write_ws(workspaces_dir, "rc1")
     rm_calls, started = _stub_recreate_deps(monkeypatch)
 
@@ -1715,7 +1715,7 @@ def test_recreate_removes_workspace_only_then_starts(xdg, workspaces_dir, monkey
 
 
 def test_recreate_proxy_removes_both(xdg, workspaces_dir, monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = _write_ws(workspaces_dir, "rc2")
     rm_calls, started = _stub_recreate_deps(monkeypatch)
 
@@ -1728,7 +1728,7 @@ def test_recreate_proxy_removes_both(xdg, workspaces_dir, monkeypatch):
 
 def test_recreate_preserves_persistent_data(xdg, workspaces_dir, monkeypatch):
     """Default recreate never touches the home volume or config file."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = _write_ws(workspaces_dir, "rc3")
     rm_calls, _ = _stub_recreate_deps(monkeypatch)
 
@@ -1742,7 +1742,7 @@ def test_recreate_reset_volume_drops_after_container(xdg, workspaces_dir,
                                                      monkeypatch):
     """--reset-volume drops the named volume -- AFTER removing the container that
     mounts it -- then starts; config still on disk (only the volume is wiped)."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = _write_ws(workspaces_dir, "rc4",
                    'image = "x"\nhome = "/h"\n'
                    'mounts = [{ volume = "cache", target = "/c" }]\n')
@@ -1760,7 +1760,7 @@ def test_recreate_reset_volume_drops_after_container(xdg, workspaces_dir,
 def test_recreate_reset_unknown_volume_rejected(xdg, workspaces_dir, monkeypatch):
     """A --reset-volume name that isn't a declared managed volume (a typo) must
     error up front, not silently preserve the real volume and report success."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import ConfigError
     ws = _write_ws(workspaces_dir, "rc5", 'image = "x"\nhome = "/h"\n')
     rm_calls, started = _stub_recreate_deps(monkeypatch)
@@ -1777,7 +1777,7 @@ def test_recreate_reset_unknown_volume_rejected(xdg, workspaces_dir, monkeypatch
 def test_create_emits_volume_and_bind(xdg, ws_factory, monkeypatch):
     """A managed volume is emitted as `-v <namespaced>:tgt`; a bind/overlay as
     `--mount type=bind`."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
@@ -1797,7 +1797,7 @@ def test_create_emits_volume_and_bind(xdg, ws_factory, monkeypatch):
 def test_mount_parent_dirs_under_nonhome_volume(xdg):
     """The chown generalizes beyond home: a bind nested under any managed volume
     gets its fabricated parents re-owned."""
-    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    from credproxy_cli.core.engine.lifecycle import _mount_parent_dirs
     cfg = {"mounts": [
         {"kind": "volume", "name": "data", "target": "/data", "readonly": False},
         {"kind": "bind", "source": "x", "target": "/data/a/proj", "readonly": False},
@@ -1808,7 +1808,7 @@ def test_mount_parent_dirs_under_nonhome_volume(xdg):
 def test_mount_parent_dirs_skips_under_bind(xdg):
     """A mount nested under a host BIND is never chowned (would touch host
     ownership)."""
-    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    from credproxy_cli.core.engine.lifecycle import _mount_parent_dirs
     cfg = {"mounts": [
         {"kind": "bind", "source": "/h", "target": "/code", "readonly": False},
         {"kind": "bind", "source": "/h2", "target": "/code/sub/x", "readonly": False},
@@ -1819,7 +1819,7 @@ def test_mount_parent_dirs_skips_under_bind(xdg):
 def test_delete_removes_workspace_volumes(xdg, workspaces_dir, monkeypatch):
     """delete enumerates the workspace's managed volumes by OWNER LABEL (not a
     name prefix) and rms what docker returns; --keep-volumes skips that."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = _write_ws(workspaces_dir, "d1")
     ls_argv: list = []
 
@@ -1843,7 +1843,7 @@ def test_delete_removes_workspace_volumes(xdg, workspaces_dir, monkeypatch):
 
 
 def test_delete_keep_volumes(xdg, workspaces_dir, monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = _write_ws(workspaces_dir, "d2")
     monkeypatch.setattr(lifecycle.docker, "docker_output",
                         lambda argv: ws.volume("home"))
@@ -1857,7 +1857,7 @@ def test_delete_keep_volumes(xdg, workspaces_dir, monkeypatch):
 def test_managed_volumes_created_with_owner_label(xdg, ws_factory, monkeypatch):
     """Managed volumes are pre-created with the workspace owner label (binds are
     skipped) so delete can find them by label, not an ambiguous name prefix."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = ws_factory("a")
     calls: list = []
     monkeypatch.setattr(lifecycle.docker, "docker_quiet", lambda argv: calls.append(argv))
@@ -1879,7 +1879,7 @@ def test_workspace_volumes_label_isolates_name_prefix_siblings(xdg, workspaces_d
     """Real docker: a workspace whose name is a prefix of another's
     (`foo` vs `foo-bar`) must not enumerate -- and therefore delete -- the
     other's volumes. The old name-prefix scan did; the owner label fixes it."""
-    from credproxy_cli.core import docker, lifecycle
+    from credproxy_cli.core.engine import docker, lifecycle
     from credproxy_cli.core.errors import DockerError
     try:
         docker.docker_output(["volume", "ls", "--format", "{{.Name}}"])
@@ -1910,7 +1910,7 @@ def test_workspace_volumes_label_isolates_name_prefix_siblings(xdg, workspaces_d
 def test_add_managed_volume_plain_edits_toml_only(xdg, workspaces_dir, monkeypatch):
     """No --preserve: a pure config edit, no docker calls, no recreate."""
     import tomllib
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = _write_ws(workspaces_dir, "w")
     # Any docker call would be a bug on this path.
     monkeypatch.setattr(lifecycle.docker, "container_status",
@@ -1927,7 +1927,7 @@ def test_add_managed_volume_preserve_ordering(xdg, workspaces_dir, monkeypatch):
     """--preserve: create volume -> stop ws container -> seed -> edit TOML ->
     recreate, in that order."""
     import tomllib
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = _write_ws(workspaces_dir, "w")
     events = []
     monkeypatch.setattr(lifecycle.docker, "container_status", lambda c: "running")
@@ -1959,7 +1959,7 @@ def test_add_managed_volume_preserve_rollback_on_capture_failure(
         xdg, workspaces_dir, monkeypatch):
     """A capture failure rolls back: drop the volume, restart the container,
     leave the TOML untouched, and propagate the error."""
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import DockerError
     ws = _write_ws(workspaces_dir, "w")
     quiet = []
@@ -1983,7 +1983,7 @@ def test_add_managed_volume_preserve_rollback_on_capture_failure(
 
 
 def test_add_managed_volume_preserve_requires_container(xdg, workspaces_dir, monkeypatch):
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     from credproxy_cli.core.errors import WorkspaceError
     ws = _write_ws(workspaces_dir, "w")
     monkeypatch.setattr(lifecycle.docker, "container_status", lambda c: None)
@@ -1994,7 +1994,7 @@ def test_add_managed_volume_preserve_requires_container(xdg, workspaces_dir, mon
 
 def test_add_managed_volume_home_uses_sugar(xdg, workspaces_dir):
     import tomllib
-    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.engine import lifecycle
     ws = _write_ws(workspaces_dir, "w")
     lifecycle.add_managed_volume(ws, name="home", target="/home/vscode",
                                  readonly=False, preserve=False)
@@ -2009,8 +2009,8 @@ def test_reload_proxy_waits_for_ready(monkeypatch, ws_factory):
     """After SIGHUP the re-exec'd proxy starts un-ready (/health 503 until the
     mitmproxy listener rebinds), so `reload` must wait on /health -- else a caller
     hits the box during the reload's un-ready window."""
-    from credproxy_cli.core import lifecycle
-    from credproxy_cli.core.imageenv import ImageEnv
+    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.engine.imageenv import ImageEnv
 
     ws = ws_factory("r")
     events = []

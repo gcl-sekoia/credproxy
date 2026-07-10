@@ -1,5 +1,5 @@
 """The config-push engine: the ONE resolve+POST path shared by `start`/`apply`
-(via proxy_http.push_config), the `push` verb (managed + attached workspaces),
+(via push_config), the `push` verb (managed + attached workspaces),
 and the stateless `credproxy push --admin/--config/--token` escape hatch.
 
 Responsibilities, all target-agnostic:
@@ -27,55 +27,26 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable
-from urllib.parse import urlsplit
+from typing import Callable, TYPE_CHECKING
 
 from . import docker
-from .errors import ConfigError, ProxyError
-from .paths import state_dir
+from ..model.attach import (
+    normalize_admin_url,
+    parse_discover,
+    require_loopback,
+)
+from ..errors import ConfigError, ProxyError
+from ..paths import state_dir
+from ..model.wire import build_wire
+
+if TYPE_CHECKING:
+    from ..model.workspace import Workspace
 
 Notify = Callable[[str], None]
 
 
 def _noop(_msg: str) -> None:
     pass
-
-
-# ---- loopback invariant (I8) -------------------------------------------------
-
-
-def require_loopback(url: str) -> None:
-    """Refuse any admin URL whose host is not loopback. The push wire carries
-    RESOLVED secret values over plain HTTP (no TLS on the admin API), so it is
-    only safe when the proxy is reachable on 127.0.0.0/8 (or `localhost`) --
-    i.e. the same host, via a published ephemeral port or the shared netns. This
-    is the ONE enforcement point for both `attach.admin_url` (checked at config
-    load) and `credproxy push --admin` (checked at dispatch)."""
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https"):
-        raise ConfigError(
-            f"admin URL {url!r} must be an http(s) URL")
-    host = parts.hostname
-    if host is None:
-        raise ConfigError(f"admin URL {url!r} has no host")
-    if host == "localhost":
-        return
-    try:
-        import ipaddress
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
-    if ip is None or not ip.is_loopback:
-        raise ConfigError(
-            f"admin URL {url!r} is not loopback: the push wire carries resolved "
-            f"secret values over plain HTTP, so it is only safe to a proxy on "
-            f"127.0.0.0/8 or localhost (the same host, via its published port or "
-            f"the shared netns)")
-
-
-def normalize_admin_url(url: str) -> str:
-    """Strip a trailing slash so `f'{admin_url}/admin/config'` is well-formed."""
-    return url.rstrip("/")
 
 
 # ---- attached-target discovery ----------------------------------------------
@@ -114,7 +85,7 @@ def _discover_container(spec: str, notify: Notify) -> str:
     """`discover = "k=v,k=v"` -> the single container matching every label
     (`docker ps --filter label=k=v` ANDs the filters). No match / >1 match is an
     error (ambiguity is never silently resolved)."""
-    pairs = _parse_discover(spec)
+    pairs = parse_discover(spec)
     args = ["ps", "--format", "{{.Names}}"]
     for key, val in pairs:
         args += ["--filter", f"label={key}={val}"]
@@ -128,45 +99,6 @@ def _discover_container(spec: str, notify: Notify) -> str:
             f"attach discover {spec!r} is ambiguous -- matched "
             f"{len(names)} containers: {', '.join(sorted(names))}")
     return names[0]
-
-
-def parse_discover(spec: str) -> list[tuple[str, str]]:
-    """Public: parse + validate a `discover` spec into (key, value) pairs.
-    Comma-separated `key=value`, both non-empty. Raises ConfigError."""
-    return _parse_discover(spec)
-
-
-def _parse_discover(spec: str) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    for part in spec.split(","):
-        key, sep, val = part.partition("=")
-        key, val = key.strip(), val.strip()
-        if not sep or not key or not val:
-            raise ConfigError(
-                f"attach discover {spec!r} must be comma-separated key=value "
-                f"pairs (both non-empty), got segment {part!r}")
-        pairs.append((key, val))
-    if not pairs:
-        raise ConfigError(f"attach discover {spec!r} is empty")
-    return pairs
-
-
-# ---- the wire body (the single assembly point, G3) --------------------------
-
-
-def build_wire(bindings, rules, fingerprint: str | None = None) -> dict:
-    """Assemble the FULL proxy wire body from resolved bindings + rules: this is
-    the ONE place `{bindings, rules, fingerprint}` is shaped, so a managed,
-    attached, and stateless push all POST byte-identical bodies for the same
-    inputs. `wire_config` resolves each binding's secret via its provider."""
-    from .bindings import wire_config
-    from .rules import rule_wire_entries
-
-    wire = wire_config(bindings)
-    wire["rules"] = rule_wire_entries(rules)
-    if fingerprint is not None:
-        wire["fingerprint"] = fingerprint
-    return wire
 
 
 def push_to_target(admin_url: str, token: str, bindings, rules,
@@ -187,6 +119,36 @@ def push_to_target(admin_url: str, token: str, bindings, rules,
     raise ProxyError(
         f"config push to {admin_url} failed: HTTP {status}: "
         f"{payload.get('error', payload)}")
+
+
+def push_config(ws: "Workspace", http_port: int, notify: Notify = _noop,
+                bindings=None, rules=None, fingerprint=None):
+    """Materialize bindings + rules, fetch each secret from its provider, and
+    POST the resulting wire config (bindings + rules + a metadata `fingerprint`)
+    to the managed proxy's /admin/config on 127.0.0.1:<http_port>.
+
+    `bindings`/`rules`/`fingerprint` may be supplied by the caller (the start
+    path computes them to decide whether a push is even needed); otherwise they
+    are materialized/computed here. Materialization may rewrite the config file
+    (filling generated names/placeholders); announced via `notify`.
+
+    A thin wrapper over the shared push engine (`push_to_target`), so
+    `start`/`apply` (this function) and the `push`/stateless verbs POST a
+    byte-identical wire body for the same inputs. Returns `(bindings, rules)`
+    (the materialized instances) so the caller can record applied state."""
+    from ..model.bindings import materialize_bindings
+    from ..model.rules import combined_fingerprint, materialize_rules
+    from ..model.workspace import read_token
+
+    if bindings is None:
+        bindings = materialize_bindings(ws, notify)
+    if rules is None:
+        rules = materialize_rules(ws, notify)
+    if fingerprint is None:
+        fingerprint = combined_fingerprint(bindings, rules)
+    return push_to_target(
+        f"http://127.0.0.1:{http_port}", read_token(ws),
+        bindings, rules, fingerprint, notify=notify)
 
 
 def rule_test(admin_url: str, token: str, method: str, url: str) -> dict:
@@ -318,8 +280,8 @@ def load_stateless_config(path: str) -> tuple[list, list]:
     """
     import tomllib
 
-    from .bindings import bindings_from_raw
-    from .rules import named_rules_from_raw, validate as validate_rules
+    from ..model.bindings import bindings_from_raw
+    from ..model.rules import named_rules_from_raw, validate as validate_rules
 
     p = Path(path)
     if not p.exists():

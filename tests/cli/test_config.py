@@ -22,8 +22,8 @@ def _write(workspaces_dir: Path, name: str, content: str):
 
 def test_load_config_minimal(xdg, workspaces_dir):
     """Minimal config (image only) loads and applies defaults."""
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "myws", 'image = "alpine:3"\n')
     ws = Workspace("myws")
@@ -39,9 +39,9 @@ def test_load_config_minimal(xdg, workspaces_dir):
 def test_load_config_requires_image(xdg, workspaces_dir):
     """`image` is mandatory -- there is no built-in default to fall back to;
     omitting it is a clear error (the scaffold always writes one)."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "noimg", "")   # no image
     ws = Workspace("noimg")
@@ -51,8 +51,8 @@ def test_load_config_requires_image(xdg, workspaces_dir):
 
 def test_load_config_full(xdg, tmp_path, workspaces_dir):
     """Config with all fields present is loaded correctly."""
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     # We need an existing directory for the mount source.
     src = tmp_path / "code"
@@ -82,8 +82,8 @@ def test_load_config_full(xdg, tmp_path, workspaces_dir):
 
 def test_load_config_mount_readonly(xdg, tmp_path, workspaces_dir):
     """Mount with `:ro` suffix is parsed as readonly."""
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     src = tmp_path / "ro"
     src.mkdir()
@@ -95,8 +95,8 @@ def test_load_config_mount_readonly(xdg, tmp_path, workspaces_dir):
 
 def test_volume_user_owned_parses(xdg, workspaces_dir):
     """`user_owned = true` on a managed volume parses into the mount dict."""
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "uo", textwrap.dedent('''
         image = "x"
@@ -114,8 +114,8 @@ def test_volume_user_owned_parses(xdg, workspaces_dir):
 def test_volume_without_user_owned_omits_key(xdg, workspaces_dir):
     """A plain volume carries no `user_owned` key, so the normalized mount dict
     (and thus the spec hash) is byte-identical to before the flag existed."""
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "plain", 'image = "x"\nhome = "/home/dev"\n')
     vol = load_config(Workspace("plain"))["mounts"][0]
@@ -125,8 +125,8 @@ def test_volume_without_user_owned_omits_key(xdg, workspaces_dir):
 def test_user_owned_changes_spec_hash(xdg, workspaces_dir):
     """Toggling user_owned alters the spec hash -> the change forces a recreate
     (which re-runs the chown step)."""
-    from credproxy_cli.core.config import load_config, workspace_spec_hash
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config, workspace_spec_hash
+    from credproxy_cli.core.model.workspace import Workspace
 
     base_toml = ('image = "x"\nuser = "dev"\n'
                  '[[mounts]]\nvolume = "c"\ntarget = "/home/dev/c"\n')
@@ -139,7 +139,7 @@ def test_user_owned_changes_spec_hash(xdg, workspaces_dir):
 
 def test_add_volume_mount_renders_user_owned(xdg):
     """The surgical writer emits `user_owned = true` in both block and inline forms."""
-    from credproxy_cli.core.config import add_volume_mount
+    from credproxy_cli.core.model.config import add_volume_mount
 
     block = add_volume_mount('image = "x"\n', "cache", "/c", user_owned=True)
     assert "user_owned = true" in block
@@ -152,9 +152,9 @@ def test_add_volume_mount_renders_user_owned(xdg):
 
 def test_user_owned_rejected_on_bind(xdg, workspaces_dir):
     """`user_owned` is volume-only; on a bind it's an unknown key."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", textwrap.dedent('''
         image = "x"
@@ -171,9 +171,9 @@ def test_user_owned_rejected_on_bind(xdg, workspaces_dir):
 def test_user_owned_requires_non_root_user(xdg, workspaces_dir):
     """A user_owned volume with no (or root) `user` is rejected -- the flag would
     chown to nobody."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "noU", textwrap.dedent('''
         image = "x"
@@ -187,9 +187,9 @@ def test_user_owned_requires_non_root_user(xdg, workspaces_dir):
 
 
 def test_user_owned_must_be_boolean(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "t", textwrap.dedent('''
         image = "x"
@@ -207,9 +207,9 @@ def test_user_owned_must_be_boolean(xdg, workspaces_dir):
 
 
 def test_load_config_missing_file(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     ws = Workspace("ghost")
     with pytest.raises(ConfigError, match="not found"):
@@ -217,9 +217,9 @@ def test_load_config_missing_file(xdg, workspaces_dir):
 
 
 def test_load_config_bad_toml(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", "image = [unterminated")
     ws = Workspace("bad")
@@ -228,9 +228,9 @@ def test_load_config_bad_toml(xdg, workspaces_dir):
 
 
 def test_load_config_image_not_string(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", "image = 42\n")
     ws = Workspace("bad")
@@ -239,9 +239,9 @@ def test_load_config_image_not_string(xdg, workspaces_dir):
 
 
 def test_load_config_home_not_absolute(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\nhome = "relative/path"\n')
     ws = Workspace("bad")
@@ -250,9 +250,9 @@ def test_load_config_home_not_absolute(xdg, workspaces_dir):
 
 
 def test_load_config_home_not_string(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\nhome = 99\n')
     ws = Workspace("bad")
@@ -264,8 +264,8 @@ def test_load_config_home_not_string(xdg, workspaces_dir):
 
 
 def test_load_config_directory(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", 'image = "x"\ndirectory = "/home/me/proj"\n')
     cfg = load_config(Workspace("w"))
@@ -273,17 +273,17 @@ def test_load_config_directory(xdg, workspaces_dir):
 
 
 def test_load_config_directory_absent_is_none(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", 'image = "x"\n')
     assert load_config(Workspace("w"))["directory"] is None
 
 
 def test_load_config_directory_not_absolute(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\ndirectory = "relative/path"\n')
     with pytest.raises(ConfigError, match="`directory` must be an absolute path"):
@@ -293,8 +293,8 @@ def test_load_config_directory_not_absolute(xdg, workspaces_dir):
 def test_directory_not_in_spec_hash(xdg, workspaces_dir):
     """`directory` is host-side resolution metadata; changing it must not
     recreate the container (must not alter the spec hash)."""
-    from credproxy_cli.core.config import load_config, workspace_spec_hash
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config, workspace_spec_hash
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", 'image = "x"\n')
     base = workspace_spec_hash(load_config(Workspace("w")), None)
@@ -304,24 +304,24 @@ def test_directory_not_in_spec_hash(xdg, workspaces_dir):
 
 
 def test_quick_directory(xdg, workspaces_dir):
-    from credproxy_cli.core.config import quick_directory
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import quick_directory
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", 'image = "x"\ndirectory = "/p"\n')
     assert quick_directory(Workspace("w")) == "/p"
 
 
 def test_quick_directory_absent(xdg, workspaces_dir):
-    from credproxy_cli.core.config import quick_directory
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import quick_directory
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", 'image = "x"\n')
     assert quick_directory(Workspace("w")) is None
 
 
 def test_quick_directory_tolerant_of_bad_toml(xdg, workspaces_dir):
-    from credproxy_cli.core.config import quick_directory
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import quick_directory
+    from credproxy_cli.core.model.workspace import Workspace
 
     (workspaces_dir / "w.toml").write_text("not = valid = toml [[[\n")
     assert quick_directory(Workspace("w")) is None
@@ -332,7 +332,7 @@ def test_quick_directory_tolerant_of_bad_toml(xdg, workspaces_dir):
 
 def test_set_top_level_key_appends_when_no_tables():
     import tomllib
-    from credproxy_cli.core.config import set_top_level_key
+    from credproxy_cli.core.model.config import set_top_level_key
 
     out = set_top_level_key('image = "x"\n', "directory", "/p")
     assert tomllib.loads(out)["directory"] == "/p"
@@ -341,7 +341,7 @@ def test_set_top_level_key_appends_when_no_tables():
 
 def test_set_top_level_key_replaces_existing():
     import tomllib
-    from credproxy_cli.core.config import set_top_level_key
+    from credproxy_cli.core.model.config import set_top_level_key
 
     out = set_top_level_key('image = "x"\ndirectory = "/old"\n', "directory", "/new")
     assert tomllib.loads(out)["directory"] == "/new"
@@ -352,7 +352,7 @@ def test_set_top_level_key_inserts_before_table():
     """A new top-level key must land before the first table header to stay
     in the root table (valid TOML)."""
     import tomllib
-    from credproxy_cli.core.config import set_top_level_key
+    from credproxy_cli.core.model.config import set_top_level_key
 
     src = 'image = "x"\n\n[env]\nFOO = "bar"\n'
     out = set_top_level_key(src, "directory", "/p")
@@ -362,7 +362,7 @@ def test_set_top_level_key_inserts_before_table():
 
 
 def test_set_top_level_key_preserves_comments():
-    from credproxy_cli.core.config import set_top_level_key
+    from credproxy_cli.core.model.config import set_top_level_key
 
     src = '# my workspace\nimage = "x"  # the image\n'
     out = set_top_level_key(src, "directory", "/p")
@@ -371,9 +371,9 @@ def test_set_top_level_key_preserves_comments():
 
 
 def test_load_config_mounts_not_array(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\nmounts = "notarray"\n')
     ws = Workspace("bad")
@@ -382,9 +382,9 @@ def test_load_config_mounts_not_array(xdg, workspaces_dir):
 
 
 def test_load_config_mount_not_string(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\nmounts = [42]\n')
     ws = Workspace("bad")
@@ -393,9 +393,9 @@ def test_load_config_mount_not_string(xdg, workspaces_dir):
 
 
 def test_load_config_mount_bad_format(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\nmounts = ["/only"]\n')
     ws = Workspace("bad")
@@ -404,9 +404,9 @@ def test_load_config_mount_bad_format(xdg, workspaces_dir):
 
 
 def test_load_config_mount_source_not_absolute(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\nmounts = ["relative:/dst"]\n')
     ws = Workspace("bad")
@@ -415,9 +415,9 @@ def test_load_config_mount_source_not_absolute(xdg, workspaces_dir):
 
 
 def test_load_config_mount_source_missing(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\nmounts = ["/nonexistent_zz:/dst"]\n')
     ws = Workspace("bad")
@@ -426,9 +426,9 @@ def test_load_config_mount_source_missing(xdg, workspaces_dir):
 
 
 def test_load_config_mount_target_not_absolute(xdg, tmp_path, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     src = tmp_path / "s"
     src.mkdir()
@@ -442,8 +442,8 @@ def test_load_config_mount_target_not_absolute(xdg, tmp_path, workspaces_dir):
 
 
 def _cfg(workspaces_dir, body):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
     _write(workspaces_dir, "w", f'image = "x"\n{body}\n')
     return load_config(Workspace("w"))
 
@@ -493,7 +493,7 @@ def test_mount_overlay_reorder_changes_source(xdg, workspaces_dir,
     file, and that path enters the spec hash -- a recreate is the intended
     consequence, so the resolved source must change."""
     import os
-    from credproxy_cli.core.config import workspace_spec_hash
+    from credproxy_cli.core.model.config import workspace_spec_hash
     a = tmp_path / "a"; a.mkdir(); (a / "gitconfig").write_text("A\n")
     b = tmp_path / "b"; b.mkdir(); (b / "gitconfig").write_text("B\n")
     body = 'mounts = [{ overlay = "gitconfig", target = "/g" }]'
@@ -564,9 +564,9 @@ def test_optional_home_omitted(xdg, workspaces_dir):
 
 
 def test_load_config_env_not_dict(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\nenv = "notatable"\n')
     ws = Workspace("bad")
@@ -575,9 +575,9 @@ def test_load_config_env_not_dict(xdg, workspaces_dir):
 
 
 def test_load_config_env_value_not_string(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\n[env]\nFOO = 42\n')
     ws = Workspace("bad")
@@ -586,9 +586,9 @@ def test_load_config_env_value_not_string(xdg, workspaces_dir):
 
 
 def test_load_config_setup_not_array(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\nsetup = "single string"\n')
     ws = Workspace("bad")
@@ -597,9 +597,9 @@ def test_load_config_setup_not_array(xdg, workspaces_dir):
 
 
 def test_load_config_setup_item_not_string(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "bad", 'image = "x"\nsetup = [42]\n')
     ws = Workspace("bad")
@@ -617,7 +617,7 @@ def test_render_template_is_valid_toml(xdg):
     """render_template output must be TOML-parseable, contain the name, and carry
     the literal default image (no `image` arg -- the template owns it)."""
     import tomllib
-    from credproxy_cli.core.config import render_template
+    from credproxy_cli.core.model.config import render_template
 
     text = render_template("myprojx")
     assert "myprojx" in text
@@ -628,8 +628,8 @@ def test_render_template_is_valid_toml(xdg):
 def test_render_template_scaffolds_active_nonroot_devcontainer(xdg, workspaces_dir):
     """The literal scaffold wires the non-root vscode user, its home,
     map_host_user, and the active CA-bootstrap setup -- loads cleanly, no edits."""
-    from credproxy_cli.core.config import load_config, render_template
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config, render_template
+    from credproxy_cli.core.model.workspace import Workspace
 
     (workspaces_dir / "dc.toml").write_text(render_template("dc"))
     cfg = load_config(Workspace("dc"))
@@ -650,7 +650,7 @@ def test_render_template_scaffolds_active_nonroot_devcontainer(xdg, workspaces_d
 
 def test_spec_hash_stable(xdg):
     """Same inputs yield the same hash."""
-    from credproxy_cli.core.config import workspace_spec_hash
+    from credproxy_cli.core.model.config import workspace_spec_hash
 
     cfg = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     h1 = workspace_spec_hash(cfg, "abc")
@@ -660,7 +660,7 @@ def test_spec_hash_stable(xdg):
 
 
 def test_spec_hash_changes_on_image(xdg):
-    from credproxy_cli.core.config import workspace_spec_hash
+    from credproxy_cli.core.model.config import workspace_spec_hash
 
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     import copy
@@ -670,7 +670,7 @@ def test_spec_hash_changes_on_image(xdg):
 
 
 def test_spec_hash_changes_on_proxy_id(xdg):
-    from credproxy_cli.core.config import workspace_spec_hash
+    from credproxy_cli.core.model.config import workspace_spec_hash
 
     cfg = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     assert workspace_spec_hash(cfg, "a") != workspace_spec_hash(cfg, "b")
@@ -679,7 +679,7 @@ def test_spec_hash_changes_on_proxy_id(xdg):
 def test_spec_hash_ignores_user_and_exec_flags(xdg):
     """user/exec_flags/workdir are exec-only -> changing them must NOT change the
     spec hash (no container recreate)."""
-    from credproxy_cli.core.config import workspace_spec_hash
+    from credproxy_cli.core.model.config import workspace_spec_hash
 
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     withuser = {**base, "user": "dev", "exec_flags": ["--workdir", "/srv"],
@@ -690,7 +690,7 @@ def test_spec_hash_ignores_user_and_exec_flags(xdg):
 def test_spec_hash_changes_on_run_flags(xdg):
     """run_flags shape the container -> changing them MUST change the spec hash
     (forces a recreate). A missing run_flags hashes the same as []."""
-    from credproxy_cli.core.config import workspace_spec_hash
+    from credproxy_cli.core.model.config import workspace_spec_hash
 
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     assert workspace_spec_hash(base, "p") == workspace_spec_hash({**base, "run_flags": []}, "p")
@@ -702,8 +702,8 @@ def test_spec_hash_changes_on_run_flags(xdg):
 
 
 def test_load_config_user_and_exec_flags(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "u", """
         image = "alpine:3"
@@ -716,8 +716,8 @@ def test_load_config_user_and_exec_flags(xdg, workspaces_dir):
 
 
 def test_load_config_user_exec_flags_default(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "d", 'image = "alpine:3"\n')
     cfg = load_config(Workspace("d"))
@@ -726,8 +726,8 @@ def test_load_config_user_exec_flags_default(xdg, workspaces_dir):
 
 
 def test_load_config_user_not_string(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nuser = 5\n')
     with pytest.raises(ConfigError, match="`user` must be a non-empty string"):
@@ -735,8 +735,8 @@ def test_load_config_user_not_string(xdg, workspaces_dir):
 
 
 def test_load_config_exec_flags_not_list_of_strings(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nexec_flags = [1, 2]\n')
     with pytest.raises(ConfigError, match="`exec_flags` must be an array of strings"):
@@ -747,24 +747,24 @@ def test_load_config_exec_flags_not_list_of_strings(xdg, workspaces_dir):
 
 
 def test_load_config_workdir(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", 'image = "alpine:3"\nworkdir = "/code"\n')
     assert load_config(Workspace("w"))["workdir"] == "/code"
 
 
 def test_load_config_workdir_default(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "wd", 'image = "alpine:3"\n')
     assert load_config(Workspace("wd"))["workdir"] is None
 
 
 def test_load_config_workdir_not_absolute(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nworkdir = "relative"\n')
     with pytest.raises(ConfigError, match="`workdir` must be an absolute path"):
@@ -775,16 +775,16 @@ def test_load_config_workdir_not_absolute(xdg, workspaces_dir):
 
 
 def test_load_config_enter_prelude(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "p", 'image = "alpine:3"\nenter_prelude = "export X=1"\n')
     assert load_config(Workspace("p"))["enter_prelude"] == "export X=1"
 
 
 def test_load_config_enter_prelude_default_and_empty(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "pd", 'image = "alpine:3"\n')
     assert load_config(Workspace("pd"))["enter_prelude"] is None
@@ -794,8 +794,8 @@ def test_load_config_enter_prelude_default_and_empty(xdg, workspaces_dir):
 
 
 def test_load_config_enter_prelude_not_string(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nenter_prelude = 42\n')
     with pytest.raises(ConfigError, match="`enter_prelude` must be a string"):
@@ -806,24 +806,24 @@ def test_load_config_enter_prelude_not_string(xdg, workspaces_dir):
 
 
 def test_load_config_shell(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "s", 'image = "alpine:3"\nshell = ["zsh"]\n')
     assert load_config(Workspace("s"))["shell"] == ["zsh"]
 
 
 def test_load_config_shell_default_none(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "sd", 'image = "alpine:3"\n')
     assert load_config(Workspace("sd"))["shell"] is None
 
 
 def test_load_config_shell_not_list(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nshell = "zsh"\n')
     with pytest.raises(ConfigError, match="`shell` must be a non-empty array"):
@@ -831,8 +831,8 @@ def test_load_config_shell_not_list(xdg, workspaces_dir):
 
 
 def test_load_config_shell_empty(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nshell = []\n')
     with pytest.raises(ConfigError, match="`shell` must be a non-empty array"):
@@ -845,8 +845,8 @@ def test_load_config_shell_empty(xdg, workspaces_dir):
 def test_declared_config_raw_keys_no_defaults(xdg, workspaces_dir):
     """declared_config returns exactly what's in the file, before defaults, and
     excludes the [[binding]] array."""
-    from credproxy_cli.core.config import declared_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import declared_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "d", """
         image = "alpine:3"
@@ -861,8 +861,8 @@ def test_declared_config_raw_keys_no_defaults(xdg, workspaces_dir):
 
 
 def test_declared_config_missing_file(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, declared_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, declared_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     with pytest.raises(ConfigError, match="not found"):
         declared_config(Workspace("ghost"))
@@ -872,8 +872,8 @@ def test_declared_config_missing_file(xdg, workspaces_dir):
 
 
 def test_load_config_run_flags(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "r", """
         image = "alpine:3"
@@ -884,16 +884,16 @@ def test_load_config_run_flags(xdg, workspaces_dir):
 
 
 def test_load_config_run_flags_default(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "rd", 'image = "alpine:3"\n')
     assert load_config(Workspace("rd"))["run_flags"] == []
 
 
 def test_load_config_run_flags_not_list_of_strings(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nrun_flags = [1, 2]\n')
     with pytest.raises(ConfigError, match="`run_flags` must be an array of strings"):
@@ -904,24 +904,24 @@ def test_load_config_run_flags_not_list_of_strings(xdg, workspaces_dir):
 
 
 def test_load_config_map_host_user(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "m", 'image = "alpine:3"\nuser = "dev"\nmap_host_user = true\n')
     assert load_config(Workspace("m"))["map_host_user"] is True
 
 
 def test_load_config_map_host_user_default(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "md", 'image = "alpine:3"\n')
     assert load_config(Workspace("md"))["map_host_user"] is False
 
 
 def test_load_config_map_host_user_not_bool(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nmap_host_user = "yes"\n')
     with pytest.raises(ConfigError, match="`map_host_user` must be a boolean"):
@@ -930,7 +930,7 @@ def test_load_config_map_host_user_not_bool(xdg, workspaces_dir):
 
 def test_spec_hash_changes_on_map_host_user(xdg):
     """map_host_user shapes the container -> changing it changes the spec hash."""
-    from credproxy_cli.core.config import workspace_spec_hash
+    from credproxy_cli.core.model.config import workspace_spec_hash
 
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     assert workspace_spec_hash(base, "p") == workspace_spec_hash({**base, "map_host_user": False}, "p")
@@ -939,7 +939,7 @@ def test_spec_hash_changes_on_map_host_user(xdg):
 
 def test_spec_hash_changes_on_user_uid(xdg):
     """user_uid shapes the userns -> changing it changes the spec hash."""
-    from credproxy_cli.core.config import workspace_spec_hash
+    from credproxy_cli.core.model.config import workspace_spec_hash
 
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     assert workspace_spec_hash(base, "p") != workspace_spec_hash({**base, "user_uid": 1000}, "p")
@@ -949,7 +949,7 @@ def test_spec_hash_changes_on_hostname(xdg):
     """The container hostname rides the spec hash: adding it (or changing it)
     yields a new hash, so a pre-feature workspace recreates once to pick up the
     flag. It's passed as the third arg (name-derived), not a cfg field."""
-    from credproxy_cli.core.config import workspace_spec_hash
+    from credproxy_cli.core.model.config import workspace_spec_hash
 
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     # default (no hostname) differs from a set one -> pre-feature recreate once
@@ -961,24 +961,24 @@ def test_spec_hash_changes_on_hostname(xdg):
 
 
 def test_load_config_user_uid(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "u", 'image = "alpine:3"\nuser = "vscode"\nuser_uid = 1000\n')
     assert load_config(Workspace("u"))["user_uid"] == 1000
 
 
 def test_load_config_user_uid_default_none(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "ud", 'image = "alpine:3"\n')
     assert load_config(Workspace("ud"))["user_uid"] is None
 
 
 def test_load_config_user_uid_invalid(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     for bad in ('user_uid = -1', 'user_uid = "1000"', 'user_uid = true'):
         _write(workspaces_dir, "b", f'image = "alpine:3"\nuser = "dev"\n{bad}\n')
@@ -987,8 +987,8 @@ def test_load_config_user_uid_invalid(xdg, workspaces_dir):
 
 
 def test_map_host_user_requires_user(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nmap_host_user = true\n')
     with pytest.raises(ConfigError, match="`map_host_user` require[s]? `user`"):
@@ -996,8 +996,8 @@ def test_map_host_user_requires_user(xdg, workspaces_dir):
 
 
 def test_user_uid_requires_user(xdg, workspaces_dir):
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nuser_uid = 1000\n')
     with pytest.raises(ConfigError, match="`user_uid` require[s]? `user`"):
@@ -1006,8 +1006,8 @@ def test_user_uid_requires_user(xdg, workspaces_dir):
 
 def test_both_orphans_named_in_error(xdg, workspaces_dir):
     """Both offenders are named when both are set without `user`."""
-    from credproxy_cli.core.config import ConfigError, load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nmap_host_user = true\nuser_uid = 1000\n')
     with pytest.raises(ConfigError, match="`map_host_user` and `user_uid` require `user`"):
@@ -1020,7 +1020,7 @@ def test_both_orphans_named_in_error(xdg, workspaces_dir):
 def _added(text, name, target, readonly=False):
     """Apply add_volume_mount and return (new_text, parsed_mounts)."""
     import tomllib
-    from credproxy_cli.core.config import add_volume_mount
+    from credproxy_cli.core.model.config import add_volume_mount
     new = add_volume_mount(text, name, target, readonly)
     return new, tomllib.loads(new).get("mounts")
 
@@ -1068,7 +1068,7 @@ def test_add_volume_mount_twice_yields_two_blocks(xdg):
     """Repeated adds on a block-style file append more [[mounts]] blocks (valid
     TOML array-of-tables), never an inline/array mix."""
     import tomllib
-    from credproxy_cli.core.config import add_volume_mount
+    from credproxy_cli.core.model.config import add_volume_mount
     text = add_volume_mount('image = "x"\n', "cache", "/c")
     text = add_volume_mount(text, "data", "/d")
     mounts = tomllib.loads(text).get("mounts")
@@ -1078,7 +1078,7 @@ def test_add_volume_mount_twice_yields_two_blocks(xdg):
 
 def test_add_volume_mount_escapes_quotes(xdg):
     import tomllib
-    from credproxy_cli.core.config import add_volume_mount
+    from credproxy_cli.core.model.config import add_volume_mount
     new = add_volume_mount('image = "x"\n', "cache", '/weird"path')
     assert tomllib.loads(new)["mounts"] == [{"volume": "cache",
                                              "target": '/weird"path'}]
@@ -1088,8 +1088,8 @@ def test_write_added_mount_home_uses_sugar(xdg, workspaces_dir):
     """A volume named `home` is written as the `home = ...` top-level sugar, not
     a mounts entry (which would collide with the sugar at load time)."""
     import tomllib
-    from credproxy_cli.core.config import write_added_mount
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import write_added_mount
+    from credproxy_cli.core.model.workspace import Workspace
     _write(workspaces_dir, "w", 'image = "x"\n')
     ws = Workspace("w")
     write_added_mount(ws, "home", "/home/vscode", False)
@@ -1099,8 +1099,8 @@ def test_write_added_mount_home_uses_sugar(xdg, workspaces_dir):
 
 
 def test_write_added_mount_roundtrips_through_load_config(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config, write_added_mount
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config, write_added_mount
+    from credproxy_cli.core.model.workspace import Workspace
     _write(workspaces_dir, "w", 'image = "x"\n')
     ws = Workspace("w")
     write_added_mount(ws, "cache", "/c", True)
@@ -1114,9 +1114,9 @@ def test_write_added_mount_roundtrips_through_load_config(xdg, workspaces_dir):
 
 def test_unknown_top_level_key_rejected(xdg, workspaces_dir):
     """A typo'd key silently no-ops otherwise -- reject it, naming the key."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", 'image = "x"\nsetup_cmd = ["echo hi"]\n')
     with pytest.raises(ConfigError) as ei:
@@ -1127,9 +1127,9 @@ def test_unknown_top_level_key_rejected(xdg, workspaces_dir):
 
 def test_unknown_key_suggests_close_match(xdg, workspaces_dir):
     """`mount` -> did-you-mean `mounts` (the exact trap the issue names)."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", 'image = "x"\nmount = []\n')
     with pytest.raises(ConfigError) as ei:
@@ -1140,8 +1140,8 @@ def test_unknown_key_suggests_close_match(xdg, workspaces_dir):
 def test_binding_and_rule_tables_still_load(xdg, workspaces_dir):
     """`[[binding]]`/`[[rule]]` are parsed by their own modules; load_config must
     treat both as known top-level keys, not reject them."""
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", """
         image = "x"
@@ -1160,9 +1160,9 @@ def test_binding_and_rule_tables_still_load(xdg, workspaces_dir):
 def test_auto_stop_string_false_rejected(xdg, workspaces_dir):
     """`auto_stop = "false"` is a truthy STRING that would silently enable
     auto-stop; a strict bool check rejects it."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", 'image = "x"\nauto_stop = "false"\n')
     with pytest.raises(ConfigError) as ei:
@@ -1171,8 +1171,8 @@ def test_auto_stop_string_false_rejected(xdg, workspaces_dir):
 
 
 def test_auto_stop_defaults_false_and_roundtrips(xdg, workspaces_dir):
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "w", 'image = "x"\n')
     assert load_config(Workspace("w"))["auto_stop"] is False
@@ -1181,15 +1181,15 @@ def test_auto_stop_defaults_false_and_roundtrips(xdg, workspaces_dir):
     assert load_config(Workspace("w2"))["auto_stop"] is True
 
     # ...and it surfaces in `config --effective` (was absent from the dict before).
-    from credproxy_cli.core.lifecycle import effective_config
+    from credproxy_cli.core.engine.lifecycle import effective_config
     assert effective_config(load_config(Workspace("w2")))["auto_stop"] is True
 
 
 def test_auto_stop_not_in_spec_hash(xdg, workspaces_dir):
     """auto_stop is host-side session behavior -- toggling it must NOT recreate
     the container, so it can't enter the spec hash."""
-    from credproxy_cli.core.config import load_config, workspace_spec_hash
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config, workspace_spec_hash
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "a", 'image = "x"\nauto_stop = true\n')
     _write(workspaces_dir, "b", 'image = "x"\nauto_stop = false\n')
@@ -1204,8 +1204,8 @@ def test_auto_stop_not_in_spec_hash(xdg, workspaces_dir):
 def test_setup_string_entries_stay_strings(xdg, workspaces_dir):
     """A plain-string setup array is left byte-identical -- strings stay strings,
     the escape hatch preserved exactly as before typed entries."""
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "s", 'image = "x"\nsetup = ["echo a", "echo b"]\n')
     assert load_config(Workspace("s"))["setup"] == ["echo a", "echo b"]
@@ -1214,8 +1214,8 @@ def test_setup_string_entries_stay_strings(xdg, workspaces_dir):
 def test_setup_table_normalized_with_defaults(xdg, workspaces_dir):
     """A bare `{run="…"}` table is normalized to the canonical dict with every
     default filled: user -> "workspace", order -> 0."""
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "t", 'image = "x"\nsetup = [{ run = "echo hi" }]\n')
     assert load_config(Workspace("t"))["setup"] == [
@@ -1225,8 +1225,8 @@ def test_setup_table_normalized_with_defaults(xdg, workspaces_dir):
 
 def test_setup_table_explicit_fields(xdg, workspaces_dir):
     """Explicit user/order are carried through verbatim."""
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "t", 'image = "x"\n'
            'setup = [{ run = "apt-get update", user = "root", order = 10 }]\n')
@@ -1238,8 +1238,8 @@ def test_setup_table_explicit_fields(xdg, workspaces_dir):
 def test_setup_mixed_array(xdg, workspaces_dir):
     """Strings and tables coexist in one array; strings stay strings, tables
     normalize."""
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "m", 'image = "x"\n'
            'setup = ["curl x", { run = "b", order = 5 }]\n')
@@ -1251,9 +1251,9 @@ def test_setup_mixed_array(xdg, workspaces_dir):
 
 def test_setup_rejects_non_string_non_table(xdg, workspaces_dir):
     """A number (or any non-string/non-table) is rejected, index-named."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "x"\nsetup = ["ok", 42]\n')
     with pytest.raises(ConfigError, match=r"setup\[1\] must be a string or a table"):
@@ -1262,9 +1262,9 @@ def test_setup_rejects_non_string_non_table(xdg, workspaces_dir):
 
 def test_setup_table_unknown_key_rejected(xdg, workspaces_dir):
     """An unknown table key is rejected, naming the index (mirrors _parse_mount)."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "x"\n'
            'setup = [{ run = "x", shell = "zsh" }]\n')
@@ -1274,9 +1274,9 @@ def test_setup_table_unknown_key_rejected(xdg, workspaces_dir):
 
 def test_setup_table_run_required(xdg, workspaces_dir):
     """`run` is required and must be a non-empty string."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "x"\nsetup = [{ user = "root" }]\n')
     with pytest.raises(ConfigError, match=r"setup\[0\] `run` is required"):
@@ -1290,9 +1290,9 @@ def test_setup_table_run_required(xdg, workspaces_dir):
 def test_setup_table_user_literal_rejected(xdg, workspaces_dir):
     """`user` accepts only "workspace"/"root" in v1 -- a literal username is
     rejected."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     _write(workspaces_dir, "b", 'image = "x"\n'
            'setup = [{ run = "x", user = "vscode" }]\n')
@@ -1303,9 +1303,9 @@ def test_setup_table_user_literal_rejected(xdg, workspaces_dir):
 def test_setup_table_order_must_be_nonneg_int(xdg, workspaces_dir):
     """`order` must be an int >= 0 -- a negative, a float, and a bool are all
     rejected (bool is an int subclass, guarded explicitly)."""
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
 
     for val in ("-1", "1.5", "true"):
         _write(workspaces_dir, "b", 'image = "x"\n'
@@ -1318,8 +1318,8 @@ def test_setup_table_order_must_be_nonneg_int(xdg, workspaces_dir):
 
 
 def _spec(workspaces_dir, name, setup_toml):
-    from credproxy_cli.core.config import load_config, workspace_spec_hash
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config, workspace_spec_hash
+    from credproxy_cli.core.model.workspace import Workspace
     _write(workspaces_dir, name, f'image = "x"\nsetup = {setup_toml}\n')
     return workspace_spec_hash(load_config(Workspace(name)), "proxy1")
 

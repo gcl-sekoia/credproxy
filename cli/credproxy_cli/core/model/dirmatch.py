@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import quick_directory
-from .errors import WorkspaceError
+from ..errors import WorkspaceError
 from .workspace import Workspace, for_name, list_names
 
 

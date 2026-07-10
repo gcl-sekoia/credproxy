@@ -11,8 +11,8 @@ import subprocess
 from dataclasses import dataclass
 
 from .docker import DOCKER_MISSING_MSG
-from .errors import DependencyError, ImageError
-from .paths import IMAGE_TAG
+from ..errors import DependencyError, ImageError
+from ..paths import IMAGE_TAG
 
 
 @dataclass(frozen=True)

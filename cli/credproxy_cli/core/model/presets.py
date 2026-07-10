@@ -26,9 +26,9 @@ from dataclasses import dataclass, replace
 
 from . import rules as core_rules
 from .bindings import Binding
-from .errors import ConfigError, CredproxyError, InjectorError
+from ..errors import ConfigError, CredproxyError, InjectorError
 from .injectors import Placeholder, validate_placeholder
-from .paths import layered_dirs
+from ..paths import layered_dirs
 
 
 @dataclass(frozen=True)

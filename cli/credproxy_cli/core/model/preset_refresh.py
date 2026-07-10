@@ -50,7 +50,7 @@ from .bindings import (
     _render_binding_block,
     _with_auto_names as _bindings_with_auto_names,
 )
-from .errors import ConfigError
+from ..errors import ConfigError
 from .preset_stamp import (
     _line_comment,
     _marker,

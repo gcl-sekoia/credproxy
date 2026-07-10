@@ -1,8 +1,9 @@
-"""Talking to the proxy's HTTP API over the published 127.0.0.1 port.
+"""Pure transport to the proxy's HTTP API over the published 127.0.0.1 port.
 
-Pushing config materializes the workspace's bindings, fetches each binding's
-real secret from its provider, maps them onto the bindings wire shape, and
-POSTs to /admin/config with the workspace's bearer token. Failures raise
+Read-only/status round-trips (GET /admin/config, POST /admin/rule-test) and the
+/health readiness poll. The config-PUSH path (materialize + resolve secrets +
+encode the wire body + POST) lives in the push engine (`engine/push.py`), which
+composes the model-plane wire encoder with this transport. Failures raise
 ProxyError (connect / readiness / 401 / non-200).
 """
 from __future__ import annotations
@@ -11,17 +12,9 @@ import json
 import time
 import urllib.error
 import urllib.request
-from typing import Callable
 
-from .bindings import materialize_bindings
-from .errors import ProxyError
-from .workspace import Workspace, read_token
-
-Notify = Callable[[str], None]
-
-
-def _noop(_msg: str) -> None:
-    pass
+from ..errors import ProxyError
+from ..model.workspace import Workspace, read_token
 
 
 def _http_post_json(url: str, body: bytes, token: str) -> tuple[int, dict]:
@@ -120,32 +113,3 @@ def wait_for_ready(http_port: int, timeout: float = 15.0) -> None:
     raise ProxyError(
         f"proxy did not become capture-ready within {timeout:.0f}s ({detail})"
     )
-
-
-def push_config(ws: Workspace, http_port: int, notify: Notify = _noop,
-                bindings=None, rules=None, fingerprint=None):
-    """Materialize bindings + rules, fetch each secret from its provider, and
-    POST the resulting wire config (bindings + rules + a metadata `fingerprint`)
-    to the managed proxy's /admin/config on 127.0.0.1:<http_port>.
-
-    `bindings`/`rules`/`fingerprint` may be supplied by the caller (the start
-    path computes them to decide whether a push is even needed); otherwise they
-    are materialized/computed here. Materialization may rewrite the config file
-    (filling generated names/placeholders); announced via `notify`.
-
-    A thin wrapper over the shared push engine (`push.push_to_target`), so
-    `start`/`apply` (this function) and the `push`/stateless verbs POST a
-    byte-identical wire body for the same inputs. Returns `(bindings, rules)`
-    (the materialized instances) so the caller can record applied state."""
-    from . import push as core_push
-    from .rules import combined_fingerprint, materialize_rules
-
-    if bindings is None:
-        bindings = materialize_bindings(ws, notify)
-    if rules is None:
-        rules = materialize_rules(ws, notify)
-    if fingerprint is None:
-        fingerprint = combined_fingerprint(bindings, rules)
-    return core_push.push_to_target(
-        f"http://127.0.0.1:{http_port}", read_token(ws),
-        bindings, rules, fingerprint, notify=notify)

@@ -342,7 +342,7 @@ class Renderer:
     # -- binding add --
     def binding_added(self, name: str, ws: str, b: dict,
                       attached: bool = False) -> None:
-        from ..core.bindings import secret_display
+        from ..core.model.bindings import secret_display
         print(f"added binding '{name}' to workspace '{ws}'")
         print(f"  injector    {b['injector']}")
         print(f"  provider    {b['provider']}")
@@ -380,7 +380,7 @@ class Renderer:
 
     # -- binding list --
     def binding_list(self, ws: str, rows: list[dict]) -> None:
-        from ..core.bindings import secret_display
+        from ..core.model.bindings import secret_display
         if not rows:
             print(f"no bindings in workspace '{ws}'")
             return

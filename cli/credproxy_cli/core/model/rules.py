@@ -28,7 +28,7 @@ from .bindings import (
     _toml_key,
     _toml_str,
 )
-from .errors import ConfigError, CredproxyError
+from ..errors import ConfigError, CredproxyError
 from .workspace import Workspace
 
 import tomllib

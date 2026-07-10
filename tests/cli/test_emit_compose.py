@@ -25,12 +25,12 @@ def _patch_imageenv(monkeypatch, capture=None):
         if capture is not None:
             capture.append(image)
         return _FAKE_ENV
-    monkeypatch.setattr("credproxy_cli.core.imageenv.ImageEnv.load",
+    monkeypatch.setattr("credproxy_cli.core.engine.imageenv.ImageEnv.load",
                         classmethod(load))
 
 
 def _create_ws(workspaces_dir, name: str) -> None:
-    from credproxy_cli.core.workspace import Workspace, ensure_token
+    from credproxy_cli.core.model.workspace import Workspace, ensure_token
     (workspaces_dir / f"{name}.toml").write_text('image = "x"\n')
     ensure_token(Workspace(name))
 
@@ -94,7 +94,7 @@ def test_emit_compose_workspace_service_lines(xdg, monkeypatch):
 def test_emit_compose_name_bakes_real_token_path(xdg, workspaces_dir, monkeypatch):
     _patch_imageenv(monkeypatch)
     _create_ws(workspaces_dir, "svc")
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     ec, out, err = _run(["emit-compose", "svc"])
     assert ec == 0
     real = str(Workspace("svc").token_path)
@@ -146,7 +146,7 @@ def test_emit_compose_json_refused(xdg, monkeypatch):
 
 
 def test_emit_compose_is_reserved_name(xdg):
-    from credproxy_cli.core.workspace import RESERVED_NAMES
+    from credproxy_cli.core.model.workspace import RESERVED_NAMES
     assert "emit-compose" in RESERVED_NAMES
     ec, out, err = _run(["workspace", "create", "emit-compose"])
     assert ec != 0

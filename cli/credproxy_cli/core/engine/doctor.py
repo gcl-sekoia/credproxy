@@ -16,11 +16,11 @@ import subprocess
 import tomllib
 from dataclasses import dataclass
 
-from . import hostmatch
-from .errors import CredproxyError
+from ..model import hostmatch
+from ..errors import CredproxyError
 from .imageenv import ImageEnv
-from .paths import IMAGE_TAG, SRC_DIGEST_LABEL, image_label_digest, overlay_dirs, proxy_src_digest
-from .workspace import Workspace, for_name, list_names
+from ..paths import IMAGE_TAG, SRC_DIGEST_LABEL, image_label_digest, overlay_dirs, proxy_src_digest
+from ..model.workspace import Workspace, for_name, list_names
 
 
 @dataclass
@@ -52,7 +52,7 @@ def run(ws_name: str | None = None, *, fetch: bool = False) -> list[Check]:
     # managed externally -- so a `doctor NAME` for one skips the proxy-image env
     # check (docker is still checked; discovery may need it). The scan-all path
     # keeps the image check (some workspace may be managed).
-    from .config import quick_attach
+    from ..model.config import quick_attach
     skip_image = bool(ws_name) and len(targets) == 1 and quick_attach(targets[0])
     checks = _env_checks(skip_image=skip_image)
     for ws in targets:
@@ -133,7 +133,7 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
         return [_fail(f"ws:{ws.name}", f"workspace '{ws.name}' has no config file",
                       f"credproxy workspace create {ws.name}")]
     out: list[Check] = []
-    from .config import load_config, quick_attach
+    from ..model.config import load_config, quick_attach
     attached = quick_attach(ws)
     try:
         cfg = load_config(ws)
@@ -200,9 +200,9 @@ def _script_compile_checks(ws: Workspace) -> list[Check]:
     it doesn't import, emit a single skip-with-note pointing at `script check`
     rather than failing (doctor must degrade gracefully)."""
     from . import scriptcheck
-    from .bindings import load_bindings
-    from .injectors import find_injector
-    from .scripts import find_script
+    from ..model.bindings import load_bindings
+    from ..model.injectors import find_injector
+    from ..model.scripts import find_script
 
     try:
         bindings = load_bindings(ws)
@@ -279,7 +279,7 @@ def _binding_checks(ws: Workspace, *, fetch: bool) -> tuple[list[Check], dict]:
 
     # Layer 2: the authoritative parse+validate. Reuse its result for --fetch so a
     # parse failure can't yield a different exit code with vs. without --fetch.
-    from .bindings import load_bindings, test_bindings
+    from ..model.bindings import load_bindings, test_bindings
     bs = None
     try:
         bs = load_bindings(ws)
@@ -311,8 +311,8 @@ def _probe_bindings_raw(ws: Workspace, bindings: list, out: list[Check]) -> None
     the human name, which may be absent or duplicated) plus a host index, so no
     two failures ever share an id -- a `--json` consumer keying by id can't
     silently drop one. The human `name` still rides in the message."""
-    from .injectors import find_injector
-    from .providers import find_provider
+    from ..model.injectors import find_injector
+    from ..providers import find_provider
     for i, b in enumerate(bindings):
         bid = f"ws:{ws.name}:binding[{i}]"
         if not isinstance(b, dict):
@@ -358,9 +358,9 @@ def _preset_requires_checks(ws: Workspace, *, fetch: bool,
     `fetch=true` check runs only under `doctor NAME --fetch` (the `fetch` gate);
     without it, it degrades to a resolve-only provider check -- so a nameless
     `doctor` scan-all never invokes a provider."""
-    from . import prereqs
-    from .preset_stamp import applied_preset_names
-    from .presets import load_presets
+    from ..model import prereqs
+    from ..model.preset_stamp import applied_preset_names
+    from ..model.presets import load_presets
 
     try:
         text = ws.config_path.read_text()
@@ -385,7 +385,7 @@ def _preset_requires_checks(ws: Workspace, *, fetch: bool,
     # check can recover the credential actually chosen at stamp time. Best-effort:
     # an invalid config (already flagged by :bindings) just yields no mapping, so
     # provider checks report "could not determine provider".
-    from .bindings import load_bindings
+    from ..model.bindings import load_bindings
     binding_cred: dict[str, tuple[str | None, object]] = {}
     try:
         for b in load_bindings(ws):
@@ -477,8 +477,8 @@ def _resolve_pack_requires(spec, text: str):
     `path = { option = "id" }` marker with the option's value read back from the
     workspace's stamped mounts (#59). Returns `(resolved, skipped)` -- see
     `presets.resolve_requires_for_check`."""
-    from . import preset_refresh
-    from .presets import resolve_requires_for_check
+    from ..model import preset_refresh
+    from ..model.presets import resolve_requires_for_check
     option_values = {}
     if spec.options:
         option_values = preset_refresh._read_back_options(
@@ -514,7 +514,7 @@ def _rule_checks(ws: Workspace) -> list[Check]:
     (`materialize_rules -> rules.validate`: bad path glob, unknown script, duplicate
     names, action-field errors). Mirror the layer-2 bindings check so a broken rule
     is caught by doctor too, not one PR later at `start`."""
-    from .rules import load_rules
+    from ..model.rules import load_rules
     try:
         rs = load_rules(ws)
         return [_ok(f"ws:{ws.name}:rules", f"[{ws.name}] {len(rs)} rule(s) valid")]

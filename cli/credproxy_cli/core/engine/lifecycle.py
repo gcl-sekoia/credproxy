@@ -31,21 +31,44 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import docker
-from .config import (
+from ..model.config import (
     load_config,
     render_template,
     workspace_spec_hash,
 )
-from .errors import (
+from ..errors import (
     ConfigError, CredproxyError, DockerError, ImageError, ProxyError,
     WorkspaceError,
 )
 from .imageenv import ImageEnv
-from .workspace import Workspace, ensure_token, hostname_for
-from .paths import IMAGE_TAG, PROXY_DIR, atomic_write_text
-from .proxy_http import proxy_status, push_config, wait_for_ready
+from ..model.workspace import Workspace, ensure_token, hostname_for
+from ..paths import IMAGE_TAG, PROXY_DIR, atomic_write_text
+from .proxy_http import proxy_status, wait_for_ready
+from .push import push_config
 
 Notify = Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class WorkspaceStatus:
+    name: str
+    running: bool
+    image: str
+
+
+def list_workspaces() -> list[WorkspaceStatus]:
+    """Structured status for every workspace: name, running?, image.
+
+    Docker is queried for the running state; image is read from the TOML."""
+    from ..model.config import quick_image
+    from ..model.workspace import list_names
+
+    out = []
+    for name in list_names():
+        ws = Workspace(name)
+        running = docker.container_status(ws.ws_container) == "running"
+        out.append(WorkspaceStatus(name, running, quick_image(ws)))
+    return out
 
 
 def _noop(_msg: str) -> None:
@@ -122,7 +145,7 @@ def _write_applied_rules(ws: Workspace, rules) -> None:
     applied-bindings.json). Rules carry no secret, so this records the whole wire
     shape -- name, hosts, methods, path, action, visibility, action params, and
     a script rule's source. Used for drift detection."""
-    from .rules import rule_wire_entries
+    from ..model.rules import rule_wire_entries
 
     ws.ensure_state_dir()
     atomic_write_text(ws.applied_rules_path,
@@ -160,7 +183,7 @@ def create_attached_workspace_files(ws: Workspace, selector: dict,
     still host-owned -- it authenticates the config push to the externally-run
     proxy exactly as for a managed workspace. `text` overrides the rendered
     template (post-`[[preset]]`-expansion; single atomic write)."""
-    from .config import render_attach_template
+    from ..model.config import render_attach_template
 
     if ws.exists():
         raise WorkspaceError(
@@ -207,9 +230,9 @@ def push_workspace(ws: Workspace, notify: Notify = _noop, *,
     rather than race (never skip). Atomic fail-closed (I3): an unresolvable ref
     aborts the whole push before anything is sent (materialize/wire_config raise)."""
     from . import push as core_push
-    from .bindings import materialize_bindings
-    from .rules import combined_fingerprint, materialize_rules
-    from .workspace import read_token
+    from ..model.bindings import materialize_bindings
+    from ..model.rules import combined_fingerprint, materialize_rules
+    from ..model.workspace import read_token
 
     admin_url = resolve_admin_url(ws, notify)
     if wait:
@@ -233,15 +256,15 @@ def resolve_workspace_wire(ws: Workspace, notify: Notify = _noop) -> dict:
 
     The result carries real secrets: it is the one at-rest disclosure path, so
     `resolve --out` writes it mode 0600 and warns outside the state dir."""
-    from . import push as core_push
-    from .bindings import materialize_bindings
-    from .rules import combined_fingerprint, materialize_rules
+    from ..model.bindings import materialize_bindings
+    from ..model.rules import combined_fingerprint, materialize_rules
+    from ..model.wire import build_wire
 
     with ws.lock():
         bindings = materialize_bindings(ws, notify)
         rules = materialize_rules(ws, notify)
     fp = combined_fingerprint(bindings, rules)
-    return core_push.build_wire(bindings, rules, fp)
+    return build_wire(bindings, rules, fp)
 
 
 def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
@@ -741,7 +764,7 @@ def run_setup(ws: Workspace, cfg: dict, notify: Notify = _noop,
     steps should be idempotent: a container recreate re-runs them while the
     persistent home volume survives, so writable-layer work is re-provisioned
     and home-volume work just needs to be cheap to repeat."""
-    from .bindings import binding_env_map
+    from ..model.bindings import binding_env_map
     setup = cfg.get("setup") or []
     if not setup:
         return
@@ -940,8 +963,8 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
     # provider calls it implies) when the already-running proxy reports the
     # intended config's fingerprint. The proxy's tmpfs config does not survive a
     # restart, so a (re)started proxy (proxy_fresh) always gets a push.
-    from .bindings import materialize_bindings
-    from .rules import combined_fingerprint, materialize_rules
+    from ..model.bindings import materialize_bindings
+    from ..model.rules import combined_fingerprint, materialize_rules
     bindings = materialize_bindings(ws, notify)
     rules = materialize_rules(ws, notify)
     want_fp = combined_fingerprint(bindings, rules)
@@ -1118,7 +1141,7 @@ def add_managed_volume(ws: Workspace, *, name: str, target: str,
     Validation mirrors load_config (absolute target, valid volume name, no
     duplicate target/name), so a bad request fails before anything is touched.
     A volume named `home` is the `home = "..."` sugar, handled by write_added_mount."""
-    from . import config as core_config
+    from ..model import config as core_config
 
     cfg = load_config(ws)
 
@@ -1432,8 +1455,8 @@ def _rules_drift(ws: Workspace, current_rules: list, running: bool) -> list:
     a bad host/path glob, an unresolved script -- as a single drift item, rather
     than silently mis-computing drift (e.g. a name-keyed dict collapsing two
     duplicate-named rules). Keeps inspect from being more lenient than push."""
-    from .errors import ConfigError, CredproxyError
-    from .rules import rule_wire_entries, validate
+    from ..errors import ConfigError, CredproxyError
+    from ..model.rules import rule_wire_entries, validate
 
     out: list[DriftItem] = []
     try:
@@ -1493,7 +1516,7 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
     Reads bindings WITHOUT fetching secrets or materializing the file (so
     inspect is side-effect-free); a yet-unmaterialized name/placeholder shows
     as its auto-derived name / None placeholder."""
-    from .bindings import _parse_bindings, _with_auto_names
+    from ..model.bindings import _parse_bindings, _with_auto_names
     import tomllib
 
     if not ws.exists():
@@ -1531,7 +1554,7 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
         for b in parsed
     )
 
-    from .rules import named_rules_from_raw
+    from ..model.rules import named_rules_from_raw
     current_rules = named_rules_from_raw(raw, str(ws.config_path))
 
     drift = _compute_drift(ws, cfg, bindings, running, current_rules=current_rules)
@@ -1557,8 +1580,8 @@ def _inspect_attached(ws: Workspace, cfg: dict) -> WorkspaceInspect:
     status (the containers are managed externally)."""
     import tomllib
 
-    from .bindings import _parse_bindings, _with_auto_names
-    from .rules import named_rules_from_raw
+    from ..model.bindings import _parse_bindings, _with_auto_names
+    from ..model.rules import named_rules_from_raw
 
     attach = cfg["attach"]
     attach_target: str | None = None
@@ -1612,7 +1635,7 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
 
     Returns ApplyResult; never raises on deferred items (exit 0 is the contract).
     """
-    from .bindings import _parse_bindings, _with_auto_names
+    from ..model.bindings import _parse_bindings, _with_auto_names
     import tomllib
 
     if docker.container_status(ws.proxy_container) != "running":
@@ -1645,7 +1668,7 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
         for b in current_bindings_parsed
     ]
 
-    from .rules import named_rules_from_raw
+    from ..model.rules import named_rules_from_raw
     current_rules = named_rules_from_raw(raw, str(ws.config_path))
 
     drift = _compute_drift(ws, cfg, current_binding_summaries, running=True,

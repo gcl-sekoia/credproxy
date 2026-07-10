@@ -666,7 +666,7 @@ def test_scaffold_sh_provider_runs_via_cli(xdg, monkeypatch):
 
 
 def _scaffold_sh_provider(name: str) -> Path:
-    from credproxy_cli.core.scaffold import scaffold
+    from credproxy_cli.core.model.scaffold import scaffold
     return scaffold("provider", name, "sh").path
 
 

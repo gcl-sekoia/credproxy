@@ -30,8 +30,8 @@ import string
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .errors import InjectorError
-from .paths import layered_dirs
+from ..errors import InjectorError
+from ..paths import layered_dirs
 from .schemes import SchemeSpec, build_script_spec, get_scheme, merge_params
 
 import tomllib

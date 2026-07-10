@@ -36,7 +36,7 @@ def _pack_file(base, rel: str, body: str = "echo hi\n"):
 
 def _make_ws(name: str, content: str):
     from credproxy_cli.core.paths import workspaces_config_dir
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     wd = workspaces_config_dir()
     wd.mkdir(parents=True, exist_ok=True)
     (wd / f"{name}.toml").write_text(textwrap.dedent(content))
@@ -66,8 +66,8 @@ _GH = """
 def _stamp(ws, preset, provider=None, secret=None):
     """Apply a pack the way `preset add` does (the fixture under test refreshes
     the result)."""
-    from credproxy_cli.core import preset_stamp
-    from credproxy_cli.core.presets import build_preset
+    from credproxy_cli.core.model import preset_stamp
+    from credproxy_cli.core.model.presets import build_preset
     exp = build_preset(preset, provider, secret)
     preset_stamp.stamp(ws, preset, exp.rev, bindings=list(exp.bindings),
                        rules=list(exp.rules), mounts=list(exp.mounts),
@@ -148,7 +148,7 @@ def test_refresh_container_half_update_and_prune(xdg, monkeypatch):
     code, out, err = _run(
         ["workspace", "w", "preset", "refresh", "cont", "--prune"])
     assert code == 0, out + err
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     cfg = load_config(ws)
     assert cfg["env"] == {"C_VAR": "CHANGED"}
     assert cfg["setup"][0]["run"] == "bash /opt/c2.sh"
@@ -178,7 +178,7 @@ def test_refresh_updates_changed_block_only(xdg):
     # gh-api chunk untouched (its marker rev unchanged, block identical).
     assert after.split("# credproxy:preset")[1] == gh_api_chunk
     # gh-git now carries the new host + a re-parseable config.
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     hosts = {b.name: b.hosts for b in load_bindings(ws)}
     assert hosts["gh-git"] == ("github.com", "ghcr.io")
     assert "1 updated" in (out + err)
@@ -193,7 +193,7 @@ def test_refresh_preserves_placeholder_and_credential(xdg):
     _write_preset("gh", _GH)
     ws = _make_ws("w", _WS_MIN)
     _stamp(ws, "gh", "env", "TOK")
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     ph_before = {b.name: b.placeholder for b in load_bindings(ws)}
     prov_before = {b.name: (b.provider, b.secret) for b in load_bindings(ws)}
 
@@ -232,7 +232,7 @@ def test_refresh_skips_hand_edited_with_diff(xdg):
     assert "skipped (hand-edited)" in (out + err)
     assert "diff for binding gh-api" in (out + err)
     # gh-git was still refreshed.
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     assert {b.name: b.hosts for b in load_bindings(ws)}["gh-git"] \
         == ("github.com", "ghcr.io")
 
@@ -261,7 +261,7 @@ def test_refresh_adds_new_part_reusing_identity(xdg):
     _write_preset("gh", _GH)
     ws = _make_ws("w", _WS_MIN)
     _stamp(ws, "gh", "env", "TOK")
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     shared_ph = load_bindings(ws)[0].placeholder
 
     # Definition gains a third part.
@@ -310,7 +310,7 @@ def test_refresh_rule_pack_add_and_update(xdg):
     """)
     code, out, err = _run(["workspace", "w", "preset", "refresh", "guard"])
     assert code == 0, out + err
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     rules = {r.name: r.hosts for r in load_rules(ws)}
     assert rules["guard-block-x"] == ("x.example", "y.example")
     assert rules["guard-block-z"] == ("z.example",)
@@ -342,7 +342,7 @@ def test_refresh_reports_prunable_without_flag(xdg):
     # Reported, NOT removed.
     assert "--prune" in (out + err)
     assert ws.config_path.read_text() == before
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     assert {b.name for b in load_bindings(ws)} == {"gh-api", "gh-git"}
 
 
@@ -364,10 +364,10 @@ def test_refresh_prune_removes_vanished_block(xdg):
     code, out, err = _run(["workspace", "w", "preset", "refresh", "gh", "--prune"])
     assert code == 0, out + err
     assert "pruned" in (out + err)
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     assert {b.name for b in load_bindings(ws)} == {"gh-api"}
     # The remaining block is intact + re-parseable, no orphan marker for gh-git.
-    from credproxy_cli.core import preset_stamp
+    from credproxy_cli.core.model import preset_stamp
     text = ws.config_path.read_text()
     assert "gh-git" not in text
     assert preset_stamp.applied_preset_names(text) == ["gh"]
@@ -376,8 +376,8 @@ def test_refresh_prune_removes_vanished_block(xdg):
 def test_refresh_prune_gated_on_implicit_default_no_tty(xdg):
     """`--prune` is destructive: on the loose surface, an implicit (default)
     workspace fails closed without a TTY (like `binding remove`)."""
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     _write_preset("gh", _GH)
     ws = _make_ws("w", _WS_MIN)
     _stamp(ws, "gh", "env", "TOK")
@@ -403,7 +403,7 @@ def test_refresh_prune_gated_on_implicit_default_no_tty(xdg):
     # --yes bypasses the gate.
     code, out, err = _run_loose(["preset", "refresh", "--prune", "--yes"])
     assert code == 0, out + err
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     assert {b.name for b in load_bindings(ws)} == {"gh-api"}
 
 
@@ -484,8 +484,8 @@ def test_refresh_attached_refuses_container_half(xdg):
     ws = _make_ws("attd", 'attach = { container = "extbox" }\n')
     # Stamp only the binding half (attach can't take env) so there IS an applied
     # marker, then a container-half definition triggers the refusal.
-    from credproxy_cli.core import preset_stamp
-    from credproxy_cli.core.presets import build_preset
+    from credproxy_cli.core.model import preset_stamp
+    from credproxy_cli.core.model.presets import build_preset
     exp = build_preset("cont", "env", "TOK")
     preset_stamp.stamp(ws, "cont", exp.rev, bindings=list(exp.bindings),
                        rules=[], mounts=[], env_items=[], setup=[])
@@ -510,7 +510,7 @@ def test_refresh_attached_binding_only_ok(xdg):
 def test_multiline_string_mask_indices(xdg):
     """`multiline_string_line_indices` marks every line whose START is inside a
     triple-quoted string (so the marker/blockspan scanners skip them)."""
-    from credproxy_cli.core.preset_stamp import multiline_string_line_indices as M
+    from credproxy_cli.core.model.preset_stamp import multiline_string_line_indices as M
     t = 'a = 1\nrun = """\nline in str\nstill in str\n"""\nb = 2\n'
     # 0:a=1  1:run=""" (opens, not masked)  2,3:inside  4:""" (starts inside)  5:b=2
     assert M(t) == frozenset({2, 3, 4})
@@ -522,7 +522,7 @@ def test_applied_names_ignores_marker_in_multiline_string(xdg):
     """A full-shape marker copied into a `\"\"\"...\"\"\"` value is a string value,
     never a discovered pack; a real trailing comment after a closed single-line
     triple string still counts."""
-    from credproxy_cli.core.preset_stamp import applied_preset_names
+    from credproxy_cli.core.model.preset_stamp import applied_preset_names
     m = "# credproxy:preset name=ghost rev=aaaaaaaaaaaa sha=bbbbbbbbbbbb"
     # interior of a multiline string
     assert applied_preset_names(
@@ -561,7 +561,7 @@ def test_refresh_ignores_marker_copied_into_multiline_string(xdg):
     # The copy inside the multiline string is byte-preserved (foreign bytes safe).
     assert marker_line in after
     # The genuine env updated; the string still reads "one".
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     assert load_config(ws)["env"]["C_VAR"] == "two"
     assert after.count('C_VAR = "two"') == 1
 
@@ -572,8 +572,8 @@ def test_refresh_fails_closed_on_duplicate_identity(xdg):
     (no write), never silently mis-target an edit."""
     _write_preset("cont", '[[setup]]\nrun = "bash /opt/c.sh"\norder = 45\n')
     ws = _make_ws("w", _WS_MIN)
-    from credproxy_cli.core import preset_stamp
-    from credproxy_cli.core.presets import build_preset
+    from credproxy_cli.core.model import preset_stamp
+    from credproxy_cli.core.model.presets import build_preset
     exp = build_preset("cont")
     preset_stamp.stamp(ws, "cont", exp.rev, bindings=[], rules=[], mounts=[],
                        env_items=[], setup=[dict(s) for s in exp.setup])
@@ -620,7 +620,7 @@ def test_refresh_divergent_bindings_skipped_no_rotation(xdg):
     _write_preset("gh", _GH)
     ws = _make_ws("w", _WS_MIN)
     _stamp(ws, "gh", "env", "TOK")
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     ph_before = {b.name: b.placeholder for b in load_bindings(ws)}
     # Hand-edit gh-api's placeholder only (first occurrence in file order).
     text = ws.config_path.read_text()
@@ -648,8 +648,8 @@ def test_refresh_all_attached_container_half_labelled_attached(xdg):
     reports it as attached-skipped, NOT 'no longer in the registry' (finding 4)."""
     _write_preset("cont", _GH + '\n[env]\nC_VAR = "one"\n')
     ws = _make_ws("attd", 'attach = { container = "extbox" }\n')
-    from credproxy_cli.core import preset_stamp
-    from credproxy_cli.core.presets import build_preset
+    from credproxy_cli.core.model import preset_stamp
+    from credproxy_cli.core.model.presets import build_preset
     exp = build_preset("cont", "env", "TOK")
     preset_stamp.stamp(ws, "cont", exp.rev, bindings=list(exp.bindings),
                        rules=[], mounts=[], env_items=[], setup=[])

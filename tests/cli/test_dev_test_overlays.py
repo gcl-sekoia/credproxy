@@ -96,7 +96,7 @@ def test_container_branch_mounts_chain_and_rewrites_env(overlay_with_tests, monk
     ov = overlay_with_tests
     calls = _record_subprocess(monkeypatch)
     # Force the container branch and avoid a real ImageEnv/docker inspect.
-    from credproxy_cli.core.imageenv import ImageEnv
+    from credproxy_cli.core.engine.imageenv import ImageEnv
     monkeypatch.setattr(ImageEnv, "load",
                         classmethod(lambda cls, image=None: ImageEnv(
                             http_port=39998, tmpfs="/run/secrets",

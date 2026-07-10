@@ -10,7 +10,7 @@ import pytest
 
 
 def _write_ws(workspaces_dir: Path, name: str, content: str):
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     p = workspaces_dir / f"{name}.toml"
     p.write_text(textwrap.dedent(content))
     return Workspace(name)
@@ -19,7 +19,7 @@ def _write_ws(workspaces_dir: Path, name: str, content: str):
 # ---- parse / validate --------------------------------------------------------
 
 def test_parse_block_rule(xdg, workspaces_dir):
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -36,7 +36,7 @@ def test_parse_block_rule(xdg, workspaces_dir):
 
 
 def test_rewrite_defaults_hidden(xdg, workspaces_dir):
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -51,7 +51,7 @@ def test_rewrite_defaults_hidden(xdg, workspaces_dir):
 
 def test_unknown_action_rejected(xdg, workspaces_dir):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -70,7 +70,7 @@ def test_unknown_action_rejected(xdg, workspaces_dir):
 ])
 def test_host_rewrite_rejected(xdg, workspaces_dir, op):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", f"""
         image = "x"
         [[rule]]
@@ -85,7 +85,7 @@ def test_host_rewrite_rejected(xdg, workspaces_dir, op):
 
 def test_misplaced_field_rejected(xdg, workspaces_dir):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -99,7 +99,7 @@ def test_misplaced_field_rejected(xdg, workspaces_dir):
 
 def test_respond_requires_status(xdg, workspaces_dir):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -112,7 +112,7 @@ def test_respond_requires_status(xdg, workspaces_dir):
 
 def test_bad_host_pattern_rejected(xdg, workspaces_dir):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -125,7 +125,7 @@ def test_bad_host_pattern_rejected(xdg, workspaces_dir):
 
 def test_empty_methods_rejected(xdg, workspaces_dir):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -139,7 +139,7 @@ def test_empty_methods_rejected(xdg, workspaces_dir):
 
 def test_bad_path_rejected(xdg, workspaces_dir):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -153,7 +153,7 @@ def test_bad_path_rejected(xdg, workspaces_dir):
 
 def test_missing_script_rejected(xdg, workspaces_dir):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -168,14 +168,14 @@ def test_missing_script_rejected(xdg, workspaces_dir):
 # ---- auto-name + materialize -------------------------------------------------
 
 def test_auto_name():
-    from credproxy_cli.core.rules import Rule, _auto_name
+    from credproxy_cli.core.model.rules import Rule, _auto_name
     r = Rule(name=None, hosts=("api.github.com",), action="block")
     assert _auto_name(r, set()) == "block-api-github-com"
     assert _auto_name(r, {"block-api-github-com"}) == "block-api-github-com-2"
 
 
 def test_materialize_fills_name(xdg, workspaces_dir):
-    from credproxy_cli.core.rules import load_rules, materialize_rules
+    from credproxy_cli.core.model.rules import load_rules, materialize_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -196,7 +196,7 @@ def test_materialize_fills_name(xdg, workspaces_dir):
 # ---- append / remove ---------------------------------------------------------
 
 def test_append_then_remove(xdg, workspaces_dir):
-    from credproxy_cli.core.rules import (Rule, append_rule, load_rules,
+    from credproxy_cli.core.model.rules import (Rule, append_rule, load_rules,
                                           remove_rule)
     ws = _write_ws(workspaces_dir, "w", 'image = "x"\n')
     append_rule(ws, Rule(name="r1", hosts=("api.github.com",), action="block"))
@@ -210,8 +210,8 @@ def test_append_then_remove(xdg, workspaces_dir):
 def test_append_rule_coexists_with_bindings(xdg, workspaces_dir):
     """A [[rule]] block must not be confused with a [[binding]] block by the
     surgical-edit machinery (both use the shared array-depth block spans)."""
-    from credproxy_cli.core.bindings import load_bindings
-    from credproxy_cli.core.rules import Rule, append_rule, load_rules
+    from credproxy_cli.core.model.bindings import load_bindings
+    from credproxy_cli.core.model.rules import Rule, append_rule, load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[binding]]
@@ -230,7 +230,7 @@ def test_append_rule_coexists_with_bindings(xdg, workspaces_dir):
 # ---- wire entries + matcher --------------------------------------------------
 
 def test_wire_entries_shape():
-    from credproxy_cli.core.rules import Rule, rule_wire_entries
+    from credproxy_cli.core.model.rules import Rule, rule_wire_entries
     rules = [Rule(name="r", hosts=("api.github.com",), action="respond",
                   status=200, body="{}", headers={"Content-Type": "application/json"},
                   methods=("GET",), path="/v1/models")]
@@ -241,7 +241,7 @@ def test_wire_entries_shape():
 
 
 def test_match_rules_first_terminal_wins():
-    from credproxy_cli.core.rules import Rule, match_rules
+    from credproxy_cli.core.model.rules import Rule, match_rules
     rules = [
         Rule(name="rw", hosts=("api.github.com",), action="rewrite",
              set_headers={"X": "y"}),
@@ -262,7 +262,7 @@ def test_match_rules_script_never_hides_later_rule():
     # reported as possibly-terminal (may_terminate) and NEVER stops the dry-run --
     # a definite later block is still shown, flagged conditional on the script.
     # (match_rules no longer reads the .star, so the script name need not resolve.)
-    from credproxy_cli.core.rules import Rule, match_rules
+    from credproxy_cli.core.model.rules import Rule, match_rules
     rules = [
         Rule(name="scrub", hosts=("api.github.com",), action="script",
              script="scrub-emails", path="/users/**"),
@@ -275,7 +275,7 @@ def test_match_rules_script_never_hides_later_rule():
 
 
 def test_match_rules_path_and_host_glob():
-    from credproxy_cli.core.rules import Rule, match_rules
+    from credproxy_cli.core.model.rules import Rule, match_rules
     rules = [Rule(name="r", hosts=("sts.*.amazonaws.com",), action="block",
                   path="/assume/**")]
     assert match_rules(rules, "POST", "sts.us-east-1.amazonaws.com", "/assume/x")
@@ -286,7 +286,7 @@ def test_match_rules_path_and_host_glob():
 # ---- combined fingerprint ----------------------------------------------------
 
 def test_combined_fingerprint_changes_with_rules():
-    from credproxy_cli.core.rules import Rule, combined_fingerprint
+    from credproxy_cli.core.model.rules import Rule, combined_fingerprint
     a = combined_fingerprint([], [Rule(name="r", hosts=("h.example.com",),
                                        action="block")])
     b = combined_fingerprint([], [Rule(name="r", hosts=("h.example.com",),
@@ -298,7 +298,7 @@ def test_combined_fingerprint_changes_with_rules():
 def test_fingerprint_changes_on_reorder():
     # Rules evaluate in declaration order, so a reorder is a behavioral change
     # and MUST change the fingerprint (re-push).
-    from credproxy_cli.core.rules import Rule, combined_fingerprint
+    from credproxy_cli.core.model.rules import Rule, combined_fingerprint
     r1 = Rule(name="a", hosts=("h.example.com",), action="block")
     r2 = Rule(name="b", hosts=("g.example.com",), action="block")
     assert combined_fingerprint([], [r1, r2]) != combined_fingerprint([], [r2, r1])
@@ -308,7 +308,7 @@ def test_parse_rule_entry_rejects_out_of_range_status():
     # Field-shape validation lives in the ONE per-entry validator now (used by
     # both the load path and `rule add`); a bad status is caught there.
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import _parse_rule_entry
+    from credproxy_cli.core.model.rules import _parse_rule_entry
     with pytest.raises(ConfigError, match="status"):
         _parse_rule_entry({"action": "block", "hosts": ["h.example.com"],
                            "status": 999}, "src", "rule")
@@ -316,7 +316,7 @@ def test_parse_rule_entry_rejects_out_of_range_status():
 
 def test_parse_rule_entry_builds_and_validates():
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import _parse_rule_entry
+    from credproxy_cli.core.model.rules import _parse_rule_entry
     r = _parse_rule_entry({"action": "respond", "hosts": ["api.x.com"],
                            "status": 200, "body": "{}",
                            "headers": {"Content-Type": "application/json"}},
@@ -336,7 +336,7 @@ def test_parse_rule_entry_builds_and_validates():
 
 
 def test_parse_rule_entry_accepts_script_params():
-    from credproxy_cli.core.rules import _parse_rule_entry
+    from credproxy_cli.core.model.rules import _parse_rule_entry
     r = _parse_rule_entry(
         {"action": "script", "hosts": ["api.x.com"], "script": "guard",
          "params": {"allow_prefixes": ["/a", "/b"], "status": 418,
@@ -348,7 +348,7 @@ def test_parse_rule_entry_accepts_script_params():
 
 def test_parse_rule_entry_params_only_on_script_action():
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import _parse_rule_entry
+    from credproxy_cli.core.model.rules import _parse_rule_entry
     # params is a script-only field: on block/respond/rewrite it's an extra field.
     with pytest.raises(ConfigError, match="not valid for action 'block'"):
         _parse_rule_entry({"action": "block", "hosts": ["h.x.com"],
@@ -360,7 +360,7 @@ def test_parse_rule_entry_rejects_non_json_clean_params():
     path, so it fails at `rule add`/load, not silently at the wire POST."""
     import datetime
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import _parse_rule_entry
+    from credproxy_cli.core.model.rules import _parse_rule_entry
     with pytest.raises(ConfigError, match="unsupported value type|JSON-clean"):
         _parse_rule_entry(
             {"action": "script", "hosts": ["api.x.com"], "script": "g",
@@ -369,7 +369,7 @@ def test_parse_rule_entry_rejects_non_json_clean_params():
 
 def test_parse_rule_entry_rejects_non_table_params():
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import _parse_rule_entry
+    from credproxy_cli.core.model.rules import _parse_rule_entry
     with pytest.raises(ConfigError, match="params must be a table"):
         _parse_rule_entry({"action": "script", "hosts": ["api.x.com"],
                            "script": "g", "params": [1, 2]}, "src", "rule")
@@ -378,7 +378,7 @@ def test_parse_rule_entry_rejects_non_table_params():
 def test_wire_entry_includes_script_params():
     """params ride the wire next to script/api; a rule without params omits the
     key (so zero-config rules keep a byte-identical wire entry)."""
-    from credproxy_cli.core.rules import Rule, rule_wire_entries
+    from credproxy_cli.core.model.rules import Rule, rule_wire_entries
     with_params = Rule(name="g", hosts=("api.github.com",), action="script",
                        script="scrub-emails", params={"a": [1, 2]})
     (e,) = rule_wire_entries([with_params])
@@ -395,7 +395,7 @@ def test_parse_rule_entry_rejects_non_finite_float_params():
     """nan/inf are valid TOML floats but not JSON -- reject them (else json.dumps
     emits bare NaN/Infinity that strict parsers, incl. a future Go CLI, refuse)."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import _parse_rule_entry
+    from credproxy_cli.core.model.rules import _parse_rule_entry
     for bad in (float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ConfigError, match="finite"):
             _parse_rule_entry({"action": "script", "hosts": ["api.x.com"],
@@ -409,7 +409,7 @@ def test_parse_rule_entry_rejects_non_finite_float_params():
 def test_rule_row_includes_params():
     """`rule list`/`inspect`/`rule_added` rows carry params (operator-plaintext),
     so the docs' "shown in rule list" claim is true -- #36 review."""
-    from credproxy_cli.core.rules import Rule
+    from credproxy_cli.core.model.rules import Rule
     from credproxy_cli.porcelain.cli import _rule_row
     row = _rule_row(Rule(name="g", hosts=("h",), action="script", script="s",
                          params={"allow": ["/a"]}))
@@ -421,7 +421,7 @@ def test_rule_row_includes_params():
 def test_remove_rule_with_child_table(xdg, workspaces_dir):
     # A hand-written `[rule.headers]` child sub-table must be removed WITH its
     # parent rule, not orphaned (which would corrupt the TOML).
-    from credproxy_cli.core.rules import load_rules, remove_rule
+    from credproxy_cli.core.model.rules import load_rules, remove_rule
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
 
@@ -451,7 +451,7 @@ def test_remove_rule_with_child_table(xdg, workspaces_dir):
 def test_remove_rule_with_params_child_table(xdg, workspaces_dir):
     # A `[rule.params]` sub-table (the natural way to write a list/table param)
     # must load and be removed WITH its parent, not orphaned (#35).
-    from credproxy_cli.core.rules import load_rules, remove_rule
+    from credproxy_cli.core.model.rules import load_rules, remove_rule
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
 
@@ -481,7 +481,7 @@ def test_remove_rule_with_params_child_table(xdg, workspaces_dir):
 
 def test_rewrite_empty_container_rejected(xdg, workspaces_dir):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import load_rules
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
@@ -497,7 +497,7 @@ def test_rewrite_empty_container_rejected(xdg, workspaces_dir):
 def test_render_rule_block_roundtrips_nested_params(xdg, workspaces_dir):
     """A stamped `[rule.params]` (incl. nested tables + numbers/bools) reloads
     byte-for-value identical -- _render_rule_block <-> _parse_rule_entry (#37)."""
-    from credproxy_cli.core.rules import Rule, append_rules, load_rules
+    from credproxy_cli.core.model.rules import Rule, append_rules, load_rules
     ws = _write_ws(workspaces_dir, "w", 'image = "x"\n')
     params = {"allow": ["/a", "/b"], "limit": 5, "strict": True,
               "nested": {"k": "v", "n": 2}}

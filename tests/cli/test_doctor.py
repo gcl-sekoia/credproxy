@@ -15,7 +15,7 @@ def test_doctor_reports_all_binding_failures(xdg, workspaces_dir):
     # A binding with BOTH a bad injector and a bad host glob: doctor reports both
     # in one run (unlike start, which fails at the first). Env checks may vary by
     # host, so assert only the workspace-level checks.
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "bad", """
         image = "x"
         [[binding]]
@@ -32,7 +32,7 @@ def test_doctor_reports_all_binding_failures(xdg, workspaces_dir):
 
 
 def test_doctor_valid_workspace_passes_its_checks(xdg, workspaces_dir):
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "good", """
         image = "x"
         [[binding]]
@@ -55,7 +55,7 @@ def test_doctor_catches_missing_required_binding_fields(xdg, workspaces_dir):
     """The layer-1 probes only fire on keys that are PRESENT; the aggregate
     `:bindings` check (real load_bindings) catches a binding missing required
     fields -- a config that `start` rejects but shallow probing green-lit (#30.1)."""
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "req", """
         image = "x"
         [[binding]]
@@ -67,7 +67,7 @@ def test_doctor_catches_missing_required_binding_fields(xdg, workspaces_dir):
 
 def test_doctor_catches_broken_rule(xdg, workspaces_dir):
     """The `[[rule]]` layer is validated too, symmetric with bindings (#30.2)."""
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "rr", """
         image = "x"
         [[rule]]
@@ -81,7 +81,7 @@ def test_doctor_catches_broken_rule(xdg, workspaces_dir):
 
 
 def test_doctor_valid_rule_passes(xdg, workspaces_dir):
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "okr", """
         image = "x"
         [[rule]]
@@ -96,7 +96,7 @@ def test_doctor_valid_rule_passes(xdg, workspaces_dir):
 def test_doctor_check_ids_are_unique_and_index_qualified(xdg, workspaces_dir):
     """Two bad host globs in one binding emit two DISTINCT ids (#30.4) -- a
     --json consumer keying by id can't silently drop one."""
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "dup", """
         image = "x"
         [[binding]]
@@ -116,7 +116,7 @@ def test_doctor_invalid_name_rejected(xdg):
     """An explicit NAME goes through the same validation as every other command,
     so a traversal/reserved name is refused rather than reading outside the
     workspaces dir (#30.3)."""
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     from credproxy_cli.core.errors import WorkspaceError
     with pytest.raises(WorkspaceError):
         doctor.run("../../etc/passwd")
@@ -128,7 +128,7 @@ def test_doctor_missing_overlay_is_failing_check(xdg, tmp_path, monkeypatch):
     """Each env-listed overlay gets one index-qualified existence check; a
     configured-but-missing entry FAILS (resolution stays tolerant elsewhere)."""
     import os
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     present = tmp_path / "ok"; present.mkdir()
     missing = tmp_path / "gone"          # never created
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH",
@@ -142,7 +142,7 @@ def test_doctor_missing_overlay_is_failing_check(xdg, tmp_path, monkeypatch):
 def test_doctor_no_overlays_no_overlay_checks(xdg, monkeypatch):
     """An explicit opt-out (set-empty) configures zero overlays -> no checks."""
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", "")
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     assert not any(c.id.startswith("overlay[") for c in doctor._env_checks())
 
 
@@ -151,7 +151,8 @@ def test_doctor_unset_env_no_overlay_checks(xdg, tmp_path, monkeypatch):
     construction -- doctor emits no overlay existence checks (only env-listed
     entries can be typo'd)."""
     monkeypatch.delenv("CREDPROXY_OVERLAY_PATH", raising=False)
-    from credproxy_cli.core import doctor, paths
+    from credproxy_cli.core.engine import doctor
+    from credproxy_cli.core import paths
     container = tmp_path / "overlay"
     (container / "acme").mkdir(parents=True)   # a discovered overlay
     monkeypatch.setattr(paths, "REPO_ROOT", tmp_path)
@@ -159,7 +160,7 @@ def test_doctor_unset_env_no_overlay_checks(xdg, tmp_path, monkeypatch):
 
 
 def test_doctor_missing_docker_reported(xdg, monkeypatch):
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     monkeypatch.setattr(doctor.shutil, "which", lambda _: None)
     checks = doctor._env_checks()
     assert checks[0].id == "docker" and not checks[0].ok
@@ -169,8 +170,8 @@ def test_doctor_missing_docker_reported(xdg, monkeypatch):
 def test_doctor_image_staleness_hint_on_mismatch(monkeypatch):
     """A checkout that has drifted from the built image is a PASSING check with a
     rebuild hint -- the old image still works, so it's never a failure (#43)."""
-    from credproxy_cli.core import doctor
-    from credproxy_cli.core import docker as core_docker
+    from credproxy_cli.core.engine import doctor
+    from credproxy_cli.core.engine import docker as core_docker
     monkeypatch.setattr(doctor, "proxy_src_digest", lambda: "NEW")
     monkeypatch.setattr(core_docker, "inspect", lambda ref, fmt: "OLD")
     checks = doctor._image_staleness_check()
@@ -181,8 +182,8 @@ def test_doctor_image_staleness_hint_on_mismatch(monkeypatch):
 
 
 def test_doctor_image_staleness_ok_no_hint_on_match(monkeypatch):
-    from credproxy_cli.core import doctor
-    from credproxy_cli.core import docker as core_docker
+    from credproxy_cli.core.engine import doctor
+    from credproxy_cli.core.engine import docker as core_docker
     monkeypatch.setattr(doctor, "proxy_src_digest", lambda: "SAME")
     monkeypatch.setattr(core_docker, "inspect", lambda ref, fmt: "SAME")
     (c,) = doctor._image_staleness_check()
@@ -192,8 +193,8 @@ def test_doctor_image_staleness_ok_no_hint_on_match(monkeypatch):
 def test_doctor_image_staleness_unknown_label(monkeypatch):
     """An image built before this change has no label ('<no value>') -> a passing
     check with a hint, distinct from a real mismatch."""
-    from credproxy_cli.core import doctor
-    from credproxy_cli.core import docker as core_docker
+    from credproxy_cli.core.engine import doctor
+    from credproxy_cli.core.engine import docker as core_docker
     monkeypatch.setattr(doctor, "proxy_src_digest", lambda: "NEW")
     monkeypatch.setattr(core_docker, "inspect", lambda ref, fmt: "<no value>")
     (c,) = doctor._image_staleness_check()
@@ -201,7 +202,7 @@ def test_doctor_image_staleness_unknown_label(monkeypatch):
 
 
 def test_doctor_image_staleness_skipped_without_checkout(monkeypatch):
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     monkeypatch.setattr(doctor, "proxy_src_digest", lambda: None)
     assert doctor._image_staleness_check() == []
 
@@ -260,7 +261,7 @@ def test_doctor_skips_compile_when_starlark_absent(xdg, workspaces_dir, tmp_path
     failure (doctor must not require the venv/docker for this)."""
     _overlay_scripted(tmp_path, monkeypatch,
                       "def on_request():\n    return True\n")
-    from credproxy_cli.core import scriptcheck
+    from credproxy_cli.core.engine import scriptcheck
     monkeypatch.setattr(scriptcheck, "starlark_importable", lambda: False)
     _write(workspaces_dir, "sc", """
         image = "x"
@@ -277,12 +278,12 @@ def test_doctor_skips_compile_when_starlark_absent(xdg, workspaces_dir, tmp_path
 
 
 def doctor_run(name):
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     return doctor.run(name)
 
 
 def test_doctor_missing_workspace_reported(xdg):
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     fails = [c for c in doctor.run("nope") if not c.ok]
     assert any("no config file" in c.message for c in fails)
 
@@ -291,7 +292,7 @@ def test_doctor_malformed_toml_reported_not_crash(xdg, workspaces_dir):
     """A malformed TOML must be REPORTED (config/bindings/rules all fail), never
     crash doctor -- load_bindings/load_rules do a raw tomllib.loads whose
     TOMLDecodeError isn't a CredproxyError."""
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     (workspaces_dir / "broke.toml").write_text('image = "x"\nthis is not = = toml\n')
     checks = doctor.run("broke")   # must not raise
     ids = {c.id: c for c in checks}
@@ -303,9 +304,9 @@ def test_doctor_malformed_toml_reported_not_crash(xdg, workspaces_dir):
 
 
 def _patch_runtime(monkeypatch, *, rootless, runtime):
-    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless",
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.is_podman_rootless",
                         lambda: rootless)
-    monkeypatch.setattr("credproxy_cli.core.runtime.oci_runtime",
+    monkeypatch.setattr("credproxy_cli.core.engine.runtime.oci_runtime",
                         lambda: runtime)
 
 
@@ -326,7 +327,7 @@ def test_doctor_runc_keepid_flags_bad_combo(xdg, workspaces_dir, monkeypatch):
     import os
     if not hasattr(os, "getuid"):
         pytest.skip("no getuid on this platform")
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "ws1", _KEEPID_TOML)
     _patch_runtime(monkeypatch, rootless=True, runtime="runc")
     c = _runc_check(doctor.run("ws1"))
@@ -337,7 +338,7 @@ def test_doctor_runc_keepid_flags_bad_combo(xdg, workspaces_dir, monkeypatch):
 
 def test_doctor_runc_keepid_skipped_on_crun(xdg, workspaces_dir, monkeypatch):
     """crun handles the case -> no check emitted."""
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "ws1", _KEEPID_TOML)
     _patch_runtime(monkeypatch, rootless=True, runtime="crun")
     assert _runc_check(doctor.run("ws1")) is None
@@ -345,7 +346,7 @@ def test_doctor_runc_keepid_skipped_on_crun(xdg, workspaces_dir, monkeypatch):
 
 def test_doctor_runc_keepid_skipped_on_docker(xdg, workspaces_dir, monkeypatch):
     """Real Docker (not rootless podman, no runtime name) -> no check."""
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "ws1", _KEEPID_TOML)
     _patch_runtime(monkeypatch, rootless=False, runtime=None)
     assert _runc_check(doctor.run("ws1")) is None
@@ -353,7 +354,7 @@ def test_doctor_runc_keepid_skipped_on_docker(xdg, workspaces_dir, monkeypatch):
 
 def test_doctor_runc_keepid_skipped_when_rootful(xdg, workspaces_dir, monkeypatch):
     """Rootful podman on runc: no keep-id emitted -> no check."""
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "ws1", _KEEPID_TOML)
     _patch_runtime(monkeypatch, rootless=False, runtime="runc")
     assert _runc_check(doctor.run("ws1")) is None
@@ -361,7 +362,7 @@ def test_doctor_runc_keepid_skipped_when_rootful(xdg, workspaces_dir, monkeypatc
 
 def test_doctor_runc_keepid_skipped_when_map_host_user_off(xdg, workspaces_dir, monkeypatch):
     """map_host_user off -> no keep-id -> no check even on runc."""
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "ws1", '\nimage = "x"\nuser = "vscode"\n')
     _patch_runtime(monkeypatch, rootless=True, runtime="runc")
     assert _runc_check(doctor.run("ws1")) is None
@@ -370,7 +371,7 @@ def test_doctor_runc_keepid_skipped_when_map_host_user_off(xdg, workspaces_dir, 
 def test_doctor_runc_keepid_skipped_with_run_flags_userns(xdg, workspaces_dir, monkeypatch):
     """A hand-rolled --userns in run_flags -> the user owns the mapping -> no
     check (credproxy's keep-id isn't in force)."""
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     _write(workspaces_dir, "ws1", _KEEPID_TOML + '    run_flags = ["--userns=host"]\n')
     _patch_runtime(monkeypatch, rootless=True, runtime="runc")
     assert _runc_check(doctor.run("ws1")) is None

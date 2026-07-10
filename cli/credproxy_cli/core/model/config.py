@@ -37,8 +37,8 @@ import os
 import re
 from pathlib import Path
 
-from .errors import ConfigError
-from .paths import atomic_write_text, overlay_dirs, resolve_singleton
+from ..errors import ConfigError
+from ..paths import atomic_write_text, overlay_dirs, resolve_singleton
 from .workspace import Workspace
 
 import tomllib
@@ -103,11 +103,11 @@ def _parse_attach(raw_attach, source: str) -> dict:
         return {"discover": f"com.docker.compose.project={val},"
                             f"com.docker.compose.service=proxy"}
     if key == "discover":
-        from .push import parse_discover
+        from .attach import parse_discover
         parse_discover(val)   # validates the k=v,k=v shape (raises ConfigError)
         return {"discover": val}
     if key == "admin_url":
-        from .push import normalize_admin_url, require_loopback
+        from .attach import normalize_admin_url, require_loopback
         url = normalize_admin_url(val)
         require_loopback(url)
         return {"admin_url": url}
@@ -158,7 +158,7 @@ def _tier_roots() -> dict[str, Path]:
     `user` (the XDG config dir) and `builtin`. The reserved literals win over a
     same-named overlay basename. This is the set a `TIER:REL` qualified overlay
     source resolves against (see `_overlay_source`)."""
-    from .paths import BUILTIN_DIR, config_dir
+    from ..paths import BUILTIN_DIR, config_dir
     roots: dict[str, Path] = {}
     for label, base in overlay_dirs():
         # labels are `overlay:<basename>` (deduped `overlay:<basename>#2`); the

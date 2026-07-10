@@ -91,10 +91,10 @@ def test_created_config_loads_clean(xdg):
     every loader accepts it (acceptance criterion 3)."""
     _template(_MIN + '\n[[preset]]\nname = "github"\n')
     assert _run(["workspace", "create", "proj"])[0] == 0
-    from credproxy_cli.core.bindings import load_bindings
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.rules import load_rules
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.bindings import load_bindings
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.rules import load_rules
+    from credproxy_cli.core.model.workspace import Workspace
     ws = Workspace("proj")
     assert load_config(ws)["image"] == "python:3.12-slim"
     assert len(load_bindings(ws)) == 3
@@ -129,7 +129,7 @@ def test_textual_identity_create_vs_preset_add(xdg, monkeypatch):
     """The blocks `create` stamps from a template `[[preset]]` are BYTE-IDENTICAL
     to `create` (plain) followed by `preset add` -- same renderers, same core.
     Pin the generated placeholder so even the provenance sha matches."""
-    from credproxy_cli.core.injectors import Placeholder
+    from credproxy_cli.core.model.injectors import Placeholder
     monkeypatch.setattr(Placeholder, "generate", lambda self: self.prefix + "PINNED")
 
     _template(_MIN + '\n[[preset]]\nname = "github"\n')
@@ -149,7 +149,7 @@ def test_default_resolution_parity(xdg):
     """`resolve_preset_credential` is the shared defaulting core: the github pack
     resolves gh-cli/github.com identically whether reached via the template entry
     or `preset add` (tested through both entry points)."""
-    from credproxy_cli.core.presets import get_preset, resolve_preset_credential
+    from credproxy_cli.core.model.presets import get_preset, resolve_preset_credential
     spec = get_preset("github")
     # Nothing supplied -> pack defaults fill both.
     assert resolve_preset_credential(spec, None, None) == ("gh-cli", "github.com", [])
@@ -263,10 +263,10 @@ def test_entry_validation(xdg, entry, needle):
 
 
 def test_loader_rejects_preset_in_workspace_config(xdg):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.paths import workspaces_config_dir
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     d = workspaces_config_dir()
     d.mkdir(parents=True, exist_ok=True)
     (d / "w.toml").write_text('image = "x"\n[[preset]]\nname = "github"\n')
@@ -461,8 +461,8 @@ def test_container_half_pack_stamps_at_create(xdg):
     _preset("cont", _CONTAINER)
     _template(_MIN + '\n[[preset]]\nname = "cont"\n')
     assert _run(["workspace", "create", "proj"])[0] == 0
-    from credproxy_cli.core.config import load_config
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
     cfg = load_config(Workspace("proj"))
     assert cfg["env"] == {"FOO": "bar"}
     assert {m["target"] for m in cfg["mounts"]} == {"/cache"}
@@ -520,10 +520,10 @@ def test_pure_rule_pack_still_validates_existing_bindings(xdg):
 
 
 def test_loader_rejects_preset_in_attached_config(xdg):
-    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.model.config import load_config
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.paths import workspaces_config_dir
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     d = workspaces_config_dir()
     d.mkdir(parents=True, exist_ok=True)
     (d / "att.toml").write_text(
@@ -569,7 +569,7 @@ def test_create_requires_run_after_write_not_when_later_entry_aborts(xdg, monkey
     write succeeds. A create that aborts on a later entry invokes NO prereqs at
     all -- so no provider is exec'd for a create that writes nothing."""
     calls: list[int] = []
-    from credproxy_cli.core import prereqs
+    from credproxy_cli.core.model import prereqs
     real = prereqs.evaluate
     monkeypatch.setattr(prereqs, "evaluate",
                         lambda *a, **k: (calls.append(1), real(*a, **k))[1])

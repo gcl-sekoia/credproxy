@@ -6,7 +6,7 @@ import urllib.error
 
 import pytest
 
-from credproxy_cli.core import proxy_http
+from credproxy_cli.core.engine import proxy_http
 from credproxy_cli.core.errors import ProxyError
 
 

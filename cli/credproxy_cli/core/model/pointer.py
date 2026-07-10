@@ -11,8 +11,8 @@ it lives entirely in porcelain.
 """
 from __future__ import annotations
 
-from .errors import WorkspaceError
-from .paths import atomic_write_text, state_dir
+from ..errors import WorkspaceError
+from ..paths import atomic_write_text, state_dir
 from .workspace import Workspace, for_name
 
 

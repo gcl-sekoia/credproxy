@@ -36,13 +36,13 @@ import re
 import sys
 import tomllib
 
-from ..core import dirmatch
-from ..core import docker as core_docker
-from ..core import lifecycle
-from ..core import pointer
-from ..core import workspace as core_workspace
+from ..core.model import dirmatch
+from ..core.engine import docker as core_docker
+from ..core.engine import lifecycle
+from ..core.model import pointer
+from ..core.model import workspace as core_workspace
 from ..core.errors import CredproxyError, DependencyError, ImageError
-from ..core.workspace import RESERVED_NAMES, Workspace, for_name
+from ..core.model.workspace import RESERVED_NAMES, Workspace, for_name
 from ..core.paths import (
     IMAGE_TAG,
     PROXY_DIR,
@@ -238,7 +238,7 @@ def _reject_if_attached(ws: Workspace, verb: str) -> None:
     """Refuse a container-lifecycle verb on an ATTACHED workspace: its containers
     are managed externally (Compose/devcontainers/CI), so credproxy only pushes
     credentials -- point the operator at `push`."""
-    from ..core import config as core_config
+    from ..core.model import config as core_config
     if core_config.quick_attach(ws):
         fail(f"workspace '{ws.name}' is attached: its containers are managed "
              f"externally, so `{verb}` doesn't apply. credproxy manages only its "
@@ -270,7 +270,7 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
         from ..core.errors import WorkspaceError
         raise WorkspaceError(
             f"workspace '{ws.name}' already exists ({ws.config_path})")
-    from ..core import config as core_config
+    from ..core.model import config as core_config
     source = str(ws.config_path)
     selector = None
     if attach is not None:
@@ -295,7 +295,7 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
     # aborts (finding 5). Advisory -- the stamp is durable, host state is fixable
     # afterward. `do_fetch=True` (create is interactive, like `preset add`).
     if stamped_packs:
-        from ..core import prereqs
+        from ..core.model import prereqs
         for announce, (spec, provider, secret) in zip(preset_announces,
                                                        stamped_packs):
             announce["requires"] = [prereqs.summary(r) for r in prereqs.evaluate(
@@ -350,7 +350,7 @@ def _strip_preset_blocks(text: str) -> str:
     header, no intervening blank), which can in a rare shape absorb a preceding
     block's trailing comment -- an acceptable edge for the common labelled-block
     case."""
-    from ..core.bindings import _block_spans
+    from ..core.model.bindings import _block_spans
 
     lines = text.splitlines(keepends=True)
     for start, end in reversed(_block_spans(text, _PRESET_BLOCK_RE,
@@ -384,9 +384,9 @@ def _expand_template_presets(ctx: Ctx, base_text: str, source: str):
     expanded in declaration order and each is validated against the accumulating
     text (prior stamps + the template's literal config), so cross-entry and
     entry-vs-literal collisions fail here."""
-    from ..core.bindings import _block_spans
+    from ..core.model.bindings import _block_spans
     from ..core.errors import PresetTemplateError
-    from ..core.presets import (
+    from ..core.model.presets import (
         apply_option_values, build_preset, get_preset, parse_template_presets,
     )
     from ..core.providers import find_provider
@@ -484,7 +484,7 @@ def do_bind_dir(ctx: Ctx, name: str | None, directory_flag: str | None) -> None:
     """Associate a workspace with a host directory (default: cwd), so a loose
     `credp <verb>` run from at/under it resolves here. Sugar over editing the
     `directory` field; the TOML stays the source of truth."""
-    from ..core import config as core_config
+    from ..core.model import config as core_config
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
@@ -537,7 +537,7 @@ def do_current(ctx: Ctx) -> None:
 
 
 def do_list(ctx: Ctx, filter_: str | None) -> None:
-    from ..core import config as core_config
+    from ..core.model import config as core_config
 
     # The default pointer and cwd matching are loose-only implicit-targeting
     # concepts; the strict surface is a plain inventory that consults neither
@@ -554,7 +554,7 @@ def do_list(ctx: Ctx, filter_: str | None) -> None:
         except CredproxyError:
             here_name = None
     rows = []
-    for s in core_workspace.list_workspaces():
+    for s in lifecycle.list_workspaces():
         if filter_ and filter_ not in s.name:
             continue
         rows.append({
@@ -576,10 +576,11 @@ def do_info(ctx: Ctx) -> None:
     the loose surface (consistent with `list`/`current`); everything else is
     surface-agnostic."""
     from collections import Counter
-    from ..core import paths, presets as core_presets
-    from ..core.injectors import list_injectors
+    from ..core import paths
+    from ..core.model import presets as core_presets
+    from ..core.model.injectors import list_injectors
     from ..core.providers import list_providers
-    from ..core.scripts import list_scripts
+    from ..core.model.scripts import list_scripts
 
     # Tier labels in resolution order (user > overlays > builtin), driving both
     # the registry counters and the render columns.
@@ -703,9 +704,9 @@ def do_edit(ctx: Ctx, name: str | None) -> None:
     # Post-edit validation: report problems but never revert -- it's the
     # user's file. load_config/load_bindings/load_rules parse and validate
     # without writing; `[[rule]]` is part of the file this edits, so validate it.
-    from ..core import bindings as core_bindings
-    from ..core import config as core_config
-    from ..core import rules as core_rules
+    from ..core.model import bindings as core_bindings
+    from ..core.model import config as core_config
+    from ..core.model import rules as core_rules
     # An attached workspace has no `start`; its follow-up verb is `push`
     # (`apply` is its alias there).
     attached = core_config.quick_attach(ws)
@@ -743,7 +744,7 @@ def do_stop(ctx: Ctx, name: str | None) -> None:
 
 
 def do_delete(ctx: Ctx, name: str | None, keep_volumes: bool) -> None:
-    from ..core import config as core_config
+    from ..core.model import config as core_config
 
     implicit = name is None
     ws = _resolve_ws(ctx, name)
@@ -762,7 +763,7 @@ def do_delete(ctx: Ctx, name: str | None, keep_volumes: bool) -> None:
 
 
 def do_apply(ctx: Ctx, name: str | None) -> None:
-    from ..core import config as core_config
+    from ..core.model import config as core_config
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
@@ -780,7 +781,7 @@ def do_push(ctx: Ctx, name: str | None, wait: bool, timeout: float) -> None:
     """`push`: resolve secrets and POST the full wire config (bindings + rules) to
     the workspace's proxy -- managed (its published port) or attached (the
     `attach` target). `--wait` polls /health first."""
-    from ..core import config as core_config
+    from ..core.model import config as core_config
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
@@ -848,7 +849,7 @@ def do_config(ctx: Ctx, name: str | None, declared: bool) -> None:
     `workdir`, the enter shim, etc.) -- so you can see what actually applies
     without it being in the file. `--declared` shows only what's literally in the
     TOML, before defaults."""
-    from ..core import config as core_config
+    from ..core.model import config as core_config
     ws = _resolve_ws(ctx, name)
     if declared:
         cfg = core_config.declared_config(ws)
@@ -1057,9 +1058,9 @@ def _parse_secret_args(
 
 
 def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
-    from ..core import bindings as core_bindings
-    from ..core.bindings import Binding
-    from ..core.injectors import find_injector
+    from ..core.model import bindings as core_bindings
+    from ..core.model.bindings import Binding
+    from ..core.model.injectors import find_injector
     from ..core.providers import find_provider
 
     if a.injector is None:
@@ -1124,7 +1125,7 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         core_bindings.validate(existing + [binding], str(ws.config_path))
         core_bindings.append_binding(ws, binding)
 
-    from ..core import config as core_config
+    from ..core.model import config as core_config
     render.OUT.binding_added(bname, ws.name, {
         "name": bname,
         "injector": binding.injector,
@@ -1142,7 +1143,7 @@ def _newly_intercepted(existing_hosts, new_hosts) -> list[str]:
     existing glob). Adding a rule to a previously-passthrough host intercepts it
     (the UNION intercept set), so `preset add` announces this rather than letting
     the operator discover a fresh CA-cert error."""
-    from ..core import hostmatch
+    from ..core.model import hostmatch
     existing_lowered = {h.lower() for h in existing_hosts}
     globs = [hostmatch.compile_pattern(h.lower())
              for h in existing_hosts if hostmatch.is_pattern(h)]
@@ -1178,11 +1179,11 @@ def _expand_preset_into_text(text: str, exp, preset_name: str, source: str,
     `context` (`"add"` | `"create"`) only flavors the duplicate-pack remedy: at
     `preset add` the fix is to remove the stamped blocks; at `create` (template
     `[[preset]]`) it's to remove the duplicate template entry."""
-    from ..core import bindings as core_bindings
-    from ..core import config as core_config
-    from ..core import preset_stamp
-    from ..core import rules as core_rules
-    from ..core.presets import mount_table
+    from ..core.model import bindings as core_bindings
+    from ..core.model import config as core_config
+    from ..core.model import preset_stamp
+    from ..core.model import rules as core_rules
+    from ..core.model.presets import mount_table
 
     dup_remedy = (
         "remove the duplicate `[[preset]]` entry from the template"
@@ -1335,7 +1336,7 @@ def _resolve_preset_option_values(ctx: Ctx, spec, explicit: dict) -> dict:
         if not explicit:
             return {}
     from ..core.errors import PresetOptionsError
-    from ..core.presets import option_summary, resolve_options
+    from ..core.model.presets import option_summary, resolve_options
     from . import prompt as prompt_mod
 
     ask = prompt_mod.ask_option if prompt_mod.prompting_enabled(ctx) else None
@@ -1352,7 +1353,7 @@ def _resolve_preset_credential_interactive(
     a validate-at-prompt loop). Strict / loose-no-TTY don't prompt -- `on_missing`
     (a callable taking the `missing` list) fires instead, rendering the caller's
     own structured/human error. Returns `(provider, secret)`."""
-    from ..core.presets import resolve_preset_credential
+    from ..core.model.presets import resolve_preset_credential
     from . import prompt as prompt_mod
 
     provider, secret, missing = resolve_preset_credential(
@@ -1378,7 +1379,7 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     """Apply a preset as a service setup pack: stamp its `[[binding]]` set AND its
     `[[rule]]` guardrails into the workspace, all-or-nothing. A pure-rule preset
     needs no provider/secret."""
-    from ..core.presets import build_preset, get_preset
+    from ..core.model.presets import build_preset, get_preset
     from ..core.providers import find_provider
 
     spec = get_preset(a.preset)               # CredproxyError -> clean fail on unknown
@@ -1417,7 +1418,7 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     _require_exists(ws)
 
     from ..core.paths import atomic_write_text
-    from ..core.presets import apply_option_values
+    from ..core.model.presets import apply_option_values
 
     exp = build_preset(a.preset, provider, secret, options=option_values)
     # Requires (#58) aren't stamped, so their option markers are substituted here
@@ -1446,7 +1447,7 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     # (durable config), so a failing check reports + hints but never fails the
     # add. `do_fetch=True` (a `fetch=true` provider check is an interactive user
     # action, like `binding test`). Report ALL, not fail-first.
-    from ..core import prereqs
+    from ..core.model import prereqs
     requires = [prereqs.summary(r) for r in prereqs.evaluate(
         literal_spec.requires, provider=provider, secret=secret, do_fetch=True)]
     render.OUT.preset_applied(
@@ -1463,10 +1464,10 @@ def do_preset_refresh(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None
     workspace TOML: per-block update-cleanly / skip-hand-edited (with a diff) /
     add / prune (only under --prune). No PRESET -> every applied pack; explicit
     PRESET -> just that pack (error if unknown or not applied)."""
-    from ..core import config as core_config
-    from ..core import preset_refresh, preset_stamp
+    from ..core.model import config as core_config
+    from ..core.model import preset_refresh, preset_stamp
     from ..core.paths import atomic_write_text
-    from ..core.presets import load_presets
+    from ..core.model.presets import load_presets
 
     implicit = name is None
     ws = _resolve_ws(ctx, name)
@@ -1570,7 +1571,7 @@ def _has_stamped_container_half(text: str, preset_name: str) -> bool:
     """True iff `text` carries a stamped mounts/env/setup element for
     `preset_name` (so refresh would touch the container half even if the current
     definition no longer declares one -- e.g. a prune)."""
-    from ..core import preset_refresh
+    from ..core.model import preset_refresh
     return any(s.kind in ("env", "mount", "setup")
                for s in preset_refresh._locate(text, preset_name))
 
@@ -1578,8 +1579,8 @@ def _has_stamped_container_half(text: str, preset_name: str) -> bool:
 def _newly_intercepted_between(old_text: str, new_text: str) -> list[str]:
     """Hosts newly TLS-intercepted by a refresh: bindings/rules hosts present in
     `new_text` but not already covered by `old_text`'s host set."""
-    from ..core import bindings as core_bindings
-    from ..core import rules as core_rules
+    from ..core.model import bindings as core_bindings
+    from ..core.model import rules as core_rules
 
     def _hosts(text: str) -> list[str]:
         raw = tomllib.loads(text)
@@ -1592,7 +1593,7 @@ def _newly_intercepted_between(old_text: str, new_text: str) -> list[str]:
 
 
 def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
-    from ..core import bindings as core_bindings
+    from ..core.model import bindings as core_bindings
 
     implicit = name is None
     ws = _resolve_ws(ctx, name)
@@ -1604,7 +1605,7 @@ def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None
 
 
 def do_binding_list(ctx: Ctx, name: str | None) -> None:
-    from ..core import bindings as core_bindings
+    from ..core.model import bindings as core_bindings
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
@@ -1628,7 +1629,7 @@ def do_binding_list(ctx: Ctx, name: str | None) -> None:
 
 
 def do_binding_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
-    from ..core import bindings as core_bindings
+    from ..core.model import bindings as core_bindings
 
     # Ad-hoc mode: `binding test --provider P --secret REF [--injector I]`
     # exercises a definition before it is bound -- no workspace involved.
@@ -1670,8 +1671,8 @@ def do_binding_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 def _do_binding_test_adhoc(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     """Standalone test of a definition before it is bound: resolve the
     injector/provider, exec the provider, report ok/length. No workspace."""
-    from ..core import bindings as core_bindings
-    from ..core.injectors import find_injector
+    from ..core.model import bindings as core_bindings
+    from ..core.model.injectors import find_injector
     from ..core.providers import find_provider
 
     if a.binding_name is not None:
@@ -1744,7 +1745,7 @@ def _rule_row(rule) -> dict:
 def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     from dataclasses import replace as _replace
 
-    from ..core import rules as core_rules
+    from ..core.model import rules as core_rules
 
     action = a.rule_action                   # the subcommand: block/respond/rewrite/script
     if not a.host:
@@ -1801,13 +1802,13 @@ def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         core_rules.validate(existing + [rule], str(ws.config_path))
         core_rules.append_rule(ws, rule)
 
-    from ..core import config as core_config
+    from ..core.model import config as core_config
     render.OUT.rule_added(rule.name, ws.name, _rule_row(rule),
                           attached=core_config.quick_attach(ws))
 
 
 def do_rule_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
-    from ..core import rules as core_rules
+    from ..core.model import rules as core_rules
 
     implicit = name is None
     ws = _resolve_ws(ctx, name)
@@ -1819,7 +1820,7 @@ def do_rule_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
 
 def do_rule_list(ctx: Ctx, name: str | None) -> None:
-    from ..core import rules as core_rules
+    from ..core.model import rules as core_rules
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
@@ -1833,7 +1834,7 @@ def do_rule_list(ctx: Ctx, name: str | None) -> None:
 def do_rule_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     from urllib.parse import urlsplit
 
-    from ..core import rules as core_rules
+    from ..core.model import rules as core_rules
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
@@ -1869,8 +1870,8 @@ def _do_rule_test_live(ctx: Ctx, ws: Workspace, a: argparse.Namespace) -> None:
     which may lag the edited TOML until `apply`/`start`/`push`. Routes through the
     same target resolution as `push`, so it works for an attached workspace too
     (its externally-run proxy, via the `attach` selector)."""
-    from ..core import push as core_push
-    from ..core.workspace import read_token
+    from ..core.engine import push as core_push
+    from ..core.model.workspace import read_token
 
     admin_url = lifecycle.resolve_admin_url(ws, notify=say)
     result = core_push.rule_test(admin_url, read_token(ws), a.method, a.url)
@@ -1917,7 +1918,7 @@ def do_mount_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
 
 def do_scaffold(ctx: Ctx, kind: str, name: str, lang: str = "python") -> None:
-    from ..core.scaffold import scaffold
+    from ..core.model.scaffold import scaffold
 
     result = scaffold(kind, name, lang)
     render.OUT.scaffolded(result.kind, result.name, str(result.path))
@@ -1928,7 +1929,7 @@ def do_scaffold(ctx: Ctx, kind: str, name: str, lang: str = "python") -> None:
 
 def do_def_list(ctx: Ctx, kind: str) -> None:
     if kind == "injector":
-        from ..core.injectors import list_injectors
+        from ..core.model.injectors import list_injectors
         rows = [
             {
                 "name": d.name,
@@ -1950,7 +1951,7 @@ def do_def_list(ctx: Ctx, kind: str) -> None:
 
 
 def do_preset_list(ctx: Ctx) -> None:
-    from ..core.presets import describe_presets
+    from ..core.model.presets import describe_presets
 
     render.OUT.preset_list(describe_presets())
 
@@ -2010,7 +2011,7 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
     """
     import importlib.util
     import subprocess
-    from ..core.imageenv import ImageEnv
+    from ..core.engine.imageenv import ImageEnv
     from ..core.paths import TESTS_DIR, REPO_ROOT, overlay_dirs
 
     run_cli = not proxy_only
@@ -2964,7 +2965,7 @@ def _attach_selector_from_flag(spec: str) -> dict:
     `admin-url=U` | `discover=k=v[,k=v]`) into a normalized-shape `{key: value}`
     selector, validated by the same config-side attach validator (loopback for
     admin-url, discover syntax) so `create --attach` and `load_config` agree."""
-    from ..core import config as core_config
+    from ..core.model import config as core_config
 
     key, sep, val = spec.partition("=")
     if not sep or not key or not val:
@@ -3151,7 +3152,7 @@ def _dispatch_meta(ctx: Ctx, head: str, rest: list[str]) -> None:
 def do_doctor(ctx: Ctx, name: str | None, fetch: bool) -> None:
     """Environment preflight + config validation. Reports ALL failures; exits
     non-zero iff any check fails. NAME limits to one workspace (default: all)."""
-    from ..core import doctor
+    from ..core.engine import doctor
     # A bare read-only scan-all is fine (matches `list`), but `--fetch` resolves
     # secrets -- which can prompt / unlock a vault -- so refuse to fan that out
     # across every workspace from one nameless command; require an explicit NAME.
@@ -3272,7 +3273,7 @@ def _parse_scaffold_args(kind: str, args: list[str]) -> tuple[str, bool, str, st
 
 
 def do_scaffold_script(ctx: Ctx, name: str, family: str) -> None:
-    from ..core.scaffold import scaffold_script
+    from ..core.model.scaffold import scaffold_script
 
     r = scaffold_script(name, family)
     render.OUT.scaffolded_script(
@@ -3280,14 +3281,14 @@ def do_scaffold_script(ctx: Ctx, name: str, family: str) -> None:
 
 
 def do_injector_api(ctx: Ctx) -> None:
-    from ..core.scaffold import script_api_reference
+    from ..core.model.scaffold import script_api_reference
 
     render.OUT.injector_api(script_api_reference())
 
 
 def do_injector_check(ctx: Ctx, name: str, do_compile: bool) -> None:
-    from ..core.injectors import find_injector
-    from ..core.scripts import find_script
+    from ..core.model.injectors import find_injector
+    from ..core.model.scripts import find_script
 
     inj = find_injector(name)  # parses + validates the manifest (raises if bad)
     if inj.scheme != "script":
@@ -3392,8 +3393,8 @@ def do_push_stateless(ctx: Ctx, rest: list[str]) -> None:
     """Push a `[[binding]]+[[rule]]` config FILE to an arbitrary loopback proxy
     admin URL, authed with a token FILE -- no workspace, no state. The CI/scripting
     escape hatch."""
-    from ..core import push as core_push
-    from ..core.rules import combined_fingerprint
+    from ..core.engine import push as core_push
+    from ..core.model.rules import combined_fingerprint
 
     p = _LeafParser(prog="credproxy push", add_help=False)
     p.add_argument("--admin", dest="admin", required=True, metavar="URL")
@@ -3403,8 +3404,9 @@ def do_push_stateless(ctx: Ctx, rest: list[str]) -> None:
     p.add_argument("--timeout", type=float, default=120.0, metavar="SECS")
     a = p.parse_args(rest)
 
-    admin_url = core_push.normalize_admin_url(a.admin)
-    core_push.require_loopback(admin_url)                     # I8
+    from ..core.model.attach import normalize_admin_url, require_loopback
+    admin_url = normalize_admin_url(a.admin)
+    require_loopback(admin_url)                               # I8
     bindings, rules = core_push.load_stateless_config(a.config_file)
     token = _read_token_file(a.token_file)
     if a.wait:
@@ -3471,8 +3473,8 @@ def do_emit_compose(ctx: Ctx, name: str | None, image: str | None) -> None:
     token path (the workspace must exist); without NAME, emit a
     ${CREDPROXY_STATE:?...}/auth.token reference plus a comment on where that dir
     lives. Every port/path is read from the image's ENV contract via ImageEnv."""
-    from ..core import compose as core_compose
-    from ..core.imageenv import ImageEnv
+    from ..core.engine import compose as core_compose
+    from ..core.engine.imageenv import ImageEnv
     from ..core.paths import IMAGE_TAG
 
     image_tag = image or IMAGE_TAG
@@ -3496,7 +3498,7 @@ def do_emit_compose(ctx: Ctx, name: str | None, image: str | None) -> None:
 def do_script_check(ctx: Ctx, name: str | None, force_container: bool) -> None:
     """Compile the named script (or every resolvable script) in the proxy runtime
     and report per-script results. Exit 0 iff all pass."""
-    from ..core import scriptcheck
+    from ..core.engine import scriptcheck
 
     results = scriptcheck.run(name, force_container=force_container)
     if not results:
