@@ -850,15 +850,19 @@ async def test_no_store_header_present(aiohttp_client, app):
     assert resp.headers.get("Cache-Control") == "no-store"
 
 
-# ---- GET /admin/config: loaded + fingerprint (for the enter fast path) ----
+# ---- GET /admin/config: superset (fast-path loaded/fingerprint + live config) ----
 
 
 async def test_get_config_unloaded(aiohttp_client, app):
+    """Empty config: generation 0, empty bindings/rules, loaded false -- still 200."""
     client = await aiohttp_client(app)
     resp = await client.get(
         "/admin/config", headers={"Authorization": "Bearer established"})
     assert resp.status == 200
-    assert await resp.json() == {"loaded": False, "fingerprint": None}
+    assert await resp.json() == {
+        "loaded": False, "fingerprint": None,
+        "generation": 0, "bindings": [], "rules": [],
+    }
 
 
 async def test_get_config_requires_auth(aiohttp_client, app):
@@ -868,6 +872,8 @@ async def test_get_config_requires_auth(aiohttp_client, app):
 
 
 async def test_get_config_reports_fingerprint(aiohttp_client, app):
+    """The fast-path fields (loaded/fingerprint) survive the superset extension,
+    so `_should_push` keeps working unchanged."""
     client = await aiohttp_client(app)
     body = dict(VALID_CONFIG, fingerprint="abc123")
     r = await client.post(
@@ -877,7 +883,120 @@ async def test_get_config_reports_fingerprint(aiohttp_client, app):
     resp = await client.get(
         "/admin/config", headers={"Authorization": "Bearer established"})
     assert resp.status == 200
-    assert await resp.json() == {"loaded": True, "fingerprint": "abc123"}
+    got = await resp.json()
+    assert got["loaded"] is True
+    assert got["fingerprint"] == "abc123"
+    assert got["generation"] == 1
+    assert got["bindings"] == [{
+        "name": "github-env", "hosts": ["api.github.com"], "scheme": "bearer",
+        "placeholder": "credproxy_test", "env": "GITHUB_TOKEN",
+    }]
+    assert got["rules"] == []
+
+
+async def test_get_config_reports_generation(aiohttp_client, app):
+    """`generation` tracks the live counter -- the reality signal #66 keys on."""
+    client = await aiohttp_client(app)
+    for expected in (1, 2):
+        await client.post(
+            "/admin/config",
+            headers={"Authorization": "Bearer established"}, json=VALID_CONFIG)
+        got = await (await client.get(
+            "/admin/config",
+            headers={"Authorization": "Bearer established"})).json()
+        assert got["generation"] == expected
+
+
+async def test_get_config_sanitized_no_secret_or_param_or_header_leak(
+        aiohttp_client, app):
+    """SANITIZATION INVARIANT: the host-facing GET body NEVER carries a secret
+    value, a `params` value, or a rule header/body value -- it is deliberately
+    tighter than /setup. Push a config seeded with sentinels in every sensitive
+    slot, GET it, and assert none appear ANYWHERE in the response."""
+    cfg = {
+        "bindings": [{
+            "name": "gh", "hosts": ["api.github.com"], "scheme": "bearer",
+            # A param whose VALUE carries a sentinel: params are excluded entirely.
+            "params": {"header": "X-Custom-SENTINELPARAM"},
+            "placeholder": "ph_visible",
+            "secret": {"value": "SENTINELSECRET"},
+            "env": "GH_TOKEN",
+        }, {
+            # A SIGN-family binding whose params are load-bearing (sigv4): the two
+            # secret slots AND the params must all stay out of the projection.
+            "name": "aws", "hosts": ["*.amazonaws.com"], "scheme": "sigv4",
+            "secret": {"access_key_id": "SENTINELAKID",
+                       "secret_access_key": "SENTINELSAK"},
+            "params": {"region": "SENTINELREGION", "service": "SENTINELSERVICE"},
+        }],
+        "rules": [{
+            "name": "stub", "hosts": ["api.github.com"], "action": "respond",
+            "status": 200, "body": "SENTINELBODY",
+            "headers": {"X-Leak": "SENTINELHEADER"},
+        }, {
+            # A rewrite rule: its set/resp-set header VALUES must not leak.
+            "name": "rw", "hosts": ["api.github.com"], "action": "rewrite",
+            "set_headers": {"X-Add": "SENTINELSETHEADER"},
+            "resp_set_headers": {"X-Resp": "SENTINELRESPHEADER"},
+        }, {
+            # A script rule with [rule.params]: the script SOURCE and its params
+            # (operator config, not secrets) are both excluded from the projection.
+            "name": "guard", "hosts": ["api.github.com"], "action": "script",
+            "script": "guard",
+            "script_source": "def on_request():\n    pass  # SENTINELSCRIPTSRC\n",
+            "params": {"cfg": "SENTINELRULEPARAM"},
+        }],
+    }
+    client = await aiohttp_client(app)
+    r = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"}, json=cfg)
+    assert r.status == 200
+    resp = await client.get(
+        "/admin/config", headers={"Authorization": "Bearer established"})
+    assert resp.status == 200
+    text = await resp.text()
+    for sentinel in ("SENTINELSECRET", "SENTINELPARAM", "SENTINELBODY",
+                     "SENTINELHEADER", "SENTINELAKID", "SENTINELSAK",
+                     "SENTINELREGION", "SENTINELSERVICE", "SENTINELSETHEADER",
+                     "SENTINELRESPHEADER", "SENTINELSCRIPTSRC", "SENTINELRULEPARAM"):
+        assert sentinel not in text, sentinel
+    body = await resp.json()
+    assert body["generation"] == 1
+    # The projection is EXACTLY the tight field set (no params/secret/header keys)
+    # for every binding and rule, sign-family and script included.
+    for b in body["bindings"]:
+        assert set(b) == {"name", "hosts", "scheme", "placeholder", "env"}
+    for rl in body["rules"]:
+        assert set(rl) == {"name", "hosts", "action", "visible"}
+    assert {
+        "name": "gh", "hosts": ["api.github.com"], "scheme": "bearer",
+        "placeholder": "ph_visible", "env": "GH_TOKEN",
+    } in body["bindings"]
+    assert {
+        "name": "stub", "hosts": ["api.github.com"], "action": "respond",
+        "visible": True,
+    } in body["rules"]
+
+
+async def test_get_config_reports_hidden_rules_to_operator(aiohttp_client, app):
+    """Rule visibility hides from the WORKSPACE (/setup), never the operator: a
+    hidden rule still appears in the bearer-gated host-facing GET, flagged
+    `visible: false`."""
+    cfg = {"bindings": [], "rules": [{
+        "name": "trip", "hosts": ["api.github.com"], "action": "block",
+        "visible": False,
+    }]}
+    client = await aiohttp_client(app)
+    await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"}, json=cfg)
+    body = await (await client.get(
+        "/admin/config", headers={"Authorization": "Bearer established"})).json()
+    assert body["rules"] == [{
+        "name": "trip", "hosts": ["api.github.com"], "action": "block",
+        "visible": False,
+    }]
 
 
 # ---- /admin/rule-test (live dry-run) ----

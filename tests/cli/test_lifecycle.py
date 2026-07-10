@@ -1160,6 +1160,286 @@ def test_apply_not_running_raises(xdg, workspaces_dir, monkeypatch):
         apply_config(ws)
 
 
+# ---- live drift (#66): inspect + apply against the RUNNING proxy -------------
+
+
+_LIVE_WS_TOML = """\
+image = "x"
+
+[[binding]]
+name = "b"
+injector = "bearer"
+provider = "env"
+secret = "TOK"
+hosts = ["api.github.com"]
+placeholder = "PH"
+"""
+
+
+def _live_ws(workspaces_dir, name):
+    """A managed workspace with one bearer binding + a real auth token so
+    read_token succeeds (the live client needs it)."""
+    ws = _write_ws(workspaces_dir, name, _LIVE_WS_TOML)
+    ws.ensure_state_dir()
+    ws.token_path.write_text("tok\n")
+    return ws
+
+
+def _running_env(monkeypatch):
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.docker.container_status",
+        lambda name: "running")
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.docker.resolve_host_port",
+        lambda container, port: 39998)
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.ImageEnv.load",
+        classmethod(lambda cls: type("FakeEnv", (), {
+            "http_port": 39998, "tmpfs": "/run/secrets",
+            "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
+            "mitmproxy_uid": 31337,
+        })()))
+
+
+def _resolved_summary(ws):
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    from credproxy_cli.core.model.wire import summarize_wire
+    r = resolve_workspace(ws)
+    return summarize_wire(r.bindings, r.rules)
+
+
+# The applied.bindings record that MATCHES what _LIVE_WS_TOML resolves to (the
+# bearer binding's effective env is None, so recording env="GITHUB_TOKEN" here
+# would itself be offline drift -- keep it None for a genuinely clean baseline).
+_LIVE_APPLIED_BINDING = {
+    "name": "b", "injector": "bearer", "provider": "env", "secret": "TOK",
+    "hosts": ["api.github.com"], "placeholder": "PH", "env": None}
+
+
+def test_inspect_live_in_sync(xdg, workspaces_dir, monkeypatch):
+    """Generation matches AND the OFFLINE content-complete drift is empty -> the
+    live layer reports in-sync (the projection is not consulted for the verdict)."""
+    from credproxy_cli.core.engine import lifecycle
+    ws = _live_ws(workspaces_dir, "livesync")
+    _write_applied_spec(ws)
+    _write_applied_bindings(ws, [dict(_LIVE_APPLIED_BINDING)])
+    _merge_applied(ws, rules=[], config_generation=3)
+    _running_env(monkeypatch)
+    summary = _resolved_summary(ws)
+    monkeypatch.setattr(lifecycle, "get_config", lambda url, token: {
+        "loaded": True, "fingerprint": "fp", "generation": 3,
+        "bindings": summary["bindings"], "rules": summary["rules"]})
+    data = lifecycle.inspect_workspace(ws)
+    assert data.live is not None
+    assert data.live.verdict == "in-sync" and data.live.in_sync
+
+
+def test_inspect_live_config_drift(xdg, workspaces_dir, monkeypatch):
+    """Generation matches but the OFFLINE content drift is non-empty (a changed
+    secret ref the projection can't see) -> config-drift, even though the live
+    projection is byte-identical to what the TOML resolves to."""
+    from credproxy_cli.core.engine import lifecycle
+    ws = _live_ws(workspaces_dir, "livecfg")
+    _write_applied_spec(ws)
+    # applied secret differs from the TOML's ("TOK") -> offline binding drift ...
+    _write_applied_bindings(ws, [{**_LIVE_APPLIED_BINDING, "secret": "OLD"}])
+    _merge_applied(ws, rules=[], config_generation=3)
+    _running_env(monkeypatch)
+    summary = _resolved_summary(ws)
+    # ... yet the lossy projection matches exactly (secret is not in it).
+    monkeypatch.setattr(lifecycle, "get_config", lambda url, token: {
+        "loaded": True, "fingerprint": "fp", "generation": 3,
+        "bindings": summary["bindings"], "rules": summary["rules"]})
+    data = lifecycle.inspect_workspace(ws)
+    assert data.live.verdict == "config-drift"
+    assert not data.live.in_sync
+
+
+def test_inspect_live_reality_drift(xdg, workspaces_dir, monkeypatch):
+    """Proxy generation != the last recorded push -> reality-drift (it restarted
+    and lost its tmpfs, or a foreign push landed). Takes precedence over content."""
+    from credproxy_cli.core.engine import lifecycle
+    ws = _live_ws(workspaces_dir, "livereal")
+    _write_applied_spec(ws)
+    _write_applied_bindings(ws, [dict(_LIVE_APPLIED_BINDING)])  # offline clean
+    _merge_applied(ws, rules=[], config_generation=3)
+    _running_env(monkeypatch)
+    # Proxy reports generation 0 (tmpfs cleared on restart) with no bindings.
+    monkeypatch.setattr(lifecycle, "get_config", lambda url, token: {
+        "loaded": False, "fingerprint": None, "generation": 0,
+        "bindings": [], "rules": []})
+    data = lifecycle.inspect_workspace(ws)
+    assert data.live.verdict == "reality-drift"
+    assert data.live.generation == 0
+    assert data.live.applied_generation == 3
+
+
+def test_inspect_live_unavailable_when_proxy_unreachable(xdg, workspaces_dir, monkeypatch):
+    """Proxy unreachable / 401 (get_config None) -> no live layer; the offline
+    lock/applied drift stands alone."""
+    from credproxy_cli.core.engine import lifecycle
+    ws = _live_ws(workspaces_dir, "liveoff")
+    _running_env(monkeypatch)
+    monkeypatch.setattr(lifecycle, "get_config", lambda url, token: None)
+    data = lifecycle.inspect_workspace(ws)
+    assert data.live is None
+
+
+def test_apply_repushes_on_reality_drift_and_heals_doctor(xdg, workspaces_dir, monkeypatch):
+    """Pure reality-drift: the offline applied cache is CLEAN (resolved == applied,
+    generation matches nothing else) but the proxy's generation != the recorded
+    push -> apply re-pushes despite an identical projection, re-records the new
+    generation, and a follow-up `doctor` config-sync then PASSES (the heal loop)."""
+    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.engine import doctor, proxy_http
+    from credproxy_cli.core.engine.lifecycle import apply_config
+    from credproxy_cli.core.model.bindings import Binding
+    from credproxy_cli.core.model.lock import load_lock
+    ws = _live_ws(workspaces_dir, "aprd")
+    _write_applied_spec(ws)
+    _write_applied_bindings(ws, [dict(_LIVE_APPLIED_BINDING)])  # offline clean
+    _merge_applied(ws, rules=[], config_generation=3)
+    _running_env(monkeypatch)
+    summary = _resolved_summary(ws)
+    # The proxy's live generation starts diverged (tmpfs reset) with the SAME
+    # lossy projection; a push bumps it to 4 (as a real proxy would).
+    proxy_gen = {"v": 0}
+
+    def fake_get_config(url, token):
+        return {"loaded": True, "fingerprint": "fp", "generation": proxy_gen["v"],
+                "bindings": summary["bindings"], "rules": summary["rules"]}
+    pushed = []
+
+    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+        pushed.append(True)
+        proxy_gen["v"] = 4   # proxy accepted the push, generation bumped
+        return ([Binding(name="b", injector="bearer", provider="env",
+                         secret="TOK", hosts=("api.github.com",),
+                         placeholder="PH", env=None)], [], 4)
+    monkeypatch.setattr(lifecycle, "get_config", fake_get_config)
+    monkeypatch.setattr(proxy_http, "get_config", fake_get_config)
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_config", fake_push)
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.resolve_admin_url",
+        lambda ws, notify=None: "http://127.0.0.1:39998")
+
+    result = apply_config(ws)
+    assert pushed == [True]
+    assert result.applied  # non-empty: a re-push was reported
+    # The new generation was re-recorded ...
+    assert load_lock(ws)["applied"]["config_generation"] == 4
+    # ... so doctor's config-sync check now passes (the heal loop closes).
+    checks = doctor._proxy_config_sync_check(ws)
+    c = next(c for c in checks if c.id == "ws:aprd:proxy:config-sync")
+    assert c.ok
+
+
+def test_apply_pushes_on_changed_secret_ref_projection_identical(xdg, workspaces_dir, monkeypatch):
+    """BLOCKER regression: a changed `secret` ref is INVISIBLE in the lossy live
+    projection (which omits secret/provider/params). The verdict must come from the
+    offline content-complete drift, so apply PUSHES even though the projection is
+    identical and the generation matches (config-drift, not a false in-sync)."""
+    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.engine.lifecycle import apply_config
+    from credproxy_cli.core.model.bindings import Binding
+    ws = _live_ws(workspaces_dir, "apsec")
+    _write_applied_spec(ws)
+    # applied secret differs from the TOML's "TOK" -> offline config-drift ...
+    _write_applied_bindings(ws, [{**_LIVE_APPLIED_BINDING, "secret": "OLD"}])
+    _merge_applied(ws, rules=[], config_generation=5)
+    _running_env(monkeypatch)
+    summary = _resolved_summary(ws)
+    # ... while the projection + generation both look in-sync.
+    monkeypatch.setattr(lifecycle, "get_config", lambda url, token: {
+        "loaded": True, "fingerprint": "fp", "generation": 5,
+        "bindings": summary["bindings"], "rules": summary["rules"]})
+    pushed = []
+
+    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+        pushed.append(True)
+        return ([Binding(name="b", injector="bearer", provider="env",
+                         secret="TOK", hosts=("api.github.com",),
+                         placeholder="PH", env=None)], [], 6)
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_config", fake_push)
+    result = apply_config(ws)
+    assert pushed == [True]
+    assert any("bindings" in a for a in result.applied)
+
+
+_LIVE_RULE_TOML = """\
+image = "x"
+
+[[binding]]
+name = "b"
+injector = "bearer"
+provider = "env"
+secret = "TOK"
+hosts = ["api.github.com"]
+placeholder = "PH"
+
+[[rule]]
+name = "r"
+action = "block"
+hosts = ["api.github.com"]
+path = "/new/*"
+"""
+
+
+def test_apply_pushes_on_changed_block_rule_projection_identical(xdg, workspaces_dir, monkeypatch):
+    """A tightened `block` rule `path` is INVISIBLE in the lossy rule projection
+    (name/hosts/action/visible only). The offline content drift catches it, so
+    apply PUSHES despite an identical projection at a matching generation."""
+    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.engine.lifecycle import apply_config
+    ws = _write_ws(workspaces_dir, "aprule", _LIVE_RULE_TOML)
+    ws.ensure_state_dir()
+    ws.token_path.write_text("tok\n")
+    _write_applied_spec(ws)
+    _write_applied_bindings(ws, [dict(_LIVE_APPLIED_BINDING)])
+    # applied rule differs only by path (the projection can't see it).
+    _merge_applied(ws, rules=[{
+        "name": "r", "hosts": ["api.github.com"], "action": "block",
+        "path": "/old/*"}], config_generation=5)
+    _running_env(monkeypatch)
+    summary = _resolved_summary(ws)
+    monkeypatch.setattr(lifecycle, "get_config", lambda url, token: {
+        "loaded": True, "fingerprint": "fp", "generation": 5,
+        "bindings": summary["bindings"], "rules": summary["rules"]})
+    pushed = []
+
+    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+        pushed.append(True)
+        return (list(bindings or []), list(rules or []), 6)
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_config", fake_push)
+    result = apply_config(ws)
+    assert pushed == [True]
+    assert any("rules" in a for a in result.applied)
+
+
+def test_apply_noops_when_live_in_sync(xdg, workspaces_dir, monkeypatch):
+    """No offline content drift AND the generation matches -> apply no-ops. The
+    live projection agreeing is not enough on its own to force a push, but a stale
+    applied cache is no longer trusted to SUPPRESS one either -- both signals must
+    say in-sync."""
+    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.engine.lifecycle import apply_config
+    ws = _live_ws(workspaces_dir, "apnoop")
+    _write_applied_spec(ws)
+    _write_applied_bindings(ws, [dict(_LIVE_APPLIED_BINDING)])  # offline clean
+    _merge_applied(ws, rules=[], config_generation=7)
+    _running_env(monkeypatch)
+    summary = _resolved_summary(ws)
+    monkeypatch.setattr(lifecycle, "get_config", lambda url, token: {
+        "loaded": True, "fingerprint": "fp", "generation": 7,
+        "bindings": summary["bindings"], "rules": summary["rules"]})
+
+    def fail_push(*a, **k):
+        raise AssertionError("apply must not push when nothing drifted")
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_config", fail_push)
+    result = apply_config(ws)
+    assert result.applied == ()
+
+
 # ---- auto-stop: session counting ---------------------------------------------
 
 

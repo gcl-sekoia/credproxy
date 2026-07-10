@@ -339,6 +339,28 @@ class Renderer:
                 else:
                     print(f"  {item}{bindings_qualifier}")
 
+        # Live drift: what the RUNNING proxy is actually holding vs the resolved
+        # intent. Present only when the proxy answered; absent when offline (the
+        # lock/applied drift above is then labelled offline by the qualifier).
+        live = data.get("live")
+        if live is None:
+            # get_config maps a 401/token failure to None just like an unreachable
+            # proxy, so this covers both -- "unavailable", not strictly "offline".
+            print("live        live unavailable")
+        else:
+            verdict = live.get("verdict")
+            gen = live.get("generation")
+            applied_gen = live.get("applied_generation")
+            if verdict == "in-sync":
+                print("live        in sync")
+            elif verdict == "reality-drift":
+                print(f"live        reality-drift -- proxy holds a config we "
+                      f"didn't push (live generation {gen} vs last-pushed "
+                      f"{applied_gen}); re-push with `apply`")
+            else:  # config-drift
+                print("live        config-drift -- the config changed since the "
+                      "last push; apply/start to push it")
+
     # -- binding add --
     def binding_added(self, name: str, ws: str, b: dict,
                       attached: bool = False) -> None:

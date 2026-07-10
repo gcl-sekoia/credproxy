@@ -40,17 +40,24 @@ def _http_post_json(url: str, body: bytes, token: str) -> tuple[int, dict]:
         raise ProxyError(f"connect error talking to the proxy: {e.reason}")
 
 
-def proxy_status(ws: Workspace, http_port: int) -> dict | None:
-    """GET /admin/config: returns {"loaded": bool, "fingerprint": str|None}, or
-    None if the proxy can't be reached or doesn't answer 200. Callers treat
-    None as 'can't confirm -> push'."""
+def get_config(admin_url: str, token: str, timeout: float = 2.0) -> dict | None:
+    """GET <admin_url>/admin/config: the parsed superset dict, or None if the proxy
+    can't be reached or doesn't answer 200. Callers treat None as 'proxy offline /
+    can't confirm'.
+
+    Transport-only (per #61): it returns the raw dict and imports no binding/rule
+    model -- the projection/comparison lives in the model plane. The body carries
+    `loaded`/`fingerprint` (fast path) plus `generation`/`bindings`/`rules` (the
+    sanitized live config), but this layer stays agnostic to the shape. Works
+    against ANY loopback admin URL (a managed proxy's published port or an attached
+    proxy's resolved URL), so the live drift compare rides the exact URL push does."""
     req = urllib.request.Request(
-        f"http://127.0.0.1:{http_port}/admin/config",
-        headers={"Authorization": f"Bearer {read_token(ws)}"},
+        f"{admin_url}/admin/config",
+        headers={"Authorization": f"Bearer {token}"},
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=2) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status == 200:
                 payload = json.loads(resp.read().decode())
                 return payload if isinstance(payload, dict) else None
@@ -58,6 +65,14 @@ def proxy_status(ws: Workspace, http_port: int) -> dict | None:
             TimeoutError, OSError):
         return None
     return None
+
+
+def proxy_status(ws: Workspace, http_port: int) -> dict | None:
+    """GET /admin/config on the managed proxy's published port: the superset dict
+    (the fast path reads its `loaded`/`fingerprint` fields), or None if unreachable.
+    A thin wrapper over `get_config` so the fast path and the live drift compare hit
+    the same transport."""
+    return get_config(f"http://127.0.0.1:{http_port}", read_token(ws))
 
 
 def rule_test_live(ws: Workspace, http_port: int, method: str, url: str) -> dict:

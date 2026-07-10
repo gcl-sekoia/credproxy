@@ -892,6 +892,18 @@ def do_inspect(ctx: Ctx, name: str | None) -> None:
                 for c in data.drift.changes
             ],
         },
+        # Live drift against the running proxy (what it is ACTUALLY holding), or
+        # null when the proxy is unreachable (the offline drift stands alone).
+        # verdict + the DISPLAY-only lossy projection (what the proxy is running).
+        # The verdict is decided by the offline content-complete drift, never the
+        # projection (which omits secret/provider/params/rule-details).
+        "live": None if data.live is None else {
+            "verdict": data.live.verdict,
+            "in_sync": data.live.in_sync,
+            "generation": data.live.generation,
+            "applied_generation": data.live.applied_generation,
+            "projection": data.live.projection,
+        },
         # Context for drift label: stopped workspace means bindings in
         # the lock's `applied.bindings` were "last applied" not "live".
         "_running": data.running,

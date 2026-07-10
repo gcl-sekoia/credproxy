@@ -106,6 +106,130 @@ def test_rule_wire_config_round_trips_through_proxy(xdg):
     assert {r.name for r in creds.rule_set().all()} == {"blk", "stub", "rw"}
 
 
+def test_summarize_wire_matches_proxy_get_projection(xdg):
+    """#66 field contract: the CLI's summarize_wire projection of a config must
+    EQUAL the proxy's GET /admin/config projection (config.sanitized_live_config)
+    of that same pushed config. Both deploy units derive the {name,hosts,scheme,
+    placeholder,env} / {name,hosts,action,visible} shape independently, so this
+    feeds real CLI output through the real proxy loader + projection and asserts
+    byte-parity -- a one-sided field change breaks it."""
+    from credproxy_cli.core.model.injectors import list_injectors
+    from credproxy_cli.core.model.rules import Rule
+    from credproxy_cli.core.model.wire import summarize_wire
+    proxy_config = _proxy_config()
+
+    def fake_fetch(provider, refs):
+        return {r: f"val-{r}" for r in refs}
+
+    # A representative mix: substitute (bearer/basic/body), sign (sigv4), re-seal
+    # (oauth2-reseal) -- everything but script (needs Starlark, image only). Each
+    # binding gets a DISTINCT host so unconditional (sign-family) writers don't
+    # collide on a shared (host, location).
+    from credproxy_cli.core.model.bindings import Binding
+    injectors = {d.name: d for d in list_injectors() if d.scheme != "script"}
+
+    def _binding_on(inj, host):
+        slots = inj.spec.slots
+        secret = "ref" if (len(slots) == 1 and slots[0] == "value") \
+            else {s: f"ref-{s}" for s in slots}
+        placeholder = inj.placeholder.generate() if inj.spec.uses_placeholder else None
+        return Binding(name=f"{inj.name}-b", injector=inj.name, provider="env",
+                       secret=secret, hosts=(host,),
+                       placeholder=placeholder, env=None)
+
+    bindings = [
+        _binding_on(injectors[n], f"api{i}.example.com")
+        for i, n in enumerate(("bearer", "basic", "body", "sigv4", "oauth2-reseal"))
+    ]
+    rules = [
+        Rule(name="blk", hosts=("api.github.com",), action="block",
+             methods=("DELETE",), path="/repos/**"),
+        Rule(name="rw", hosts=("api.example.com",), action="rewrite",
+             set_headers={"X-Env": "sandbox"}),          # default-hidden
+        Rule(name="stub", hosts=("api.openai.com",), action="respond",
+             status=200, body="{}", visible=True),
+    ]
+
+    cli_projection = summarize_wire(bindings, rules)
+    wire = _build_wire(bindings, rules, fake_fetch)
+    creds = proxy_config.load_resolved(wire)
+    proxy_projection = proxy_config.sanitized_live_config(creds)
+
+    assert cli_projection == proxy_projection
+    # Sanity: it isn't vacuously empty, and secret/param keys are absent.
+    assert len(cli_projection["bindings"]) == 5
+    assert len(cli_projection["rules"]) == 3
+    for b in cli_projection["bindings"]:
+        assert set(b) == {"name", "hosts", "scheme", "placeholder", "env"}
+    for r in cli_projection["rules"]:
+        assert set(r) == {"name", "hosts", "action", "visible"}
+
+
+def test_summarize_wire_script_rule_and_env_projection_parity(xdg):
+    """#66 field contract, extended: a SCRIPT-action rule and env-suppressed /
+    env-override bindings must project identically on both sides. The lossy
+    projection carries only the rule `action` (not the script source/params) and a
+    binding's EFFECTIVE env, so a suppressed (`env=false`) binding shows env null
+    and an override shows the override -- CLI summarize_wire must match the proxy's
+    sanitized_live_config for all of them. A builtin rule script needs no Starlark
+    on the CLI side (rule_wire_entries just embeds the registered source), but the
+    proxy round-trip compiles it, so skip if the runtime isn't importable."""
+    pytest.importorskip("starlark")
+    from credproxy_cli.core.model.bindings import Binding
+    from credproxy_cli.core.model.injectors import find_injector
+    from credproxy_cli.core.model.rules import Rule
+    from credproxy_cli.core.model.wire import summarize_wire
+    proxy_config = _proxy_config()
+
+    def fake_fetch(provider, refs):
+        return {r: f"val-{r}" for r in refs}
+
+    bearer = find_injector("bearer")
+    ph1 = bearer.placeholder.generate()
+    ph2 = bearer.placeholder.generate()
+    bindings = [
+        # env = false -> suppressed -> effective env null (not the injector hint).
+        Binding(name="suppressed", injector="bearer", provider="env",
+                secret="ref1", hosts=("api1.example.com",),
+                placeholder=ph1, env=None, env_suppressed=True),
+        # explicit env override -> that literal, not the injector hint.
+        Binding(name="override", injector="bearer", provider="env",
+                secret="ref2", hosts=("api2.example.com",),
+                placeholder=ph2, env="MY_OVERRIDE_TOKEN"),
+    ]
+    # A script rule referencing a builtin rule script (scrub-emails is a response
+    # rule); its source + api ride the wire, but the projection shows only action.
+    rules = [
+        Rule(name="scrub", hosts=("api.example.com",), action="script",
+             script="scrub-emails"),
+    ]
+
+    cli_projection = summarize_wire(bindings, rules)
+    wire = _build_wire(bindings, rules, fake_fetch)
+    creds = proxy_config.load_resolved(wire)
+    proxy_projection = proxy_config.sanitized_live_config(creds)
+
+    assert cli_projection == proxy_projection
+    # The suppressed binding projects env null; the override projects its literal.
+    envs = {b["name"]: b["env"] for b in cli_projection["bindings"]}
+    assert envs == {"suppressed": None, "override": "MY_OVERRIDE_TOKEN"}
+    # The script rule projects action only -- no source/params/api leak.
+    assert cli_projection["rules"] == [
+        {"name": "scrub", "hosts": ["api.example.com"], "action": "script",
+         "visible": False}]
+
+
+def _build_wire(bindings, rules, fake_fetch):
+    """build_wire with an injected fetcher (the CLI's wire_config takes fetch_many;
+    build_wire calls it internally, so resolve here then hand the proxy the
+    literal-value wire the same way the push path does)."""
+    from credproxy_cli.core.model.bindings import wire_config
+    from credproxy_cli.core.model.rules import rule_wire_entries
+    wire = wire_config(bindings, fetch_many=fake_fetch)
+    wire["rules"] = rule_wire_entries(rules)
+    return wire
+
+
 def _proxy_module(name):
     proxy_dir = str(Path(__file__).resolve().parents[2] / "proxy")
     if proxy_dir not in sys.path:

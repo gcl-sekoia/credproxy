@@ -145,6 +145,24 @@ Two properties of that counter are load-bearing and deliberate:
 waits on `/health` and *then* pushes, so a creds-gated `/health` would deadlock
 standalone `start` the same way waiting on `/ready` before pushing would (I1).
 
+**`GET /admin/config` (bearer-gated) reports what the proxy is running.** The same
+route that accepts a `POST` push answers a `GET` with a superset used two ways:
+`{"loaded", "fingerprint"}` (read from the tmpfs config file) power the `enter`
+fast path — the host skips a redundant re-push when the proxy already holds the
+intended config's fingerprint — and `{"generation", "bindings", "rules"}` (built
+from the **loaded** config objects, not a tmpfs re-read) report what the proxy is
+*actually* running, so `inspect`/`apply`/`doctor` can drift the resolved intent
+against reality (see [Drift against reality](../reference/configuration.md#drift-against-reality)).
+The **generation** is the reality discriminator the verdict keys on; the
+binding/rule projection is **sanitized** and used for **display only** —
+deliberately tighter than `/setup`: `{name, hosts, scheme, placeholder, env}` per
+binding and `{name, hosts, action, visible}` per rule, **never** a secret value, a
+`params` value, or a header/body value (so it is lossy — a changed secret ref or
+rule detail is invisible in it, which is why the verdict reads the content-complete
+offline drift, not this projection). Since this route is loopback + bearer-gated and the projection carries no
+secret, an attached workspace's `inspect`/`apply`/`doctor` reads it over the same
+resolved `attach` admin URL that `push` posts to.
+
 ## Commands
 
 All these live on the **strict** surface (the scriptable contract); the loose

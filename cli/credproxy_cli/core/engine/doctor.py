@@ -162,7 +162,46 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
     out += _script_compile_checks(ws)
     out += _rule_checks(ws)
     out += _preset_requires_checks(ws, fetch=fetch, fetched_refs=fetched_refs)
+    out += _proxy_config_sync_check(ws)
     return out
+
+
+def _proxy_config_sync_check(ws: Workspace) -> list[Check]:
+    """When the proxy is running/reachable, compare the generation it reports
+    (GET /admin/config) against the lock's `applied.config_generation` -- the
+    last generation credproxy recorded pushing. A mismatch means the proxy holds
+    a config credproxy didn't push (it restarted and lost its tmpfs, or a stateless
+    push came from elsewhere): a re-push (`apply`) heals it.
+
+    Skip-with-note (ok=True) when the proxy is stopped/unreachable -- doctor stays
+    green offline; a stopped proxy is nothing to reconcile. Rides the same admin
+    URL resolution `push`/`apply` use, so it covers attached workspaces too."""
+    from . import lifecycle
+    from .proxy_http import get_config
+    from ..model.workspace import read_token
+
+    cid = f"ws:{ws.name}:proxy:config-sync"
+    try:
+        admin_url = lifecycle.resolve_admin_url(ws)
+        token = read_token(ws)
+    except CredproxyError:
+        # Proxy not running / unreachable / token missing -> nothing to compare.
+        return [Check(cid, True,
+                      f"[{ws.name}] proxy not reachable -- config-sync check skipped")]
+    live = get_config(admin_url, token)
+    if live is None:
+        return [Check(cid, True,
+                      f"[{ws.name}] proxy did not answer -- config-sync check skipped")]
+    applied_gen = lifecycle._load_applied(ws).get("config_generation")
+    live_gen = live.get("generation")
+    if live_gen == applied_gen:
+        return [_ok(cid,
+                    f"[{ws.name}] proxy config generation matches ({live_gen})")]
+    return [_fail(
+        cid,
+        f"[{ws.name}] proxy config generation {live_gen} != last pushed "
+        f"{applied_gen} -- the proxy holds a config credproxy didn't push",
+        f"credproxy workspace {ws.name} apply")]
 
 
 def _runc_keep_id_check(ws: Workspace, cfg: dict) -> list[Check]:

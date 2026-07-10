@@ -52,7 +52,7 @@ from ..errors import (
 from .imageenv import ImageEnv
 from ..model.workspace import Workspace, ensure_token, hostname_for
 from ..paths import IMAGE_TAG, PROXY_DIR, atomic_write_text
-from .proxy_http import proxy_status, wait_for_ready
+from .proxy_http import get_config, proxy_status, wait_for_ready
 from .push import push_config
 
 Notify = Callable[[str], None]
@@ -1341,6 +1341,53 @@ class WorkspaceInspect:
     # for a managed workspace.
     attach: dict | None = None
     attach_target: str | None = None
+    # Live drift against the RUNNING proxy (what it is actually holding), or None
+    # when the proxy is unreachable (the offline lock/applied report stands alone).
+    live: "LiveDrift | None" = None
+
+
+@dataclass(frozen=True)
+class LiveDrift:
+    """Verdict of the resolved intent against what the proxy is ACTUALLY running,
+    read from GET /admin/config.
+
+    ONE verdict, discriminated by two signals -- NEITHER of which is the lossy
+    live projection:
+
+      - "reality-drift" -- `applied.config_generation` is None, or the proxy's
+                           generation != it. The proxy is NOT holding the push we
+                           recorded (a lost tmpfs, a stateless `push --admin`, or a
+                           foreign push). Takes PRECEDENCE over content.
+      - "config-drift"  -- generation matches AND the OFFLINE, content-complete
+                           drift (`_compute_drift`, which sees secret/provider/
+                           params and every rule detail) is non-empty: the TOML
+                           moved ahead of our push.
+      - "in-sync"       -- generation matches AND no offline content drift.
+
+    Correctness NEVER reads `projection` -- the sanitized GET body's LOSSY
+    {name,hosts,scheme,placeholder,env} / {name,hosts,action,visible} lists. That
+    view omits the secret ref, provider, injector params, and a rule's methods/
+    path/status/body/headers/params, so a change to any of those is INVISIBLE in
+    it (a `secret = "OLD" -> "NEW"` swap, a tightened `block` path). `projection`
+    is carried for DISPLAY only (`inspect` shows what the proxy is running); the
+    verdict comes from the generation + the offline content drift.
+
+    Caveat: the generation discriminator can misclassify the rare case where a
+    foreign push happens to land the SAME generation number the proxy would have
+    reached -- it reads as config-drift (or in-sync) instead of reality-drift.
+    Harmless: `apply` pushes on config-drift too, so a real divergence with any
+    content difference is still corrected.
+
+    `generation`/`applied_generation` carry the raw counters so the renderer can
+    show the "(gen N vs M)" evidence behind a reality-drift verdict."""
+    verdict: str                     # "reality-drift" | "config-drift" | "in-sync"
+    generation: int | None           # live proxy config generation (None if absent)
+    applied_generation: int | None   # lock's applied.config_generation
+    projection: dict | None = None   # DISPLAY-only lossy live view {bindings, rules}
+
+    @property
+    def in_sync(self) -> bool:
+        return self.verdict == "in-sync"
 
 
 def _compute_drift(
@@ -1556,6 +1603,46 @@ def _binding_summary_dict(b) -> dict:
     }
 
 
+def _live_drift(ws: Workspace, admin_url: str, *,
+                has_content_drift: bool) -> "LiveDrift | None":
+    """Verdict of the resolved intent against what the proxy at `admin_url` is
+    actually running (GET /admin/config). Returns None when the proxy is
+    unreachable / doesn't answer 200 (or the token is unreadable) -- the caller
+    treats None as "live unavailable" and the offline drift report stands alone.
+
+    The verdict is generation-then-offline-content (see LiveDrift): the generation
+    from the last recorded push (`applied.config_generation`) is the reality
+    discriminator, and `has_content_drift` (the caller's OFFLINE, content-complete
+    `_compute_drift` signal) is the config discriminator. The lossy live projection
+    the GET body carries is stored for DISPLAY only -- never for the verdict."""
+    from ..model.workspace import read_token
+
+    try:
+        token = read_token(ws)
+    except CredproxyError:
+        return None
+    live = get_config(admin_url, token)
+    if live is None:
+        return None
+
+    applied_gen = _load_applied(ws).get("config_generation")
+    live_gen = live.get("generation")
+
+    if applied_gen is None or live_gen != applied_gen:
+        verdict = "reality-drift"   # proxy is not holding the push we recorded
+    elif has_content_drift:
+        verdict = "config-drift"    # TOML moved ahead of our push
+    else:
+        verdict = "in-sync"
+
+    return LiveDrift(
+        verdict=verdict,
+        generation=live_gen,
+        applied_generation=applied_gen,
+        projection={"bindings": live.get("bindings"), "rules": live.get("rules")},
+    )
+
+
 def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
     """Gather config + running state + a binding summary + drift report for `ws`.
 
@@ -1603,6 +1690,15 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
 
     drift = _compute_drift(ws, cfg, bindings, running, current_rules=current_rules)
 
+    # Live drift: when the proxy is reachable (its port resolved), compare the
+    # resolved intent against what it is actually running -- surfacing a proxy that
+    # lost its tmpfs on restart (which the offline applied cache can't detect).
+    live = None
+    if host_port is not None:
+        content_drift = any(c.kind in ("bindings", "rules") for c in drift.changes)
+        live = _live_drift(ws, f"http://127.0.0.1:{host_port}",
+                           has_content_drift=content_drift)
+
     return WorkspaceInspect(
         name=ws.name,
         config_path=str(ws.config_path),
@@ -1614,6 +1710,7 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
         bindings=bindings,
         rules=tuple(current_rules),
         drift=drift,
+        live=live,
     )
 
 
@@ -1643,11 +1740,17 @@ def _inspect_attached(ws: Workspace, cfg: dict) -> WorkspaceInspect:
     # against applied.bindings/.rules regardless (added/removed/changed).
     drift = _compute_drift(ws, cfg, bindings, running=False,
                            current_rules=current_rules)
+    # Live drift rides the SAME resolved attach admin URL push uses (loopback
+    # enforced there), so an attached workspace gets reality-drift detection too.
+    live = None
+    if attach_target is not None:
+        content_drift = any(c.kind in ("bindings", "rules") for c in drift.changes)
+        live = _live_drift(ws, attach_target, has_content_drift=content_drift)
     return WorkspaceInspect(
         name=ws.name, config_path=str(ws.config_path), config=cfg,
         proxy_status=None, ws_status=None, running=False, host_port=None,
         bindings=bindings, rules=tuple(current_rules), drift=drift,
-        attach=attach, attach_target=attach_target,
+        attach=attach, attach_target=attach_target, live=live,
     )
 
 
@@ -1743,11 +1846,28 @@ def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
         )
 
     # Bindings and/or rules drift -> ONE push (they ride the same wire config).
+    # These come from the OFFLINE, content-complete `_compute_drift`, so they see
+    # a changed secret ref / provider / injector params / rule detail that the
+    # lossy live projection cannot -- they are the AUTHORITATIVE config signal.
     binding_changes = [c for c in drift.changes if c.kind == "bindings"]
     rule_changes = [c for c in drift.changes if c.kind == "rules"]
-    if binding_changes or rule_changes:
+    content_drift = bool(binding_changes) or bool(rule_changes)
+
+    # The live view can only ADD a push reason the offline signal can't see:
+    # reality-drift -- the proxy lost its tmpfs (or a foreign push landed), so it
+    # is not holding the generation we recorded even though the TOML == our applied
+    # cache. It must NEVER veto the offline `content_drift` (the lossy projection
+    # can look identical while a secret/param/rule-detail change is real). When the
+    # proxy is unreachable (`live is None`) only the offline signal drives the push.
+    live = _live_drift(ws, f"http://127.0.0.1:{host_port}",
+                       has_content_drift=content_drift)
+    reality_drift = live is not None and live.verdict == "reality-drift"
+
+    if content_drift or reality_drift:
         # Pass the already-resolved bindings/rules so push_config uses the same
         # (now-persisted) placeholder identity instead of re-resolving/re-minting.
+        # On a reality-drift-only push this re-records applied.config_generation,
+        # closing doctor's config-sync loop.
         pushed_bindings, pushed_rules, generation = push_config(
             ws, host_port, notify,
             bindings=resolved.bindings, rules=resolved.rules)
@@ -1758,6 +1878,11 @@ def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
         if rule_changes:
             applied_labels.append(
                 f"rules ({', '.join(c.item for c in rule_changes)})")
+        if reality_drift and not content_drift:
+            applied_labels.append(
+                f"config re-pushed (proxy held a config we didn't push: "
+                f"live generation {live.generation}, "
+                f"last-pushed {live.applied_generation})")
 
     return ApplyResult(
         applied=tuple(applied_labels),

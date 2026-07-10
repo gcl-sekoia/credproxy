@@ -112,6 +112,77 @@ def test_doctor_check_ids_are_unique_and_index_qualified(xdg, workspaces_dir):
                                           "ws:dup:binding[0]:host[1]"}
 
 
+def _config_sync_check(name, checks):
+    return next((c for c in checks if c.id == f"ws:{name}:proxy:config-sync"), None)
+
+
+def _good_ws_with_token(workspaces_dir, name):
+    from credproxy_cli.core.model.workspace import Workspace
+    _write(workspaces_dir, name, """
+        image = "x"
+        [[binding]]
+        name = "b"
+        injector = "bearer"
+        provider = "env"
+        secret = "TOK"
+        hosts = ["api.github.com"]
+        placeholder = "PH"
+    """)
+    ws = Workspace(name)
+    ws.ensure_state_dir()
+    ws.token_path.write_text("tok\n")
+    return ws
+
+
+def test_doctor_config_sync_ok_on_generation_match(xdg, workspaces_dir, monkeypatch):
+    """When the proxy is reachable and its generation matches the last recorded
+    push, the config-sync check passes."""
+    from credproxy_cli.core.engine import doctor
+    from credproxy_cli.core.engine import proxy_http
+    from credproxy_cli.core.model.lock import update as lock_update
+    ws = _good_ws_with_token(workspaces_dir, "syncok")
+    lock_update(ws, "applied", {"config_generation": 5})
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.resolve_admin_url",
+        lambda ws, notify=None: "http://127.0.0.1:39998")
+    monkeypatch.setattr(proxy_http, "get_config",
+                        lambda url, token: {"generation": 5, "bindings": [], "rules": []})
+    c = _config_sync_check("syncok", doctor.run("syncok"))
+    assert c is not None and c.ok
+
+
+def test_doctor_config_sync_fails_on_generation_mismatch(xdg, workspaces_dir, monkeypatch):
+    """A generation mismatch (proxy holds a config credproxy didn't push) fails the
+    check and hints at `apply`."""
+    from credproxy_cli.core.engine import doctor
+    from credproxy_cli.core.engine import proxy_http
+    from credproxy_cli.core.model.lock import update as lock_update
+    ws = _good_ws_with_token(workspaces_dir, "syncbad")
+    lock_update(ws, "applied", {"config_generation": 5})
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.resolve_admin_url",
+        lambda ws, notify=None: "http://127.0.0.1:39998")
+    monkeypatch.setattr(proxy_http, "get_config",
+                        lambda url, token: {"generation": 0, "bindings": [], "rules": []})
+    c = _config_sync_check("syncbad", doctor.run("syncbad"))
+    assert c is not None and not c.ok
+    assert "apply" in (c.hint or "")
+
+
+def test_doctor_config_sync_skips_when_proxy_stopped(xdg, workspaces_dir, monkeypatch):
+    """Proxy not reachable -> skip-with-note (ok=True), so a stopped-proxy doctor
+    stays green."""
+    from credproxy_cli.core.engine import doctor
+    from credproxy_cli.core.errors import WorkspaceError
+    _good_ws_with_token(workspaces_dir, "syncstop")
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.resolve_admin_url",
+        lambda ws, notify=None: (_ for _ in ()).throw(WorkspaceError("not running")))
+    c = _config_sync_check("syncstop", doctor.run("syncstop"))
+    assert c is not None and c.ok
+    assert "skipped" in c.message
+
+
 def test_doctor_invalid_name_rejected(xdg):
     """An explicit NAME goes through the same validation as every other command,
     so a traversal/reserved name is refused rather than reading outside the

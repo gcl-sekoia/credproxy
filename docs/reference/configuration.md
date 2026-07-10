@@ -489,7 +489,7 @@ file. You can always skip the command and edit the TOML directly.
 | `credproxy workspace binding test --provider P --secret REF [--injector I]` | Ad-hoc variant: test a provider/injector combination **before** binding it. No workspace is required. |
 | `credproxy workspace NAME edit` | Open `<name>.toml` in `$VISUAL`/`$EDITOR` (default `vi`), then validate it: warns if the edit left it invalid (without reverting), otherwise hints `apply`/`start`. Pure sugar over opening the file yourself. |
 | `credproxy workspace NAME config [--declared]` | Read-only: dump the container-side config. Default `effective` — every field with its in-effect value, all defaults filled (including the enter-time `workdir`→home and `enter_prelude`→shim defaults `inspect` leaves null), so you can see what actually applies even when it's not in the file. `--declared` shows only what's literally in the TOML. `--json` on both. |
-| `credproxy workspace NAME inspect` | Read-only: print the parsed config, container state, resolved host port, binding summary, and **itemized drift** between the file and what is currently applied. |
+| `credproxy workspace NAME inspect` | Read-only: print the parsed config, container state, resolved host port, binding summary, **itemized drift** between the file and what was last applied, and — when the proxy is reachable — a **live drift** layer comparing the resolved config against what the proxy is *actually* running (see below). |
 | `credproxy workspace NAME apply` | Reconcile a running workspace to the edited file (see below). |
 
 These read-only views are projections of the file, with no state of their own:
@@ -530,3 +530,40 @@ credproxy workspace myproj inspect   # what differs?
 credproxy workspace myproj apply     # push binding changes live
 credproxy workspace myproj start     # recreate for image/mounts/env/setup changes
 ```
+
+### Drift against reality
+
+The drift above compares the file against a **local record** of the last push
+(the lockfile's `applied` section). That record can go stale: the proxy keeps its
+config on tmpfs, so a `stop`/`start` clears it while the record still says a
+config was pushed. To catch this, `inspect`/`apply`/`doctor` also ask the running
+proxy what it is *actually* holding — a small, bearer-gated, **sanitized**
+`GET /admin/config` that reports the live config **generation** plus a tight
+binding/rule summary (never a secret value, a `params` value, or a header/body
+value).
+
+`inspect`'s **live** layer renders one verdict, decided by the config
+**generation** and the offline itemized drift above — **never** by the sanitized
+summary, which is *display only*. That summary is deliberately lossy (it omits the
+secret ref, provider, injector `params`, and a rule's methods/path/status/body/
+headers), so a change to any of those would be invisible in it; the verdict
+therefore reads the content-complete offline drift instead:
+
+- **in-sync** — the generation matches the last recorded push *and* the offline
+  drift is empty.
+- **config-drift** — the generation matches, but the file has moved ahead of the
+  proxy (the offline drift is non-empty); `apply`/`start` pushes the change.
+- **reality-drift** — the proxy's generation is *not* the one credproxy last
+  recorded pushing (it lost its tmpfs on restart, or a stateless `push` landed
+  from elsewhere), so the proxy is holding a config we didn't push. Takes
+  precedence over content; `apply` re-pushes to heal it.
+
+When the proxy is unreachable (or the token fails) the live layer is reported as
+**live unavailable** and the lockfile-based drift stands alone. `apply` pushes
+whenever the offline binding/rule drift is non-empty **or** the live layer reports
+reality-drift — the live signal can only *add* a re-push reason (the tmpfs-loss
+case the offline record can't see); it never suppresses a content change the lossy
+summary happens to render identical. A reality-drift re-push re-records the
+generation, which closes `doctor NAME`'s `ws:<name>:proxy:config-sync` check (the
+live generation vs. the last recorded push), skipped when the proxy is stopped.
+Attached workspaces get the same live layer over their resolved `attach` admin URL.
