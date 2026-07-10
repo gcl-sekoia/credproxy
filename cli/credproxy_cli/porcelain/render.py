@@ -267,8 +267,12 @@ class Renderer:
         print(f"image       {c['image']}")
         print(f"home        {c['home']}")
         if c["mounts"]:
+            # A bind/overlay mount carries `source`; a volume mount (e.g. the
+            # `home =` sugar) carries `name` instead -- fall back so `inspect`
+            # doesn't KeyError on a workspace with a managed volume.
             mts = ", ".join(
-                f"{m['source']}:{m['target']}" + (":ro" if m["readonly"] else "")
+                f"{m.get('source', m.get('name'))}:{m['target']}"
+                + (":ro" if m["readonly"] else "")
                 for m in c["mounts"]
             )
             print(f"mounts      {mts}")

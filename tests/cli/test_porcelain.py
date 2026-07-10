@@ -986,6 +986,21 @@ hosts    = ["api.example.com"]
     assert not lock_path.exists()                    # inspect persisted nothing
 
 
+def test_inspect_renders_volume_mount_without_keyerror(xdg, workspaces_dir, monkeypatch):
+    """`inspect` on a workspace with a managed-volume mount must not KeyError:
+    a volume mount carries `name` (not `source`), so the mounts render falls back
+    to `name`. Pre-existing crash surfaced during the #68 split; volume/`home`
+    mounts hit it on a common read path."""
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.containers.docker.container_status",
+        lambda name: "missing")
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text('image = "x"\n\n[[mounts]]\nvolume = "data"\ntarget = "/data"\n')
+    ec, out, err = _run(["workspace", "w", "inspect"])
+    assert ec == 0, err
+    assert "data:/data" in out                       # the volume mount rendered
+
+
 def test_binding_remove_drops_lock_placeholder(xdg, workspaces_dir):
     """`binding remove` drops the removed binding's lock placeholder entry, so a
     later same-named add mints a FRESH one (#62 fix 7)."""
