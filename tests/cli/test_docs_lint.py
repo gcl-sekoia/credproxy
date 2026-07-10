@@ -180,10 +180,11 @@ def _resolve_def(kind: str, tail: list[str]) -> tuple[set[str], str | None]:
 
 
 def _resolve_preset(tail: list[str]) -> tuple[set[str], str | None]:
-    # Mirrors _dispatch_preset: `list` (definitional) or `add` (-> leaf tree).
+    # Mirrors _dispatch_preset: `list` (definitional) or add/refresh/remove
+    # (-> leaf tree).
     if not tail or tail[0] == "list":
         return _GLOBALS, None
-    if tail[0] == "add":
+    if tail[0] in ("add", "refresh", "remove"):
         return _walk_leaf(["preset", *tail])
     return None, f"unknown preset command {tail[0]!r}"
 

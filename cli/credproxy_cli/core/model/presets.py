@@ -25,6 +25,7 @@ code. See docs/advanced/overlays.md and builtin/presets/github.toml.
 from __future__ import annotations
 
 import hashlib
+import re
 import tomllib
 from dataclasses import dataclass, field, replace
 
@@ -1342,6 +1343,67 @@ def preset_ref_inputs(ref: PresetRef) -> dict:
     if ref.overrides:
         d["overrides"] = {s: dict(f) for s, f in ref.overrides.items()}
     return d
+
+
+# A `[[preset]]` table header line (a trailing comment is allowed) and the
+# `[preset.options]` / `[preset.override.<suffix>]` child sub-tables that BELONG
+# to it. The child regex MUST fold those children into the block span, or a
+# `preset remove` would orphan them and corrupt the file (the child-table bug
+# class caught in #62/#63). Mirrors `_BINDING_CHILD_RE`/`_RULE_CHILD_RE`.
+#
+# These are the SINGLE source for both the model-side `remove_preset` and the
+# porcelain `_rewrite_template_preset_blocks` (create-time `[[preset]]` rewrite)
+# -- a spelling divergence between the two once let `[preset . options]` (a
+# whitespace-spelled child, valid TOML naming the SAME table) escape one span and
+# corrupt the file. The child regex is whitespace-TOLERANT around the dot so a
+# spaced-dot child folds into its block. (The "child separated by an intervening
+# top-level table" and quoted-key cases stay a shared limitation with
+# `_BINDING_CHILD_RE`/`_RULE_CHILD_RE`.)
+_PRESET_HEADER_RE = re.compile(r"^\s*\[\[\s*preset\s*\]\]\s*(#.*)?$")
+_PRESET_CHILD_RE = re.compile(r"^\s*\[\s*preset\s*\.\s*[^\[\]\n]+\]\s*(#.*)?$")
+
+
+def remove_preset(ws: "Workspace", name: str) -> None:
+    """Remove the named `[[preset]]` reference block -- header AND its
+    `[preset.options]`/`[preset.override.*]` child sub-tables -- from the workspace
+    TOML via a surgical whole-block delete, then drop the lock's `presets[name]`
+    snapshot. Same mechanics/constraints as `remove_binding`: raises if the pack
+    isn't referenced, and refuses the inline-array form (`preset = [ { ... } ]`)
+    with a prescriptive rewrite hint rather than editing the wrong block."""
+    from .bindings import _block_spans, _atomic_write_text
+
+    text = ws.config_path.read_text()
+    raw = tomllib.loads(text)
+    source = str(ws.config_path)
+    refs = parse_preset_refs(raw, source)     # rejects duplicate references
+    matches = [i for i, r in enumerate(refs) if r.name == name]
+    if not matches:
+        raise ConfigError(f"preset '{name}' is not referenced in {ws.config_path}")
+    target = matches[0]
+
+    lines = text.splitlines(keepends=True)
+    spans = _block_spans(text, header_re=_PRESET_HEADER_RE,
+                         child_re=_PRESET_CHILD_RE)
+    # The inline-array form parses to refs but yields ZERO block spans, so the
+    # span<->ref indexing would be wrong (or IndexError). Refuse with a fix.
+    if len(spans) != len(refs):
+        raise ConfigError(
+            f"'{name}' isn't a removable `[[preset]]` block in {ws.config_path} "
+            f"-- rewrite it as a `[[preset]]` table to remove it")
+    start, end = spans[target]
+    # Drop one preceding blank separator so repeated add/remove doesn't accumulate
+    # blank lines.
+    if start > 0 and lines[start - 1].strip() == "":
+        start -= 1
+    del lines[start:end]
+    _atomic_write_text(ws.config_path, "".join(lines))
+
+    # Drop the removed pack's lock snapshot, so no stale expansion lingers.
+    from . import lock as lock_mod
+    lock = lock_mod.load_lock(ws)
+    if name in lock.get("presets", {}):
+        del lock["presets"][name]
+        lock_mod.save_lock(ws, lock)
 
 
 def _suffix_of(preset: str, name: str) -> str:

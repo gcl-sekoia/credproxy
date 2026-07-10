@@ -686,6 +686,90 @@ class Renderer:
                 f"restart to apply: credproxy workspace {ws} start")
         _say_push_hint(ws, attached)
 
+    # -- preset refresh --
+    def preset_refreshed(self, ws: str, presets: list[dict], *,
+                         check: bool = False,
+                         newly_intercepted: list[str] | None = None,
+                         recreate: bool = False,
+                         attached: bool = False,
+                         written: bool = False) -> None:
+        if not presets:
+            print(f"no presets referenced in workspace '{ws}'")
+            return
+        any_changed = False
+        for p in presets:
+            if not p["changed"]:
+                print(f"preset '{p['preset']}': up to date")
+                continue
+            any_changed = True
+            actions: dict[str, int] = {}
+            for e in p["entries"]:
+                actions[e["action"]] = actions.get(e["action"], 0) + 1
+            summary = ", ".join(f"{n} {a}" for a, n in actions.items())
+            print(f"preset '{p['preset']}': {summary}")
+            for e in p["entries"]:
+                print(f"  {e['kind']} {e['name']}  {e['action']}")
+                if e.get("diff"):
+                    for line in e["diff"].splitlines():
+                        print(f"    {line}")
+        if newly_intercepted:
+            say("newly intercepted (TLS-terminated) host(s): "
+                + ", ".join(newly_intercepted)
+                + " -- a workspace that hasn't bootstrapped the CA will see a "
+                  "cert error there until it does")
+        if recreate:
+            say("container-half config changed the workspace spec -- "
+                f"restart to apply: credproxy workspace {ws} start")
+        if check:
+            if any_changed:
+                say("preview (--check): nothing written -- re-run without "
+                    "--check to apply")
+        elif any_changed:
+            say("to keep a hand change across a refresh, express it as `disable` "
+                "or `[preset.override.<suffix>]` in the `[[preset]]` block")
+            _say_push_hint(ws, attached)
+        elif written:
+            # The lock was rewritten even though no expansion changed -- a
+            # definition-rev-only edit (e.g. a comment) that clears the resolver's
+            # drift note. Say so, so "up to date" isn't read as "nothing happened".
+            say("definition rev updated (expansion unchanged)")
+
+    # -- preset remove --
+    def preset_removed(self, ws: str, preset: str, bindings: list[dict],
+                       rules: list[dict], no_longer_intercepted: list[str],
+                       mounts: list[dict], env: list[dict], setup: list[dict],
+                       recreate: bool = False, attached: bool = False) -> None:
+        parts = [f"{len(bindings)} binding(s)", f"{len(rules)} rule(s)"]
+        if mounts:
+            parts.append(f"{len(mounts)} mount(s)")
+        if env:
+            parts.append(f"{len(env)} env var(s)")
+        if setup:
+            parts.append(f"{len(setup)} setup step(s)")
+        print(f"removed preset '{preset}' from workspace '{ws}': "
+              + ", ".join(parts) + " left the effective model")
+        for b in bindings:
+            print(f"  binding {b['name']:<16} {b['injector']:<7} "
+                  f"{', '.join(b['hosts'])}")
+        for r in rules:
+            act = r["action"] + (f":{r['script']}" if r.get("script") else "")
+            print(f"  rule    {r['name']:<16} {act:<7} {', '.join(r['hosts'])}")
+        for m in mounts:
+            print(f"  mount   {m['kind']:<7} {m['source']} -> {m['target']}")
+        for e in env:
+            print(f"  env     {e['key']} = {e['value']}")
+        for s in setup:
+            u = "" if s.get("user", "workspace") == "workspace" else f" ({s['user']})"
+            print(f"  setup   [{s['order']}] {s['run']}{u}")
+        if no_longer_intercepted:
+            say("no longer intercepted (TLS-terminated) host(s): "
+                + ", ".join(no_longer_intercepted))
+        if recreate:
+            say("container-half config changed the workspace spec -- "
+                f"restart to apply: credproxy workspace {ws} start")
+        else:
+            _say_push_hint(ws, attached)
+
 
 class JsonRenderer(Renderer):
     """Emits one JSON object/array per command result on stdout. Progress
@@ -848,6 +932,29 @@ class JsonRenderer(Renderer):
                     "mounts": mounts or [], "env": env or [],
                     "setup": setup or [],
                     "recreate": recreate, "requires": requires or []})
+
+    def preset_refreshed(self, ws: str, presets: list[dict], *,
+                         check: bool = False,
+                         newly_intercepted: list[str] | None = None,
+                         recreate: bool = False,
+                         attached: bool = False,
+                         written: bool = False) -> None:
+        # `written` is the "did the lock file mutate?" signal, DISTINCT from a
+        # per-preset `changed` (expansion changed): a definition-rev-only edit
+        # rewrites the lock while every `changed` stays false.
+        self._emit({"workspace": ws, "check": check, "presets": presets,
+                    "newly_intercepted": newly_intercepted or [],
+                    "recreate": recreate, "written": written})
+
+    def preset_removed(self, ws: str, preset: str, bindings: list[dict],
+                       rules: list[dict], no_longer_intercepted: list[str],
+                       mounts: list[dict], env: list[dict], setup: list[dict],
+                       recreate: bool = False, attached: bool = False) -> None:
+        self._emit({"workspace": ws, "removed": preset, "bindings": bindings,
+                    "rules": rules,
+                    "no_longer_intercepted": no_longer_intercepted,
+                    "mounts": mounts, "env": env, "setup": setup,
+                    "recreate": recreate})
 
     def provider_show(self, info: dict) -> None:
         self._emit(info)

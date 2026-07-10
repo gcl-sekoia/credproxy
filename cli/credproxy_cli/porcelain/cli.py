@@ -323,13 +323,14 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
         say(f"set '{ws.name}' as the default workspace")
 
 
-# A `[[preset]]` array-of-tables header line (a trailing comment is allowed), for
-# locating template-declared references to rewrite with resolved values.
-_PRESET_BLOCK_RE = re.compile(r"^\s*\[\[\s*preset\s*\]\]\s*(#.*)?$")
-# A `[preset.<child>]` sub-table header (e.g. `[preset.options]`) that BELONGS to
-# the current `[[preset]]` element -- folded INTO its span (mirrors the
-# `[rule.headers]` child handling in `_block_spans`).
-_PRESET_CHILD_RE = re.compile(r"^\s*\[\s*preset\s*\.\s*[^\[\]\n]+\]\s*(#.*)?$")
+# The `[[preset]]` header + `[preset.<child>]` sub-table regexes are the SINGLE
+# whitespace-tolerant source in `core.model.presets` (shared with `remove_preset`
+# so the two block-span readers can never diverge on a spaced-dot child and
+# orphan/corrupt it -- the #62/#63 child-table class). Imported, never duplicated.
+from ..core.model.presets import (
+    _PRESET_HEADER_RE as _PRESET_BLOCK_RE,
+    _PRESET_CHILD_RE,
+)
 # A `[[preset]]` header OR an inline `preset =` assignment, for detecting preset
 # references in a template we can't fully parse.
 _PRESET_REF_RE = re.compile(r"^\s*(\[\[\s*preset\s*\]\]|preset\s*=)", re.M)
@@ -1413,6 +1414,144 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         attached=attached, requires=requires)
 
 
+def do_preset_refresh(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    """Re-expand the workspace's `[[preset]]` reference(s) from their CURRENT
+    definitions and diff against the locked snapshots. `--check` previews without
+    writing. A refresh that would introduce a collision fails atomically (nothing
+    written). The shared placeholder is preserved (never rotated)."""
+    from ..core.errors import CredproxyError
+    from ..core.model import preset_refresh
+    from ..core.model.lock import save_lock
+    from ..core.model.resolver import resolve_workspace
+
+    implicit = name is None
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+
+    # Read-modify-write under the workspace lock so the compute and the save are
+    # atomic -- a concurrent mutation between them can't be silently clobbered
+    # (mirrors do_binding_remove; the gate prompt is held under the lock, which is
+    # fine for this single-user tool).
+    with ws.lock():
+        # "before" model (from the current lock) for the newly-intercepted advisory.
+        before = resolve_workspace(ws)
+        before_hosts = [h for b in before.bindings for h in b.hosts] \
+            + [h for r in before.rules for h in r.hosts]
+
+        result = preset_refresh.compute_refresh(ws, a.preset)  # a.preset may be None
+
+        # Safety gate: a non-`--check` refresh can change the effective config
+        # wholesale, so gate it like the destructive set -- but ONLY when there's a
+        # real change AND the workspace is implicitly targeted on the loose surface.
+        if not a.check and result.changed:
+            _confirm_destructive(ctx, ws, implicit, "refresh presets of")
+
+        written = not a.check and result.dirty
+        if written:
+            save_lock(ws, result.new_lock)
+
+    for n in result.resolved.notes:
+        say(f"note: {n}")
+
+    after_hosts = [h for b in result.resolved.bindings for h in b.hosts] \
+        + [h for r in result.resolved.rules for h in r.hosts]
+    newly = _newly_intercepted(before_hosts, after_hosts)
+
+    attached = result.resolved.config.get("attach") is not None
+    # `--check` is a pure preview -- nothing was written, so a "restart to apply"
+    # hint would be false (it would apply the OLD snapshot). Suppress the docker
+    # probe AND the hint in check mode (recreate stays False when container_exists
+    # is).
+    container_exists = False
+    if not a.check and not attached and result.container_half_changed:
+        try:
+            container_exists = \
+                core_docker.container_status(ws.ws_container) is not None
+        except CredproxyError:
+            container_exists = False
+
+    render.OUT.preset_refreshed(
+        ws.name, [p.to_dict() for p in result.presets], check=a.check,
+        newly_intercepted=newly,
+        recreate=(container_exists and result.container_half_changed),
+        attached=attached, written=written)
+
+
+def do_preset_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    """Remove a `[[preset]]` reference block (+ its `[preset.options]`/
+    `[preset.override.*]` child sub-tables) and drop its lock snapshot. Reports
+    what leaves the effective model + whether hosts stop being intercepted."""
+    from ..core.errors import CredproxyError
+    from ..core.model.lock import load_lock
+    from ..core.model.presets import parse_preset_refs, remove_preset
+    from ..core.model.resolver import resolve_workspace
+
+    implicit = name is None
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+
+    # The ONLY hard preconditions are: the pack is referenced (`parse_preset_refs`
+    # needs no pack definition, so a dangling ref still parses) + the destructive
+    # gate. Everything downstream is best-effort REPORTING -- `preset remove` must
+    # succeed exactly when removal is the fix (a literal-vs-preset collision, or a
+    # dangling ref whose pack was deleted and inputs since edited), mirroring
+    # `remove_binding`/`do_binding_remove`'s resolution-free design.
+    refs = {r.name for r in parse_preset_refs(
+        tomllib.loads(ws.config_path.read_text()), str(ws.config_path))}
+    if a.preset not in refs:
+        fail(f"preset '{a.preset}' is not referenced in workspace '{ws.name}'")
+
+    _confirm_destructive(ctx, ws, implicit, "remove preset from")
+
+    # The removed pack's contribution (report + host advisory) comes from its LOCK
+    # snapshot, read directly -- NOT via a full resolve, which hard-fails on an
+    # unrelated collision or a dangling ref (precisely the states where removal is
+    # the fix).
+    entry = load_lock(ws).get("presets", {}).get(a.preset)
+    summary = _expansion_summary(a.preset, entry) if entry else {
+        "bindings": [], "rules": [], "mounts": [], "env": [], "setup": [],
+        "has_container_half": False}
+    removed_hosts = [h for b in summary["bindings"] for h in b["hosts"]] \
+        + [h for r in summary["rules"] for h in r["hosts"]]
+
+    # `attach` (push-hint wording) from a best-effort resolve -- if the model won't
+    # resolve, default to managed (the common case) rather than fail.
+    attached = False
+    try:
+        attached = resolve_workspace(ws).config.get("attach") is not None
+    except CredproxyError:
+        pass
+
+    with ws.lock():
+        remove_preset(ws, a.preset)
+
+    # After removal: which removed hosts stop being intercepted? Best-effort -- if
+    # the REMAINING model is independently broken, the mutation already landed, so
+    # skip the advisory rather than error on a completed remove.
+    no_longer: list[str] = []
+    try:
+        after = resolve_workspace(ws)
+        after_hosts = [h for b in after.bindings for h in b.hosts] \
+            + [h for r in after.rules for h in r.hosts]
+        no_longer = _newly_intercepted(after_hosts, removed_hosts)
+    except CredproxyError:
+        pass
+
+    container_exists = False
+    if not attached and summary["has_container_half"]:
+        try:
+            container_exists = \
+                core_docker.container_status(ws.ws_container) is not None
+        except CredproxyError:
+            container_exists = False
+
+    render.OUT.preset_removed(
+        ws.name, a.preset, summary["bindings"], summary["rules"], no_longer,
+        mounts=summary["mounts"], env=summary["env"], setup=summary["setup"],
+        recreate=(container_exists and summary["has_container_half"]),
+        attached=attached)
+
+
 def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     from ..core.model import bindings as core_bindings
 
@@ -2223,6 +2362,13 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     # `--opt id=value`; unresolved required options prompt on loose+TTY, else fail
     # with the structured missing error.
     pa.add_argument("--opt", action="append", metavar="ID=VALUE", default=None)
+    pr = psub.add_parser("refresh")
+    # Optional PRESET: re-expand just that referenced pack (else every one).
+    pr.add_argument("preset", metavar="PRESET", nargs="?", default=None)
+    # Preview the diff without writing (also the CI "is anything stale" probe).
+    pr.add_argument("--check", action="store_true")
+    prm = psub.add_parser("remove")
+    prm.add_argument("preset", metavar="PRESET")
 
     return parser
 
@@ -2358,6 +2504,11 @@ _PRESET_ADD_HELP = (
     "apply if the container exists) -- `preset add` announces both. An attached\n"
     "workspace refuses a container-half pack. Re-referencing the same pack is\n"
     "refused (a `[[preset]]` block already names it).\n"
+    "\n"
+    "Sibling verbs:\n"
+    "  preset refresh [PRESET] [--check]   re-expand from the current definition,\n"
+    "                    diffing the locked snapshot (`--check` previews, no write).\n"
+    "  preset remove PRESET   drop the `[[preset]]` block + its lock snapshot.\n"
 )
 
 _BINDING_TEST_HELP = (
@@ -2779,6 +2930,10 @@ def _run_ws_verb(
     elif verb == "preset":
         if a.presetcmd == "add":
             do_preset_add(ctx, name, a)
+        elif a.presetcmd == "refresh":
+            do_preset_refresh(ctx, name, a)
+        elif a.presetcmd == "remove":
+            do_preset_remove(ctx, name, a)
 
 
 def _parse_create(argv: list[str]) -> argparse.Namespace:
@@ -3386,16 +3541,16 @@ def _dispatch_preset(ctx: Ctx, rest: list[str]) -> None:
     if not rest or _wants_help(rest) or rest[0] == "list":
         do_preset_list(ctx)
         return
-    if rest[0] == "add":
-        # Top-level `preset add` is the loose implicit-workspace form; strict
-        # requires the explicit `workspace NAME preset ...`.
+    if rest[0] in ("add", "refresh", "remove"):
+        # Top-level `preset {add,refresh,remove}` is the loose implicit-workspace
+        # form; strict requires the explicit `workspace NAME preset ...`.
         if not ctx.loose:
-            fail("`preset add` needs a workspace: "
-                 "`credproxy workspace NAME preset add`")
+            fail(f"`preset {rest[0]}` needs a workspace: "
+                 f"`credproxy workspace NAME preset {rest[0]}`")
         _run_ws_verb(ctx, None, ["preset", *rest], [])
         return
     fail(f"unknown preset command '{rest[0]}' (usage: credproxy preset list  |  "
-         f"credproxy workspace NAME preset add ...)")
+         f"credproxy workspace NAME preset add|refresh|remove ...)")
 
 
 def _dispatch_dev(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:

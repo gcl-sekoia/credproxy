@@ -139,15 +139,55 @@ The reference is a **snapshot**: the expansion recorded in the lockfile is pinne
 at the moment you added the pack, so a definition that changes upstream (a new
 host, an added rule, a dropped part) is **inert** until you ask for it —
 credproxy surfaces a note that the definition drifted but keeps serving the
-snapshot. Re-expanding a snapshot on your own clock is `preset refresh` (a
-separate command, reintroduced alongside `preset remove` in a following release).
+snapshot.
 
-You *can* change a pack's inputs yourself, though: edit the `[[preset]]` block's
+Re-expanding a snapshot on your own clock is `preset refresh`:
+
+```console
+$ credp preset refresh github --check      # preview; writes nothing
+preset 'github': 1 added
+  binding github-ghcr  added
+$ credp preset refresh github              # apply: re-snapshot the expansion
+preset 'github': 1 added
+  binding github-ghcr  added
+```
+
+`preset refresh` force-re-expands the reference against the **current** pack
+definition and structurally diffs the new expansion against the locked one
+(per entry: `added` / `removed` / `changed`, with a field-level diff for a change).
+A dropped definition part simply becomes a `removed` entry — there is no `--prune`
+flag. `--check` prints the same diff **without writing** (a preview, and the
+CI-friendly "is anything stale?" probe; it exits 0 whether or not anything
+changed). Omitting the pack name refreshes **every** `[[preset]]` reference in the
+file. Identity is preserved exactly: the shared placeholder is reused (never
+rotated — rotating it would break placeholder-consuming state and cross-binding
+sharing), and a refresh that would collide with a literal entry (or another
+preset) fails atomically, naming both sides, with nothing written.
+
+You *can* also change a pack's inputs yourself: edit the `[[preset]]` block's
 own fields — `provider`, `secret`, `[preset.options]`, `disable`, or
 `[preset.override.<suffix>]` — and the next resolve re-expands automatically
 against the current definition (you touched the reference; that is your clock).
-The shared placeholder is preserved across a re-expansion (rotating it would
-break placeholder-consuming state and cross-binding sharing).
+**That is also how you keep a hand change across a refresh:** there is no stamped
+text to edit, so express the customization as a `disable` or
+`[preset.override.<suffix>]` on the reference — those are the reference's own
+inputs, so a refresh preserves them.
+
+To drop a pack entirely, `preset remove PRESET` deletes its `[[preset]]` block
+(and any `[preset.options]` / `[preset.override.*]` sub-tables) and its lock
+snapshot, reporting what leaves the effective model:
+
+```console
+$ credp preset remove github
+removed preset 'github' from workspace 'myproject': 3 binding(s), 0 rule(s) left the effective model
+  binding github-api       bearer  api.github.com
+  ...
+```
+
+`preset refresh` (when it has real changes) and `preset remove` are both gated
+like the destructive set on the loose surface when they target an implicitly-
+resolved workspace: they confirm first (`--yes` bypasses, and they fail closed
+without a terminal). `--check` never gates.
 
 ## Pack options (host-half parameters)
 
