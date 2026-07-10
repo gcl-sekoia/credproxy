@@ -51,6 +51,15 @@ first terminal action (`block`/`respond`, or a `script` that calls one)
 short-circuits. A rule script that errors fails **closed** toward the policy —
 the workspace gets `502 credproxy: rule 'NAME' failed`, never a proceed-un-governed.
 
+That declaration order spans both sources of rules: the resolver builds the
+effective rule list as **literal `[[rule]]` blocks first, then the rules a
+`[[preset]]` reference expands to, in `[[preset]]` declaration order** (a preset
+is a durable reference the resolver expands — see
+[`configuration.md`](configuration.md)). So a literal rule always evaluates
+before a preset-supplied one on the same host, and two preset packs evaluate in
+the order their `[[preset]]` blocks appear. Order your `[[preset]]` blocks
+accordingly when two packs govern overlapping traffic.
+
 ## Interception is a union — a rule can flip a host to intercepted
 
 Adding a rule to a host with no bindings makes that host TLS-terminated (it was

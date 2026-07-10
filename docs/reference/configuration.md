@@ -440,7 +440,7 @@ config error naming the file and the offending field.
 **Presets — service setup packs.** A *preset* is a one-command pack for a
 service: the coordinated bindings a credential needs across its hosts **and** the
 credential-free rule guardrails that should ride along. `credproxy workspace NAME
-preset add github` stamps both. Either half is optional:
+preset add github` references both. Either half is optional:
 
 - **Binding-only** (the GitHub PAT case: `bearer` on `api.github.com`, HTTP
   `basic` on `github.com`/`ghcr.io`, all sharing one bare-token placeholder — no
@@ -451,15 +451,23 @@ preset add github` stamps both. Either half is optional:
   — no `[placeholder]`, no provider/secret; `preset add org-guardrails` with zero
   flags.
 
-It's **expansion, not a link**: `preset add` writes ordinary `[[binding]]` /
-`[[rule]]` blocks (named `<preset>-<suffix>`), including `[rule.params]` — edit or
-remove them individually afterward; the proxy never sees a "preset". The add is
-atomic (a name collision fails the whole thing before any write) and announces
-any host it **newly TLS-intercepts** (a preset rule on a bindings-free host flips
-it — see [`rules.md`](rules.md#interception-is-a-union--a-rule-can-flip-a-host-to-intercepted)). `credproxy preset list`
-shows every pack's full expansion (bindings and rules) before you apply. Presets
-are data in the layered registry, so an org ships its own by dropping a TOML in
-an overlay — see [`overlays.md`](../advanced/overlays.md).
+It's a durable **reference, not a stamp**: `preset add` appends a small
+`[[preset]]` block (the pack name plus the resolved `provider`/`secret`/
+`[preset.options]`); the resolver expands it into ordinary bindings/rules (named
+`<preset>-<suffix>`, including `[rule.params]`) and container config at resolve
+time, and snapshots the full expansion in the lockfile — the proxy never sees a
+"preset". Literal entries come first, then preset expansions in `[[preset]]`
+declaration order (this ordering is the rule-evaluation order — see
+[`rules.md`](rules.md)). A `[[preset]]` block may also carry `disable = [...]`
+(omit part/rule suffixes) and `[preset.override.<suffix>]` (whole-field replace a
+binding/rule field). The add is atomic (a name collision fails the whole thing
+before any write) and announces any host it **newly TLS-intercepts** (a preset
+rule on a bindings-free host flips it — see [`rules.md`](rules.md#interception-is-a-union--a-rule-can-flip-a-host-to-intercepted)).
+A changed pack definition is inert until re-expanded, but editing the reference's
+own inputs (provider/secret/options/disable/override) re-expands on the next
+resolve. `credproxy preset list` shows every pack's full expansion before you
+apply. Presets are data in the layered registry, so an org ships its own by
+dropping a TOML in an overlay — see [`overlays.md`](../advanced/overlays.md).
 
 Injector definitions are a separate declarative file type (scheme, params,
 placeholder pattern, env hint) — see [`injectors.md`](injectors.md). Providers
@@ -474,7 +482,7 @@ file. You can always skip the command and edit the TOML directly.
 |---|---|
 | `credproxy workspace create NAME` | Scaffold `<name>.toml` (and the state dir + `auth.token`) from the workspace template. Does not start anything. To use a non-default image, edit the scaffolded `image`. |
 | `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E | --no-env]` | Append a `[[binding]]` block (with a generated `name` unless you pass `--name`). The placeholder is minted into the lockfile unless you pass `--placeholder` (which writes it into the block). Validates the whole set before writing, so a rejected binding never lands in the file. Repeat `--secret SLOT=REF` for a multi-slot secret; a single `--secret SLOT=REF` works too when `SLOT` is the scheme's slot name (e.g. `jwt-bearer`'s `private_key`). |
-| `credproxy workspace NAME preset add PRESET [--provider P --secret REF] [--opt ID=VALUE …]` | Apply a **service setup pack**: stamp the preset's coordinated `[[binding]]` set (sharing one placeholder) **and** its `[[rule]]` guardrails, all-or-nothing. A binding-bearing preset takes provider/secret (or its defaults); a pure-rule pack takes none. `--opt` supplies a pack `[[option]]`'s host-half value (whole-field); an unresolved required option prompts on the loose surface + a terminal, else fails with a structured error. Announces any newly-intercepted host. `preset list` shows the full expansion first. |
+| `credproxy workspace NAME preset add PRESET [--provider P --secret REF] [--opt ID=VALUE …]` | Apply a **service setup pack**: append a `[[preset]]` reference (with the resolved provider/secret/options written explicitly) that the resolver expands into the coordinated `[[binding]]` set (sharing one placeholder) **and** its `[[rule]]` guardrails, all-or-nothing. A binding-bearing preset takes provider/secret (or its defaults); a pure-rule pack takes none. `--opt` supplies a pack `[[option]]`'s host-half value (whole-field); an unresolved required option prompts on the loose surface + a terminal, else fails with a structured error. Announces any newly-intercepted host. `preset list` shows the full expansion first. |
 | `credproxy workspace NAME binding remove BINDING_NAME` | Remove that binding's block (surgical text edit). Reversible in principle, but loses tuning — gated by confirmation when targeting the default workspace on the loose surface. |
 | `credproxy workspace NAME binding list` | Read and print the bindings (placeholders resolved from the lockfile, read-only — nothing is written). Shows name, injector, provider, secret-id, hosts, env, and placeholder. |
 | `credproxy workspace NAME binding test [BINDING_NAME]` | Dry-run: fetch each binding's secret through its provider and report success and **value length only** (never the value). Exit 1 if any fail. |

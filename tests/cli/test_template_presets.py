@@ -1,15 +1,17 @@
-"""Templates can declare presets: `[[preset]]` expanded at `create` time (#57).
+"""Templates can declare presets: `[[preset]]` written into the config at
+`create` time (#57, config-v2).
 
 A `workspace.template.toml` / `workspace.attach.template.toml` may carry
-`[[preset]]` entries; `create` consumes them, expands each through the SAME
-core `preset add` uses (shared placeholder, collision checks, stamping), and
-writes ONE all-or-nothing config -- the `[[preset]]` blocks never survive into
-the stamped `<name>.toml`, and the loader rejects `preset` in a workspace config.
+`[[preset]]` entries; `create` consumes them, resolves the credential/options
+through the SAME core `preset add` uses (default resolution, collision checks),
+and writes ONE all-or-nothing config carrying each as a `[[preset]]` REFERENCE
+that the resolver expands (config-v2 -- the reference survives into the config;
+the placeholder is minted into the lock at the first resolve, not `create`).
 
 Covers: entry validation, default-resolution parity with `preset add`, textual
-identity of create-stamped vs add-stamped output, all-or-nothing (no orphaned
+identity of create-written vs add-written references, all-or-nothing (no orphaned
 file/token/state), the loader rejection message, the attach container-half
-refusal, freshly-generated per-workspace placeholders, and the
+refusal, per-workspace placeholders minted at first resolve, and the
 newly-intercepted announcement.
 """
 from __future__ import annotations
@@ -75,41 +77,61 @@ def test_create_expands_template_preset(xdg):
     code, out, err = _run(["--json", "workspace", "create", "proj"])
     assert code == 0
     obj = json.loads(out)
-    # The stamped config is written, and the `[[preset]]` key does NOT survive.
+    # The reference SURVIVES into the stamped config (config-v2); the resolver
+    # expands it (no literal `[[binding]]` blocks are written).
     text = _config_text("proj")
-    assert "[[preset]]" not in text
-    assert "[[binding]]" in text and text.count("[[binding]]") == 3
-    # github's three parts share ONE freshly generated placeholder.
+    assert "[[preset]]" in text
+    assert "[[binding]]" not in text
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    from credproxy_cli.core.model.workspace import Workspace
+    resolved = resolve_workspace(Workspace("proj"))
+    assert len(resolved.bindings) == 3
     names = [b["name"] for b in obj["presets"][0]["bindings"]]
     assert names == ["github-api", "github-git", "github-ghcr"]
-    phs = {b["placeholder"] for b in obj["presets"][0]["bindings"]}
+    # create writes no lock, so its announce carries NO placeholder (minted at the
+    # first resolve). The three parts share ONE placeholder at resolve time.
+    assert "placeholder" not in obj["presets"][0]["bindings"][0]
+    phs = {b.placeholder for b in resolved.bindings}
     assert len(phs) == 1 and next(iter(phs)).startswith("ghp_")
 
 
 def test_created_config_loads_clean(xdg):
-    """The stamped config carries only literal config + provenance comments, and
-    every loader accepts it (acceptance criterion 3)."""
+    """The created config carries the `[[preset]]` reference (config-v2, no literal
+    binding blocks), and every loader/resolver accepts it (acceptance criterion 3)."""
     _template(_MIN + '\n[[preset]]\nname = "github"\n')
     assert _run(["workspace", "create", "proj"])[0] == 0
-    from credproxy_cli.core.model.bindings import load_bindings
     from credproxy_cli.core.model.config import load_config
-    from credproxy_cli.core.model.rules import load_rules
+    from credproxy_cli.core.model.resolver import resolve_workspace
     from credproxy_cli.core.model.workspace import Workspace
     ws = Workspace("proj")
     assert load_config(ws)["image"] == "python:3.12-slim"
-    assert len(load_bindings(ws)) == 3
-    assert load_rules(ws) == []
-    assert "[[preset]]" not in _config_text("proj")
+    resolved = resolve_workspace(ws)
+    assert len(resolved.bindings) == 3
+    assert resolved.rules == []
+    assert "[[preset]]" in _config_text("proj")
 
 
 def test_fresh_placeholder_differs_across_workspaces(xdg):
-    """Acceptance criterion 1: two created workspaces get DIFFERENT placeholders."""
+    """Acceptance criterion 1: two created workspaces get DIFFERENT placeholders,
+    each minted at the first persisting resolve (create writes no lock) and then
+    STABLE across re-resolves -- read back from the lock, never regenerated."""
+    from credproxy_cli.core.model.lock import save_lock
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    from credproxy_cli.core.model.workspace import Workspace
     _template(_MIN + '\n[[preset]]\nname = "github"\n')
-    a = json.loads(_run(["--json", "workspace", "create", "a"])[1])
-    b = json.loads(_run(["--json", "workspace", "create", "b"])[1])
-    pa = a["presets"][0]["bindings"][0]["placeholder"]
-    pb = b["presets"][0]["bindings"][0]["placeholder"]
-    assert pa != pb
+
+    def _first_ph(name):
+        assert _run(["workspace", "create", name])[0] == 0
+        ws = Workspace(name)
+        resolved = resolve_workspace(ws)
+        save_lock(ws, resolved.lock)              # persist the minted identity
+        return ws, resolved.bindings[0].placeholder
+
+    wa, pa = _first_ph("a")
+    wb, pb = _first_ph("b")
+    assert pa and pb and pa != pb
+    # A second resolve reads the SAME placeholder back from the lock (stable).
+    assert resolve_workspace(wa).bindings[0].placeholder == pa
 
 
 def test_bare_create_still_works_without_presets(xdg):
@@ -126,9 +148,9 @@ def test_bare_create_still_works_without_presets(xdg):
 
 
 def test_textual_identity_create_vs_preset_add(xdg, monkeypatch):
-    """The blocks `create` stamps from a template `[[preset]]` are BYTE-IDENTICAL
-    to `create` (plain) followed by `preset add` -- same renderers, same core.
-    Pin the generated placeholder so even the provenance sha matches."""
+    """The `[[preset]]` reference `create` writes from a template entry is
+    BYTE-IDENTICAL to `create` (plain) followed by `preset add` -- same renderers,
+    same core. Pin the generated placeholder for a deterministic comparison."""
     from credproxy_cli.core.model.injectors import Placeholder
     monkeypatch.setattr(Placeholder, "generate", lambda self: self.prefix + "PINNED")
 
@@ -230,7 +252,7 @@ def test_collision_between_entry_and_literal_binding_aborts(xdg):
     """))
     code, out, err = _run(["workspace", "create", "proj"])
     assert code == 1
-    assert "github-api" in err and "already exists" in err
+    assert "github-api" in err and "collides with a literal" in err
     _assert_no_workspace("proj")
 
 
@@ -262,27 +284,19 @@ def test_entry_validation(xdg, entry, needle):
 # ---- loader rejection --------------------------------------------------------
 
 
-def test_loader_rejects_preset_in_workspace_config(xdg):
+def test_loader_accepts_preset_in_workspace_config(xdg):
+    """config-v2: a `[[preset]]` reference is a first-class workspace-config
+    construct now; the loader accepts it and the resolver expands it."""
     from credproxy_cli.core.model.config import load_config
-    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.model.resolver import resolve_workspace
     from credproxy_cli.core.paths import workspaces_config_dir
     from credproxy_cli.core.model.workspace import Workspace
     d = workspaces_config_dir()
     d.mkdir(parents=True, exist_ok=True)
     (d / "w.toml").write_text('image = "x"\n[[preset]]\nname = "github"\n')
-    with pytest.raises(ConfigError, match="template-only construct"):
-        load_config(Workspace("w"))
-
-
-def test_loader_rejection_message_points_at_preset_add(xdg):
-    _run  # keep import used
-    from credproxy_cli.core.paths import workspaces_config_dir
-    d = workspaces_config_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "w.toml").write_text('image = "x"\n[[preset]]\nname = "github"\n')
-    code, out, err = _run(["workspace", "w", "inspect"])
-    assert code == 1
-    assert "template-only construct" in err and "preset add" in err
+    ws = Workspace("w")
+    assert load_config(ws)["image"] == "x"          # loader accepts `preset`
+    assert len(resolve_workspace(ws).bindings) == 3  # resolver expands it
 
 
 # ---- attached workspaces -----------------------------------------------------
@@ -295,8 +309,10 @@ def test_attach_template_binding_only_preset_ok(xdg):
         ["--json", "workspace", "create", "att", "--attach", "container=foo"])
     assert code == 0
     text = _config_text("att")
-    assert "[[preset]]" not in text and "[[binding]]" in text
-    assert "attach" in text
+    assert "[[preset]]" in text and "attach" in text
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    from credproxy_cli.core.model.workspace import Workspace
+    assert len(resolve_workspace(Workspace("att")).bindings) == 3
 
 
 def test_attach_template_container_half_pack_fails(xdg):
@@ -404,10 +420,13 @@ def test_two_entries_expand_in_declaration_order(xdg):
     obj = json.loads(out)
     assert [p["preset"] for p in obj["presets"]] == ["github", "svc"]
     text = _config_text("proj")
-    assert "[[preset]]" not in text
-    # github's 3 parts + svc's 1 part, github first.
-    assert text.count("[[binding]]") == 4
-    assert text.index("github-api") < text.index("svc-api")
+    assert text.count("[[preset]]") == 2 and "[[binding]]" not in text
+    # github's 3 parts + svc's 1 part, github first (literal-then-preset, in
+    # `[[preset]]` declaration order).
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    from credproxy_cli.core.model.workspace import Workspace
+    names = [b.name for b in resolve_workspace(Workspace("proj")).bindings]
+    assert names == ["github-api", "github-git", "github-ghcr", "svc-api"]
 
 
 def test_two_entries_env_collision_aborts(xdg):
@@ -428,9 +447,7 @@ def test_two_entries_same_pack_double_add_aborts(xdg):
     _template(_MIN + '\n[[preset]]\nname = "github"\n\n[[preset]]\nname = "github"\n')
     code, out, err = _run(["workspace", "create", "proj"])
     assert code == 1
-    assert "already applied" in err
-    assert "duplicate `[[preset]]` entry" in err
-    assert "remove the stamped blocks" not in err     # add-flavored wording gone
+    assert "duplicate `[[preset]]` reference" in err and "github" in err
     _assert_no_workspace("proj")
 
 
@@ -461,13 +478,13 @@ def test_container_half_pack_stamps_at_create(xdg):
     _preset("cont", _CONTAINER)
     _template(_MIN + '\n[[preset]]\nname = "cont"\n')
     assert _run(["workspace", "create", "proj"])[0] == 0
-    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.resolver import resolve_workspace
     from credproxy_cli.core.model.workspace import Workspace
-    cfg = load_config(Workspace("proj"))
+    cfg = resolve_workspace(Workspace("proj")).config
     assert cfg["env"] == {"FOO": "bar"}
     assert {m["target"] for m in cfg["mounts"]} == {"/cache"}
     assert cfg["setup"][-1]["run"] == "echo hi"
-    assert "[[preset]]" not in _config_text("proj")
+    assert "[[preset]]" in _config_text("proj")
 
 
 def test_textual_identity_container_half_create_vs_add(xdg):
@@ -519,19 +536,6 @@ def test_pure_rule_pack_still_validates_existing_bindings(xdg):
 # ---- loader rejection on an attached config (finding 3) ----------------------
 
 
-def test_loader_rejects_preset_in_attached_config(xdg):
-    from credproxy_cli.core.model.config import load_config
-    from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.paths import workspaces_config_dir
-    from credproxy_cli.core.model.workspace import Workspace
-    d = workspaces_config_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "att.toml").write_text(
-        'attach = { container = "foo" }\n[[preset]]\nname = "github"\n')
-    with pytest.raises(ConfigError, match="template-only construct"):
-        load_config(Workspace("att"))
-
-
 # ---- create runs the pack's host-prereq checks (#57 + #58 finding 5) ---------
 
 
@@ -561,7 +565,7 @@ def test_create_template_preset_runs_requires(xdg):
     reqs = obj["presets"][0]["requires"]
     assert reqs and reqs[0]["kind"] == "command" and reqs[0]["ok"] is False
     assert reqs[0]["hint"] == "install the tool"
-    assert "[[binding]]" in _config_text("proj")   # the stamp landed
+    assert "[[preset]]" in _config_text("proj")   # the reference landed
 
 
 def test_create_requires_run_after_write_not_when_later_entry_aborts(xdg, monkeypatch):

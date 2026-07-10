@@ -19,6 +19,16 @@ import pytest
 from test_porcelain import _run
 
 
+def _rbindings(ws):
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    return resolve_workspace(ws).bindings
+
+
+def _rrules(ws):
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    return resolve_workspace(ws).rules
+
+
 # ---- scaffold --help no longer mutates state ---------------------------------
 
 
@@ -164,7 +174,7 @@ def test_preset_github_defaults_provider_and_secret(ws_factory):
     code, out, err = _run(["workspace", "demo", "preset", "add", "github"])
     assert code == 0, out + err
     from credproxy_cli.core.model.bindings import load_bindings
-    bindings = load_bindings(ws)
+    bindings = _rbindings(ws)
     assert {b.name for b in bindings} == {"github-api", "github-git", "github-ghcr"}
     assert all(b.provider == "gh-cli" and b.secret == "github.com" for b in bindings)
 
@@ -178,7 +188,7 @@ def test_preset_github_secret_override_keeps_default_provider(ws_factory):
     assert code == 0, out + err
     from credproxy_cli.core.model.bindings import load_bindings
     assert all(b.provider == "gh-cli" and b.secret == "ghe.corp.com"
-               for b in load_bindings(ws))
+               for b in _rbindings(ws))
 
 
 def test_preset_nondefault_provider_requires_secret(ws_factory):
@@ -261,8 +271,8 @@ def test_preset_add_stamps_bindings_and_rules(ws_factory):
     assert code == 0, out + err
     from credproxy_cli.core.model.bindings import load_bindings
     from credproxy_cli.core.model.rules import load_rules
-    assert [b.name for b in load_bindings(ws)] == ["gh-guarded-api"]
-    rules = load_rules(ws)
+    assert [b.name for b in _rbindings(ws)] == ["gh-guarded-api"]
+    rules = _rrules(ws)
     assert [r.name for r in rules] == ["gh-guarded-readonly"]
     # the [rule.params] sub-table round-trips through the surgical stamp + reload.
     assert rules[0].params == {"allow_prefixes": ["/repos/scratch-"]}
@@ -277,8 +287,8 @@ def test_preset_add_pure_rule_no_flags(ws_factory):
     assert code == 0, out + err
     from credproxy_cli.core.model.bindings import load_bindings
     from credproxy_cli.core.model.rules import load_rules
-    assert load_bindings(ws) == []
-    assert [r.name for r in load_rules(ws)] == ["policy-noDelete"]
+    assert _rbindings(ws) == []
+    assert [r.name for r in _rrules(ws)] == ["policy-noDelete"]
 
 
 def test_preset_add_pure_rule_rejects_provider(ws_factory):
@@ -302,10 +312,9 @@ def test_preset_add_atomic_collision_no_partial_stamp(ws_factory):
     code, out, err = _run(["workspace", "demo", "preset", "add", "gh-guarded",
                            "--provider", "env", "--secret", "T"])
     assert code == 1
-    assert "already exists" in (out + err)
+    assert "collides with a literal" in (out + err)
     # No PARTIAL stamp: the rule must NOT have been written.
-    from credproxy_cli.core.model.rules import load_rules
-    assert load_rules(ws) == []
+    assert _rrules(ws) == []
 
 
 def test_preset_add_announces_newly_intercepted(ws_factory):
@@ -334,7 +343,7 @@ def test_preset_add_loose_resolves_default_workspace(ws_factory):
     code, out, err = _run(["--loose", "preset", "add", "policy"])
     assert code == 0, out + err
     from credproxy_cli.core.model.rules import load_rules
-    assert [r.name for r in load_rules(ws)] == ["policy-b"]
+    assert [r.name for r in _rrules(ws)] == ["policy-b"]
 
 
 def test_preset_add_strict_top_level_needs_workspace():

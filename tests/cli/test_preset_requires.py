@@ -293,9 +293,9 @@ def test_preset_add_reports_failed_requires_but_exits_0(xdg, tmp_path):
     blob = out + err
     assert code == 0, blob                       # advisory: still exit 0
     assert "unmet prerequisite" in blob and "create the socket dir" in blob
-    # The stamp DID land (durable config).
-    from credproxy_cli.core.model.bindings import load_bindings
-    assert {b.name for b in load_bindings(ws)} == {"gitsign-api"}
+    # The reference DID land (durable config), expanding to the binding.
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    assert {b.name for b in resolve_workspace(ws).bindings} == {"gitsign-api"}
 
 
 def test_preset_add_json_requires_array(xdg, tmp_path):
@@ -354,7 +354,7 @@ def _add_gitsign(ws_name: str, tmp_path):
 
 def test_doctor_reports_stamped_requires(xdg, tmp_path):
     """acceptance #1: doctor shows the failing path check (with its hint) until
-    the dir exists; discovered via the provenance marker."""
+    the dir exists; discovered via the `[[preset]]` reference + lock snapshot."""
     _write_preset("gitsign", _BINDING_PRESET.format(path=str(tmp_path / "absent")))
     _add_gitsign("w", tmp_path)
     from credproxy_cli.core.engine import doctor
@@ -517,60 +517,6 @@ def test_doctor_malformed_registry_preset_reports_not_aborts(xdg, tmp_path):
     assert "ws:w:bindings" in checks
 
 
-def test_binding_remove_cleans_preset_marker(xdg, tmp_path):
-    """Finding 2b: removing a preset-stamped binding also removes its provenance
-    marker, so no orphan marker lingers and doctor emits no stale preset checks."""
-    _write_preset("gitsign", _BINDING_PRESET.format(path=str(tmp_path / "x")))
-    ws = _add_gitsign("w", tmp_path)
-    from credproxy_cli.core.model.preset_stamp import applied_preset_names
-    assert applied_preset_names(ws.config_path.read_text()) == ["gitsign"]
-
-    code, out, err = _run(["workspace", "w", "binding", "remove", "gitsign-api"])
-    assert code == 0, out + err
-    text = ws.config_path.read_text()
-    assert "credproxy:preset" not in text
-    assert applied_preset_names(text) == []
-
-    from credproxy_cli.core.engine import doctor
-    ids = {c.id for c in doctor.run("w")}
-    assert not any(":preset:" in cid for cid in ids)
-
-
-def test_doctor_orphan_marker_reports_marker_remedy_not_pack_hint(xdg, tmp_path):
-    """Finding 2a: when a pack's stamped binding was renamed/removed but its marker
-    lingers, the provider requires check's remedy points at the orphaned marker --
-    NOT the pack's own prerequisite hint."""
-    _write_preset("gh", """
-        [placeholder]
-        prefix = "ghp_"
-        length = 40
-        charset = "alnumeric"
-
-        [[part]]
-        suffix = "api"
-        injector = "bearer"
-        hosts = ["api.github.com"]
-
-        [[requires]]
-        kind = "provider"
-        hint = "gh auth login"
-    """)
-    ws = _make_ws("w")
-    assert _run(["workspace", "w", "preset", "add", "gh",
-                 "--provider", "env", "--secret", "TOK"])[0] == 0
-    # Orphan the marker: rename the stamped binding so `gh-api` no longer exists.
-    text = ws.config_path.read_text()
-    renamed = text.replace('"gh-api"', '"gh-renamed"')
-    assert renamed != text                         # the rename actually happened
-    ws.config_path.write_text(renamed)
-
-    from credproxy_cli.core.engine import doctor
-    c = {c.id: c for c in doctor.run("w")}["ws:w:preset:gh:requires[0]"]
-    assert not c.ok
-    assert "stamped binding" in (c.hint or "") and "missing" in (c.hint or "")
-    assert "gh auth login" not in (c.hint or "")
-
-
 def test_doctor_provider_check_uses_stamped_provider_not_default(xdg):
     """Finding 8: doctor's provider requires check must use the provider CHOSEN at
     stamp time, not the pack's `default_provider` (which here doesn't resolve)."""
@@ -653,22 +599,3 @@ def test_doctor_fetch_dedupes_provider_invocation(xdg, tmp_path):
     # Exactly ONE provider exec for the whole --fetch run (binding fetch), not two.
     assert counter.read_text().count("x") == 1
 
-
-def test_applied_preset_names_ignores_marker_in_multiline_string(xdg):
-    """Finding 3: a marker-SHAPED line inside a multiline string value is not a
-    real stamp (no full 12-hex rev/sha) and must not be discovered as a pack. A
-    genuine full-shape marker is still found."""
-    from credproxy_cli.core.model.preset_stamp import applied_preset_names
-    phantom = textwrap.dedent('''\
-        image = "x"
-        [[setup]]
-        run = """
-        # credproxy:preset name=github rev=deploy sha=main
-        echo hi
-        """
-        order = 1
-    ''')
-    assert applied_preset_names(phantom) == []
-    real = ("# credproxy:preset name=github rev=abcdef012345 sha=012345abcdef\n"
-            "[[binding]]\n")
-    assert applied_preset_names(real) == ["github"]

@@ -185,7 +185,7 @@ def test_describe_presets_includes_rules(xdg):
 
 def test_preset_rejects_duplicate_setup_order(xdg):
     """Two `[[setup]]` steps sharing an `order` are a definition error -- `order`
-    is the join key `preset refresh` re-classifies setup elements by."""
+    is the join key the lock snapshots setup elements by (must be unique)."""
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.model.presets import load_presets
     _write_raw_preset(

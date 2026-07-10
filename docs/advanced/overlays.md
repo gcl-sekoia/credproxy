@@ -158,13 +158,14 @@ ships a service's setup without a credential.
 
 **A pack's files ride the pack's tier.** A `[[mount]]` in a preset that names an
 `overlay = "setup.d/x.sh"` source resolves within the pack's *own* tier — the
-stamp records the qualified form `overlay = "<tier>:setup.d/x.sh"` (the tier is
-an overlay basename, or `user`/`builtin`), so the file is pinned to the pack and
-unaffected by overlay reordering/shadowing. `[[setup]]` steps must declare an
+expansion records the qualified form `overlay = "<tier>:setup.d/x.sh"` (the tier
+is an overlay basename, or `user`/`builtin`), so the file is pinned to the pack
+and unaffected by overlay reordering/shadowing. `[[setup]]` steps must declare an
 explicit `order` (packs are explicit about ordering); host-bind sources are baked
-as literal v1 defaults, existence-checked when the workspace starts. Each stamped
-block carries an inert `# credproxy:preset …` provenance comment, so re-applying
-the same pack is refused rather than duplicated.
+as literal v1 defaults, existence-checked when the workspace starts. `preset add`
+appends a `[[preset]]` reference (the expansion is snapshotted in the lockfile,
+never written into the TOML), so re-referencing the same pack is refused rather
+than duplicated.
 
 **Parameterize the host half with `[[option]]`.** A host-half value that differs
 per operator — a socket dir, an op:// path — is declared as an option and
@@ -188,16 +189,15 @@ target = "/ssh-agent"
 A value resolves at expansion time — explicit `--opt id=value` / a template
 `[preset.options]` table → a prompt (loose surface + terminal only) → the
 `default` → otherwise the add fails with a structured missing-options error. The
-resolved literal is stamped (the marker never reaches the workspace TOML), and
-`preset refresh` reads a mount-feeding option's value back from the stamped mount.
-An option used **only** in a `[[requires]]` path with no default can't be read
-back later, so give such an option a default (or also use it in a stamped mount).
+resolved value is written into the reference's `[preset.options]` sub-table and
+substituted into the expanded field (the `{ option = … }` marker never reaches the
+workspace TOML).
 
 **Declare your pack's host prerequisites.** A pack often needs host state its
 container half can't provide — the `gh` CLI installed, a signing-agent socket
 dir, a set env var, a provider that can serve the secret. Declare each with a
-`[[requires]]` block so `preset add`/`create` check it (advisory — the pack still
-stamps) and `doctor` re-checks it (authoritative):
+`[[requires]]` block so `preset add`/`create` check it (advisory — the reference
+still lands) and `doctor` re-checks it (authoritative):
 
 ```toml
 [[requires]]
@@ -224,8 +224,8 @@ implemented by credproxy. **A pack never supplies a script to run** on the host,
 so activating an overlay from a fresh clone can't execute pack-authored code; the
 only host-executable is a [provider](../reference/providers.md), reached through
 the normal protocol for the `provider` kind. `doctor` finds which packs a
-workspace uses from the stamped provenance comments; a `fetch = true` check runs
-only under `doctor NAME --fetch`. See [the preset guide](../guide/06-presets.md#declaring-host-prerequisites).
+workspace uses from its `[[preset]]` references and the lock snapshot; a
+`fetch = true` check runs only under `doctor NAME --fetch`. See [the preset guide](../guide/06-presets.md#declaring-host-prerequisites).
 
 **A template can *declare* presets.** Instead of inlining literal `[[binding]]`
 blocks (which bypass preset machinery), a `workspace.template.toml` /
@@ -247,15 +247,16 @@ secret   = "claude-code-oauth-token"
 
 Each entry takes `name` (required) and optional `provider` / `secret` (a single
 ref, defaulting exactly as `preset add` does — the pack's `default_provider`,
-and `default_secret` only when the resolved provider *is* the default). The
-`[[preset]]` blocks are **consumed at create and never survive** into the stamped
-`<name>.toml` (the loader **rejects** `preset` in a workspace config — references
-live only in templates). Create is **all-or-nothing**: a defaults-less pack with
-no provider/secret, a name collision against a literal `[[binding]]`, or an
-attach template naming a container-half pack fails the whole create with nothing
-written (no config, no token, no state). There is **no prompting** — a missing
-field is a loud error naming exactly what to fill (or drop the entry and run
-`preset add` after). Leave `[[preset]]` out of the *builtin* templates so a bare
+and `default_secret` only when the resolved provider *is* the default). At create
+the credential + options are resolved and written back into the block, and the
+`[[preset]]` reference **survives** into the stamped `<name>.toml` as a durable
+reference (config-v2: the loader accepts `preset`, and the first resolve expands
+it into the lock). Create is **all-or-nothing**: a defaults-less pack with no
+provider/secret, a name collision against a literal `[[binding]]`, or an attach
+template naming a container-half pack fails the whole create with nothing written
+(no config, no token, no state). There is **no prompting on the strict surface** —
+a missing field is a loud error naming exactly what to fill (loose + a terminal
+prompts). Leave `[[preset]]` out of the *builtin* templates so a bare
 `credproxy create` needs no provider login; template presets are for
 overlays/forks.
 

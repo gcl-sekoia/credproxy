@@ -57,7 +57,7 @@ _VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 KNOWN_KEYS = frozenset({
     "image", "home", "directory", "mounts", "env", "setup", "user", "workdir",
     "enter_prelude", "shell", "exec_flags", "run_flags", "map_host_user",
-    "user_uid", "auto_stop", "binding", "rule", "attach",
+    "user_uid", "auto_stop", "binding", "rule", "attach", "preset",
 })
 
 # The `attach` selector keys. Exactly one must be present. `compose_project` is
@@ -432,14 +432,14 @@ def load_config_from_text(text: str, source: str, *,
     all-or-nothing preset expansion (which validates the composed text before any
     file exists).
 
-    `check_bind_exists` (default True) is the preset re-load knob: the normal
-    load path (`start`/`load_config`) existence-checks every host-bind SOURCE, but
-    the preset expand/refresh VALIDATION re-loads (`_expand_preset_into_text`,
-    `preset_refresh._classify`) pass False so an option-fed bind source that need
-    not exist until runtime (a socket dir the agent creates, `~/.ssh/...-agent`)
-    doesn't fail those internal re-validations. The real existence check still
-    runs at `start`, where CLAUDE.md says it belongs -- this only defers it for
-    the in-memory composition passes, never for a config loaded to actually run."""
+    `check_bind_exists` (default True) is the resolver knob: the normal load path
+    (`start`/`load_config`) existence-checks every host-bind SOURCE, but the
+    resolver (`resolver.resolve_workspace`, `validate_text`) passes False by
+    default so an option-fed bind source that need not exist until runtime (a
+    socket dir the agent creates, `~/.ssh/...-agent`) doesn't fail the
+    side-effect-free resolution `binding list`/`inspect` run. The real existence
+    check still runs at `start` (the resolver is called there with True), where
+    CLAUDE.md says it belongs -- this only defers it for the read-only passes."""
     try:
         raw = tomllib.loads(text)
     except Exception as e:
@@ -448,17 +448,11 @@ def load_config_from_text(text: str, source: str, *,
     if not isinstance(raw, dict):
         raise ConfigError(f"{source}: top level must be a table")
 
-    # `[[preset]]` is a TEMPLATE-only key: it is consumed and expanded at `create`
-    # time and never survives into a workspace's `<name>.toml`. Reject it here --
-    # specifically, ahead of the generic unknown-key path -- so "preset references
-    # live only in templates" is a load-enforced invariant (both managed and
-    # attached configs).
-    if "preset" in raw:
-        raise ConfigError(
-            f"{source}: `[[preset]]` (and its `[preset.options]` sub-table) is a "
-            f"template-only construct -- it expands at create time and must not "
-            f"appear in a workspace config; on an existing workspace use "
-            f"`credproxy workspace NAME preset add ...`")
+    # `[[preset]]` is a durable REFERENCE (config-v2): the CLI's resolver expands
+    # it at resolve time and snapshots the expansion in the lock. `load_config`
+    # (the container-half loader) IGNORES it here -- the resolver is the one seam
+    # that reads preset refs (`presets.parse_preset_refs`). It is a known key
+    # (`KNOWN_KEYS`), so it does not trip the unknown-key path below.
 
     # Reject unknown top-level keys (a typo silently no-ops otherwise). Mirror the
     # `_parse_mount` "unknown key(s)" precedent, with a cheap did-you-mean.
@@ -790,8 +784,8 @@ def inline_array_span(text: str, key: str) -> tuple[int, int] | None:
 
     The bracket scan skips string contents and `#` comments and balances nested
     `[]`, so a bracket inside a value or a multi-line array doesn't fool it. The
-    single string/comment/bracket-aware scanner shared by `mount add`
-    (`add_volume_mount`) and preset stamping (`preset_stamp._stamp_array`)."""
+    single string/comment/bracket-aware scanner used by `mount add`
+    (`add_volume_mount`)."""
     m = re.search(rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=[ \t]*", text)
     if not m:
         return None

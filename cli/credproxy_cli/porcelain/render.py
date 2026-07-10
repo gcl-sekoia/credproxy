@@ -179,7 +179,7 @@ class Renderer:
             self._preset_summary(
                 name, p["preset"], p["bindings"], p["rules"],
                 p["newly_intercepted"], p["mounts"], p["env"],
-                p["skipped_env"], p["setup"], p.get("requires"))
+                p["setup"], p.get("requires"))
         # An ATTACHED workspace has no `start` (its containers are external);
         # the follow-up there is a config push.
         verb = "push" if attached else "start"
@@ -622,10 +622,10 @@ class Renderer:
     def _preset_summary(self, ws: str, preset: str, bindings: list[dict],
                         rules: list[dict], newly_intercepted: list[str],
                         mounts: list[dict], env: list[dict],
-                        skipped_env: list[str], setup: list[dict],
+                        setup: list[dict],
                         requires: list[dict] | None = None) -> None:
-        """The per-preset stamp summary (header + item lines + skipped-env /
-        newly-intercepted advisories), shared by `preset_applied` and `create`'s
+        """The per-preset summary (header + item lines + newly-intercepted
+        advisory), shared by `preset_applied` and `create`'s
         per-entry announcement. No push hint / recreate warning -- those are the
         caller's (they differ between add and create)."""
         nb, nr = len(bindings), len(rules)
@@ -652,9 +652,6 @@ class Renderer:
         for s in setup:
             u = "" if s.get("user", "workspace") == "workspace" else f" ({s['user']})"
             print(f"  setup   [{s['order']}] {s['run']}{u}")
-        if skipped_env:
-            say("env already set to the same value (left unchanged): "
-                + ", ".join(skipped_env))
         if newly_intercepted:
             say("newly intercepted (TLS-terminated) host(s): "
                 + ", ".join(newly_intercepted)
@@ -677,74 +674,14 @@ class Renderer:
                        rules: list[dict], newly_intercepted: list[str],
                        mounts: list[dict] | None = None,
                        env: list[dict] | None = None,
-                       skipped_env: list[str] | None = None,
                        setup: list[dict] | None = None,
                        recreate: bool = False,
                        attached: bool = False,
                        requires: list[dict] | None = None) -> None:
         self._preset_summary(ws, preset, bindings, rules, newly_intercepted,
-                             mounts or [], env or [], skipped_env or [],
+                             mounts or [], env or [],
                              setup or [], requires or [])
         if recreate:
-            say("container-half config changed the workspace spec -- "
-                f"restart to apply: credproxy workspace {ws} start")
-        _say_push_hint(ws, attached)
-
-    # -- preset refresh --
-    def preset_refreshed(self, ws: str, results: list[dict], *,
-                         newly_intercepted: list[str], container_changed: bool,
-                         attached: bool, skipped_unresolved: list[str],
-                         skipped_attached: list[str] | None = None,
-                         container_exists: bool = False) -> None:
-        skipped_attached = skipped_attached or []
-        # Human-readable action verbs (the JSON keeps the terse kebab forms).
-        verb = {"up-to-date": "up to date", "updated": "updated",
-                "skipped-edited": "skipped (hand-edited)",
-                "skipped-divergent": "skipped (bindings hand-edited apart)",
-                "skipped-collision": "skipped (collides with existing config)",
-                "added": "added",
-                "prunable": "vanished (use --prune to remove)",
-                "pruned": "pruned"}
-        any_change = False
-        for r in results:
-            acts = r["actions"]
-            tally: dict[str, int] = {}
-            for a in acts:
-                tally[a["action"]] = tally.get(a["action"], 0) + 1
-            summary = ", ".join(
-                f"{tally[k]} {verb[k]}" for k in
-                ("updated", "added", "pruned", "skipped-edited",
-                 "skipped-divergent", "skipped-collision",
-                 "prunable", "up-to-date") if k in tally)
-            if r["changed"]:
-                any_change = True
-            print(f"refreshed preset '{r['preset']}' in workspace '{ws}': "
-                  f"{summary or 'nothing to do'}")
-            for a in acts:
-                mark = verb[a["action"]]
-                print(f"  {a['kind']:<8} {a['target']:<16} {mark}")
-            for a in acts:
-                if a["action"] == "skipped-edited" and a.get("diff"):
-                    print(f"  --- diff for {a['kind']} {a['target']} "
-                          f"(hand-edited; not overwritten) ---")
-                    for ln in a["diff"].splitlines():
-                        print(f"  {ln}")
-        for name in skipped_unresolved:
-            say(f"preset '{name}' is no longer in the registry -- skipped "
-                f"(its stamped blocks are left as-is)")
-        for name in skipped_attached:
-            say(f"preset '{name}' carries container-half config (mounts/env/"
-                f"setup) -- skipped on this attached workspace (its container is "
-                f"external; only binding/rule-only packs refresh here)")
-        if newly_intercepted:
-            say("newly intercepted (TLS-terminated) host(s): "
-                + ", ".join(newly_intercepted)
-                + " -- a workspace that hasn't bootstrapped the CA will see a "
-                  "cert error there until it does")
-        if not any_change:
-            say("already up to date -- nothing written")
-            return
-        if container_changed and container_exists:
             say("container-half config changed the workspace spec -- "
                 f"restart to apply: credproxy workspace {ws} start")
         _say_push_hint(ws, attached)
@@ -776,6 +713,9 @@ class JsonRenderer(Renderer):
 
     def created(self, name: str, path: str, attached: bool = False,
                 presets: list[dict] | None = None) -> None:
+        # `presets` announce entries carry NO binding `placeholder`: `create`
+        # writes no lock, so the shared placeholder is minted only at the first
+        # persisting resolve (`_expand_template_presets` strips the sentinel).
         obj = {"name": name, "config_path": path}
         if presets:
             obj["presets"] = presets
@@ -899,7 +839,6 @@ class JsonRenderer(Renderer):
                        rules: list[dict], newly_intercepted: list[str],
                        mounts: list[dict] | None = None,
                        env: list[dict] | None = None,
-                       skipped_env: list[str] | None = None,
                        setup: list[dict] | None = None,
                        recreate: bool = False,
                        attached: bool = False,
@@ -907,20 +846,8 @@ class JsonRenderer(Renderer):
         self._emit({"workspace": ws, "preset": preset, "bindings": bindings,
                     "rules": rules, "newly_intercepted": newly_intercepted,
                     "mounts": mounts or [], "env": env or [],
-                    "skipped_env": skipped_env or [], "setup": setup or [],
+                    "setup": setup or [],
                     "recreate": recreate, "requires": requires or []})
-
-    def preset_refreshed(self, ws: str, results: list[dict], *,
-                         newly_intercepted: list[str], container_changed: bool,
-                         attached: bool, skipped_unresolved: list[str],
-                         skipped_attached: list[str] | None = None,
-                         container_exists: bool = False) -> None:
-        self._emit({"workspace": ws, "presets": results,
-                    "newly_intercepted": newly_intercepted,
-                    "container_changed": container_changed,
-                    "container_exists": container_exists,
-                    "skipped_unresolved": skipped_unresolved,
-                    "skipped_attached": skipped_attached or []})
 
     def provider_show(self, info: dict) -> None:
         self._emit(info)

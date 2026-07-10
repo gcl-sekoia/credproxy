@@ -242,6 +242,8 @@ def push_workspace(ws: Workspace, notify: Notify = _noop, *,
     with core_push.workspace_push_lock(ws):
         notify("pushing config...")
         resolved = resolve_workspace(ws)
+        for n in resolved.notes:
+            notify(f"note: {n}")
         if resolved.lock_dirty:
             save_lock(ws, resolved.lock)
         bindings, rules = resolved.bindings, resolved.rules
@@ -919,7 +921,16 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
         notify(f"created workspace '{ws.name}'")
 
     meta = ImageEnv.load()
-    cfg = load_config(ws)
+    # Resolve once (config-v2): `resolved.config` is the container half with any
+    # `[[preset]]` container half (mounts/env/setup) merged in and binds
+    # existence-checked (check_bind_exists=True), so a preset mount feeds the spec
+    # hash exactly like a stamped one; `resolved.bindings`/`.rules` are the merged
+    # (literal + preset) set the push below uses.
+    from ..model.resolver import resolve_workspace
+    resolved = resolve_workspace(ws, check_bind_exists=True)
+    for n in resolved.notes:
+        notify(f"note: {n}")
+    cfg = resolved.config
     _reserved_uid_check(cfg, meta)
 
     ensure_token(ws)
@@ -968,11 +979,10 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
     # Push the bindings config -- but on the `enter` fast path, skip it (and the
     # provider calls it implies) when the already-running proxy reports the
     # intended config's fingerprint. The proxy's tmpfs config does not survive a
-    # restart, so a (re)started proxy (proxy_fresh) always gets a push.
+    # restart, so a (re)started proxy (proxy_fresh) always gets a push. `resolved`
+    # (bindings/rules/config, lock) was computed up front.
     from ..model.lock import save_lock
-    from ..model.resolver import resolve_workspace
     from ..model.rules import combined_fingerprint
-    resolved = resolve_workspace(ws)
     if resolved.lock_dirty:
         save_lock(ws, resolved.lock)
     bindings, rules = resolved.bindings, resolved.rules
@@ -1105,7 +1115,8 @@ def recreate_workspace(ws: Workspace, notify: Notify = _noop,
     # reporting success. (A declared-but-not-yet-created volume is fine to
     # "reset" -- the removal below tolerates a missing one.)
     if reset_volumes:
-        cfg = load_config(ws)
+        from ..model.resolver import resolve_workspace
+        cfg = resolve_workspace(ws).config
         allowed = {m["name"] for m in cfg["mounts"] if m["kind"] == "volume"}
         unknown = sorted(v for v in reset_volumes if v not in allowed)
         if unknown:
@@ -1151,8 +1162,9 @@ def add_managed_volume(ws: Workspace, *, name: str, target: str,
     duplicate target/name), so a bad request fails before anything is touched.
     A volume named `home` is the `home = "..."` sugar, handled by write_added_mount."""
     from ..model import config as core_config
+    from ..model.resolver import resolve_workspace
 
-    cfg = load_config(ws)
+    cfg = resolve_workspace(ws).config
 
     # ---- validate up front (touch nothing until this passes) ----
     if not target.startswith("/"):
@@ -1529,7 +1541,10 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
     if not ws.exists():
         raise WorkspaceError(f"workspace '{ws.name}' not found")
 
-    cfg = load_config(ws)
+    # `resolved.config` folds in any `[[preset]]` container half (config-v2), so
+    # drift compares the effective set (binds existence-checked like `start`).
+    resolved = resolve_workspace(ws, check_bind_exists=True)
+    cfg = resolved.config
 
     if cfg.get("attach") is not None:
         return _inspect_attached(ws, cfg)
@@ -1546,7 +1561,6 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
         except (ImageError, DockerError):
             host_port = None
 
-    resolved = resolve_workspace(ws)
     bindings = tuple(
         BindingSummary(
             name=b.name,
@@ -1644,13 +1658,16 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
             f"start it first (`credproxy workspace {ws.name} start`)"
         )
 
-    cfg = load_config(ws)
     meta = ImageEnv.load()
     host_port = docker.resolve_host_port(ws.proxy_container, meta.http_port)
 
     # Read current configured bindings/rules (placeholders bound from the lock,
     # no secret fetch, no push yet). resolve_workspace is side-effect-free.
-    resolved = resolve_workspace(ws)
+    # `resolved.config` folds in any `[[preset]]` container half for drift.
+    resolved = resolve_workspace(ws, check_bind_exists=True)
+    for n in resolved.notes:
+        notify(f"note: {n}")
+    cfg = resolved.config
 
     # Persist any newly-minted placeholders ONCE, up front, before drift and
     # push. This keeps the placeholder identity deterministic: the drift report

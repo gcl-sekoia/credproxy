@@ -4,9 +4,10 @@ An option supplies the ENTIRE value of a host-half field (a mount `bind`/`volume
 source, a `[[requires]]` path) via a STRUCTURAL `{ option = "id" }` marker -- never
 a token inside a string. It resolves at expansion time: explicit `--opt id=value`
 (or a template `[preset.options]` table) -> prompt (loose+TTY only) -> declared
-`default` -> fail with the structured `{preset, missing}` error. The resolved
-whole value lands as literal config in the stamped mount; the marker never reaches
-the workspace TOML. `preset refresh` reads the value back from the stamped mount.
+`default` -> fail with the structured `{preset, missing}` error. The option value
+is recorded in the `[[preset]]` reference (`[preset.options]`) and the resolved
+whole value lands as literal config in the lock snapshot's expansion; the marker
+never reaches the workspace TOML or the snapshot.
 """
 from __future__ import annotations
 
@@ -41,6 +42,16 @@ def _make_ws(name: str, content: str = 'image = "python:3.12-slim"\n'):
 def _config_text(name: str) -> str:
     from credproxy_cli.core.paths import workspaces_config_dir
     return (workspaces_config_dir() / f"{name}.toml").read_text()
+
+
+def _mount_source(name: str, target: str):
+    """The resolved (expand_bind=False) source of the mount at `target`."""
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    from credproxy_cli.core.model.workspace import Workspace
+    cfg = resolve_workspace(Workspace(name)).config
+    m = next(m for m in cfg["mounts"]
+             if m["target"].rstrip("/") == target.rstrip("/"))
+    return m.get("source") or m.get("name")
 
 
 # A container-only pack whose mount source is supplied by a `sock_dir` option and
@@ -334,17 +345,19 @@ def test_resolve_prompt_supplies_value(xdg):
     assert missing == [] and vals == {"sock_dir": "/prompted"}
 
 
-# ---- whole-field substitution: literal in stamp, marker gone -----------------
+# ---- whole-field substitution: literal in the reference, marker gone ---------
 
 
-def test_preset_add_stamps_literal_from_default(xdg):
+def test_preset_add_records_literal_from_default(xdg):
     _write_preset("gitsign", _OPT_PRESET)
     _make_ws("w")
     code, out, err = _run(["workspace", "w", "preset", "add", "gitsign"])
     assert code == 0, out + err
+    # The resolved value comes from the option default; the `[[preset]]` reference
+    # records it explicitly in `[preset.options]` (the expansion lives in the lock).
+    assert _mount_source("w", "/ssh-agent") == "~/.ssh/credproxy-agent"
     text = _config_text("w")
-    assert 'bind = "~/.ssh/credproxy-agent"' in text
-    assert "option" not in text            # the marker never reaches the config
+    assert "[preset.options]" in text and "credproxy-agent" in text
 
 
 def test_preset_add_opt_overrides_default(xdg):
@@ -353,9 +366,8 @@ def test_preset_add_opt_overrides_default(xdg):
     code, out, err = _run(["workspace", "w", "preset", "add", "gitsign",
                            "--opt", "sock_dir=/tmp/agent"])
     assert code == 0, out + err
-    text = _config_text("w")
-    assert 'bind = "/tmp/agent"' in text
-    assert "credproxy-agent" not in text
+    assert _mount_source("w", "/ssh-agent") == "/tmp/agent"
+    assert "credproxy-agent" not in _config_text("w")
 
 
 def test_bad_opt_syntax_fails(xdg):
@@ -408,7 +420,7 @@ def test_missing_required_loose_tty_prompts(xdg, monkeypatch):
     code, out, err = _run_loose(["workspace", "w", "preset", "add", "req"],
                                 stdin_text="", stdin_isatty=True)
     assert code == 0, out + err
-    assert 'bind = "/from-prompt"' in _config_text("w")
+    assert _mount_source("w", "/ssh-agent") == "/from-prompt"
 
 
 def test_strict_never_prompts_even_with_tty(xdg, monkeypatch):
@@ -447,7 +459,7 @@ def test_template_options_supply_value(xdg):
     """))
     code, out, err = _run(["workspace", "create", "proj"])
     assert code == 0, out + err
-    assert 'bind = "/tmpl/agent"' in _config_text("proj")
+    assert _mount_source("proj", "/ssh-agent") == "/tmpl/agent"
 
 
 def test_template_missing_required_option_fails_json(xdg):
@@ -470,7 +482,7 @@ def test_template_option_prompt_loose_tty(xdg, monkeypatch):
     code, out, err = _run_loose(["workspace", "create", "proj"],
                                 stdin_text="", stdin_isatty=True)
     assert code == 0, out + err
-    assert 'bind = "/tmpl-prompt"' in _config_text("proj")
+    assert _mount_source("proj", "/ssh-agent") == "/tmpl-prompt"
 
 
 # ---- provider/secret prompting (decision 4) ----------------------------------
@@ -535,87 +547,6 @@ def test_secret_validate_at_prompt_loops(xdg, monkeypatch):
 # ---- refresh read-back -------------------------------------------------------
 
 
-def test_refresh_preserves_option_value(xdg, tmp_path):
-    # An option-fed bind source that need NOT exist yet (S4): refresh's validation
-    # re-loads defer bind existence to `start`, so no mkdir is needed here.
-    agent = tmp_path / "agent"
-    _write_preset("gitsign", _OPT_PRESET)
-    _make_ws("w")
-    _run(["workspace", "w", "preset", "add", "gitsign",
-          "--opt", f"sock_dir={agent}"])
-    assert f'bind = "{agent}"' in _config_text("w")
-    # Refresh must NOT reset the option-derived value back to the default.
-    code, out, err = _run(["workspace", "w", "preset", "refresh", "gitsign"])
-    assert code == 0, out + err
-    text = _config_text("w")
-    assert f'bind = "{agent}"' in text
-    assert "credproxy-agent" not in text
-
-
-def test_refresh_option_value_survives_definition_change(xdg, tmp_path):
-    agent = tmp_path / "agent"   # need not exist (S4: bind existence deferred)
-    _write_preset("gitsign", _OPT_PRESET)
-    _make_ws("w")
-    _run(["workspace", "w", "preset", "add", "gitsign",
-          "--opt", f"sock_dir={agent}"])
-    # Change the pack: add an env var. The mount's option-derived source must
-    # still round-trip from the stamped value (not reset to the default).
-    _write_preset("gitsign", _OPT_PRESET + '\n    [env]\n    FOO = "bar"\n')
-    code, out, err = _run(["workspace", "w", "preset", "refresh", "gitsign"])
-    assert code == 0, out + err
-    text = _config_text("w")
-    assert f'bind = "{agent}"' in text
-    assert 'FOO = "bar"' in text
-
-
-# ---- doctor requires-only option degrades to skip-with-note ------------------
-
-
-def test_doctor_requires_only_option_skips(xdg):
-    """An option feeding ONLY a `[[requires]]` path (nowhere stamped) and with no
-    default is unrecoverable at doctor time -> skip-with-note, never a crash."""
-    _write_preset("ronly", """
-        [placeholder]
-        prefix = "t_"
-        length = 12
-        charset = "alnumeric"
-
-        [[part]]
-        suffix = "api"
-        injector = "bearer"
-        hosts = ["api.svc.example.com"]
-
-        [[option]]
-        id = "sock_dir"
-        type = "string"
-        description = "socket dir"
-
-        [[requires]]
-        kind = "path"
-        path = { option = "sock_dir" }
-        hint = "start the agent"
-    """)
-    _make_ws("w")
-    # Supply the option at add so the pack stamps (it's only used in requires).
-    code, out, err = _run(["workspace", "w", "preset", "add", "ronly",
-                           "--provider", "env", "--secret", "TOK",
-                           "--opt", "sock_dir=/tmp/x"])
-    assert code == 0, out + err
-    from credproxy_cli.core.engine import doctor
-    from credproxy_cli.core.model.workspace import Workspace
-    checks = doctor._preset_requires_checks(Workspace("w"), fetch=False)
-    notes = [c for c in checks if "used only here" in c.message]
-    assert notes and all(c.ok for c in notes)
-
-
-# ============================================================================
-# #59 v3 review follow-ups (S1-S4, N1-N7)
-# ============================================================================
-
-
-# ---- S1: EOF at a required prompt fails closed (no infinite busy-loop) --------
-
-
 def test_eof_at_required_prompt_aborts_no_loop(xdg):
     """A genuine EOF (closed stdin) at a required-value prompt ABORTS cleanly
     rather than spinning forever re-prompting (S1). The real `ask_option` runs
@@ -676,55 +607,6 @@ _GOOD_CMD = """
 """
 
 
-def test_doctor_stale_enum_option_reports_and_continues(xdg):
-    """A stale stamped enum value (a choice later dropped from `choices`) makes
-    `coerce_option_value` raise during the doctor re-run; the sweep must report a
-    FAILING check for that pack and STILL run every other pack's checks (S2)."""
-    # Choices are existing dirs so the advisory add-time prereq (the option also
-    # feeds a `path` requires) passes cleanly.
-    _write_preset("stale", _STALE_ENUM.replace("{choices}", '/tmp", "/usr'))
-    _write_preset("good", _GOOD_CMD)
-    _make_ws("w")
-    assert _run(["workspace", "w", "preset", "add", "stale",
-                 "--opt", "mode=/tmp"])[0] == 0
-    assert _run(["workspace", "w", "preset", "add", "good"])[0] == 0
-    # Drop "/tmp" from the enum's choices -> the stamped value is now stale.
-    _write_preset("stale", _STALE_ENUM.replace("{choices}", "/usr"))
-    from credproxy_cli.core.engine import doctor
-    from credproxy_cli.core.model.workspace import Workspace
-    checks = doctor._preset_requires_checks(Workspace("w"), fetch=False)
-    stale = [c for c in checks if "stale" in c.id]
-    good = [c for c in checks if "good" in c.id]
-    assert stale and any(not c.ok for c in stale)   # failing check emitted
-    assert good                                     # the OTHER pack still ran
-
-
-# ---- S3: refresh dead-ends with a refresh-appropriate remedy ------------------
-
-
-def test_refresh_unrecoverable_option_gives_refresh_remedy(xdg):
-    """When a refresh can't read back an option-fed mount's value (target changed)
-    and the option has no default, the error must cite the REFRESH remedy, not the
-    nonexistent `--opt` flag alone; and it must write nothing (S3)."""
-    _write_preset("gs", _OPT_REQUIRED)                # option-fed mount, target /ssh-agent
-    _make_ws("w")
-    assert _run(["workspace", "w", "preset", "add", "gs",
-                 "--opt", "sock_dir=/tmp/a"])[0] == 0
-    before = _config_text("w")
-    # Re-target the option-fed mount so read-back joins on a target that no longer
-    # matches the stamped mount.
-    _write_preset("gs", _OPT_REQUIRED.replace('target = "/ssh-agent"',
-                                              'target = "/moved"'))
-    code, out, err = _run(["workspace", "w", "preset", "refresh", "gs"])
-    assert code == 1
-    msg = out + err
-    assert "could not recover option" in msg
-    assert "restore the stamped mount" in msg or "re-add the pack" in msg
-    assert _config_text("w") == before             # fail-closed: no write
-
-
-# ---- S4: option-fed bind sources that don't exist yet -----------------------
-
 
 _NOPE_A = """
     [[mount]]
@@ -745,20 +627,6 @@ _NOPE_B = """
 """
 
 
-def test_refresh_option_fed_missing_bind_is_byte_for_byte_noop(xdg, tmp_path):
-    """Refresh of an option-fed pack whose bind source does NOT exist yet is a
-    clean no-op -- the config bytes are unchanged (S4a / N7)."""
-    agent = tmp_path / "does-not-exist"    # never created
-    _write_preset("gitsign", _OPT_PRESET)
-    _make_ws("w")
-    assert _run(["workspace", "w", "preset", "add", "gitsign",
-                 "--opt", f"sock_dir={agent}"])[0] == 0
-    before = _config_text("w")
-    code, out, err = _run(["workspace", "w", "preset", "refresh", "gitsign"])
-    assert code == 0, out + err
-    assert _config_text("w") == before             # byte-for-byte identical
-
-
 def test_multi_preset_create_with_missing_bind_sources(xdg):
     """A multi-`[[preset]]` template create succeeds even when entry 1 stamps a
     bind source that doesn't exist yet -- entry 2's validation re-load must not
@@ -773,8 +641,8 @@ def test_multi_preset_create_with_missing_bind_sources(xdg):
     """))
     code, out, err = _run(["workspace", "create", "proj"])
     assert code == 0, out + err
-    text = _config_text("proj")
-    assert 'bind = "/nope/a"' in text and 'bind = "/nope/b"' in text
+    assert _mount_source("proj", "/a") == "/nope/a"
+    assert _mount_source("proj", "/b") == "/nope/b"
 
 
 def test_second_preset_add_with_missing_bind_source(xdg):
@@ -787,8 +655,8 @@ def test_second_preset_add_with_missing_bind_source(xdg):
     assert _run(["workspace", "w", "preset", "add", "nopea"])[0] == 0
     code, out, err = _run(["workspace", "w", "preset", "add", "nopeb"])
     assert code == 0, out + err
-    text = _config_text("w")
-    assert 'bind = "/nope/a"' in text and 'bind = "/nope/b"' in text
+    assert _mount_source("w", "/a") == "/nope/a"
+    assert _mount_source("w", "/b") == "/nope/b"
 
 
 # ---- N1: --yes suppresses prompting ------------------------------------------
@@ -821,7 +689,7 @@ def test_yes_takes_default_without_prompt(xdg, monkeypatch):
                                  "--yes"], stdin_text="", stdin_isatty=True)
     assert code == 0, out + err
     assert not called
-    assert 'bind = "~/.ssh/credproxy-agent"' in _config_text("w")
+    assert _mount_source("w", "/ssh-agent") == "~/.ssh/credproxy-agent"
 
 
 # ---- N2: option-fed requires path renders {option=id}, never None ------------
@@ -866,28 +734,6 @@ _OPT_MOUNT_AND_REQ = """
 """
 
 
-def test_doctor_note_splits_mount_retargeted(xdg):
-    """When an option feeds a MOUNT (recoverable in principle) but its stamped
-    mount was re-targeted, the skip-note says so -- not 'used only here' (N3)."""
-    _write_preset("gs", _OPT_MOUNT_AND_REQ)
-    _make_ws("w")
-    assert _run(["workspace", "w", "preset", "add", "gs",
-                 "--opt", "sock_dir=/tmp/a"])[0] == 0
-    # Re-target the option-fed mount so the read-back join misses.
-    _write_preset("gs", _OPT_MOUNT_AND_REQ.replace('target = "/ssh-agent"',
-                                                   'target = "/moved"'))
-    from credproxy_cli.core.engine import doctor
-    from credproxy_cli.core.model.workspace import Workspace
-    checks = doctor._preset_requires_checks(Workspace("w"), fetch=False)
-    notes = [c for c in checks if "requires-opt" in c.id]
-    assert notes and all(c.ok for c in notes)
-    assert any("missing or re-targeted" in c.message for c in notes)
-    assert not any("used only here" in c.message for c in notes)
-
-
-# ---- N4: free-typed unknown provider re-prompts ------------------------------
-
-
 def test_provider_prompt_reprompts_on_unknown(xdg, monkeypatch):
     """A free-typed name that isn't a registered provider re-prompts rather than
     returning an unresolvable name that errors out the command (N4)."""
@@ -912,11 +758,11 @@ def test_template_preset_options_tolerates_spacing(xdg):
     """))
     code, out, err = _run(["workspace", "create", "proj"])
     assert code == 0, out + err
+    assert _mount_source("proj", "/ssh-agent") == "/spaced/agent"
+    # The `[[preset]]` reference SURVIVES (config-v2), with a canonical
+    # `[preset.options]` sub-table carrying the resolved value.
     text = _config_text("proj")
-    assert 'bind = "/spaced/agent"' in text
-    # The `[[preset]]`/`[preset . options]` template constructs were stripped
-    # (provenance `# credproxy:preset` markers legitimately remain).
-    assert "[[preset]]" not in text and "[preset" not in text
+    assert "[[preset]]" in text and "[preset.options]" in text
 
 
 # ---- N6: unreferenced option surfaced to the pack author ---------------------

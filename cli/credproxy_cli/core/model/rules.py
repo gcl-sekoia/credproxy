@@ -490,12 +490,7 @@ def remove_rule(ws: Workspace, name: str) -> None:
             f"'{name}' isn't a removable `[[rule]]` block in {ws.config_path} "
             f"-- rewrite it as a `[[rule]]` table to remove it")
     start, end = spans[target]
-    # Fold away a preset provenance marker directly above the block (a stamped
-    # rule), then one preceding blank separator -- symmetric with
-    # `remove_binding`, so removing a stamped rule leaves no orphan marker.
-    from . import preset_stamp
-    if start > 0 and preset_stamp.is_marker_line(lines[start - 1]):
-        start -= 1
+    # Drop one preceding blank separator -- symmetric with `remove_binding`.
     if start > 0 and lines[start - 1].strip() == "":
         start -= 1
     del lines[start:end]

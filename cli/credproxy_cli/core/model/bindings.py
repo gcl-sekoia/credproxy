@@ -665,14 +665,8 @@ def remove_binding(ws: Workspace, name: str) -> None:
             f"'{name}' isn't a removable `[[binding]]` block in {ws.config_path} "
             f"-- rewrite it as a `[[binding]]` table to remove it")
     start, end = spans[target]
-    # If this block was preset-stamped, fold away the `# credproxy:preset ...`
-    # provenance marker line the stamp wrote directly above it -- else removing
-    # the block would orphan the marker, which #58 doctor keeps reading as an
-    # applied pack forever ("stamped binding missing?"). Then drop one preceding
-    # blank separator, so repeated add/remove doesn't accumulate blank lines.
-    from . import preset_stamp
-    if start > 0 and preset_stamp.is_marker_line(lines[start - 1]):
-        start -= 1
+    # Drop one preceding blank separator, so repeated add/remove doesn't
+    # accumulate blank lines.
     if start > 0 and lines[start - 1].strip() == "":
         start -= 1
     del lines[start:end]

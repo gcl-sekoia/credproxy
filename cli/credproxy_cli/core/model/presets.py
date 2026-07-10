@@ -9,9 +9,13 @@ overlay's `readonly-guard.star` wired to its hosts/params in one `preset add`.
 Either half may be empty: a credential-only preset (`[[part]]` only) or a
 pure-rule policy pack (`[[rule]]` only, no `[placeholder]`/provider/secret).
 
-A preset is pure host-side config **expansion, not a link**: it stamps ordinary
-`[[binding]]` + `[[rule]]` blocks; the proxy never sees a "preset", and
-editing/removing the stamped blocks afterwards is normal.
+A preset is a durable **reference** (config-v2): a `[[preset]]` block in the
+workspace TOML names a pack; the CLI's resolver (`core/model/resolver.py`)
+expands it at resolve time and snapshots the expansion in the lockfile. The proxy
+never sees a "preset" (the push wire is unchanged) -- the expanded bindings/rules
+and container half merge into the effective model as ordinary entries. A changed
+definition is inert until `preset refresh` re-expands; editing the reference's own
+inputs (provider/secret/options/disable/overrides) re-expands on the next resolve.
 
 Presets are *data*, loaded from the layered registry (user > overlays >
 builtin, paths.layered_dirs) -- a `<name>.toml` per preset, the name being the
@@ -22,7 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from . import rules as core_rules
 from .bindings import Binding
@@ -314,10 +318,10 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
                                       options=option_by_id)
                 for i, r in enumerate(requires_raw)]
 
-    # `order` (setup) and `target` (mount) are the JOIN KEYS `preset refresh`
-    # re-classifies each stamped element by, so they must be UNIQUE within a pack
-    # -- a duplicate would silently mis-join a refresh onto the wrong element.
-    # Reject it here, at definition parse (a well-defined join key up front).
+    # `order` (setup) and `target` (mount) are JOIN KEYS: the lock snapshots the
+    # expansion keyed by them, so they must be UNIQUE within a pack -- a duplicate
+    # would collide in the expanded mount/setup set. Reject it here, at definition
+    # parse (a well-defined join key up front).
     _reject_dup_join_keys(
         [s["order"] for s in setup], "setup", "order", src)
     _reject_dup_join_keys(
@@ -340,16 +344,16 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
 
 
 def _norm_mount_target(t: str) -> str:
-    """Normalize a mount target the same way `preset refresh` joins on it (trailing
-    slashes stripped), so `/opt/x` and `/opt/x/` count as the same target."""
+    """Normalize a mount target (trailing slashes stripped), so `/opt/x` and
+    `/opt/x/` count as the same target for uniqueness checks."""
     return t.rstrip("/") or "/"
 
 
 def _reject_dup_join_keys(keys: list, kind: str, field: str, src: str) -> None:
     """Reject a duplicate join key across a pack's elements. `keys` is the ordered
     list of each element's `field` value (already normalized). A duplicate is a
-    definition error -- `preset refresh` joins stamped elements to definition
-    elements by this key, so it must be unique per pack."""
+    definition error -- the lock snapshots the expansion keyed by this field, so it
+    must be unique per pack."""
     seen: set = set()
     dups: list = []
     for k in keys:
@@ -360,8 +364,7 @@ def _reject_dup_join_keys(keys: list, kind: str, field: str, src: str) -> None:
         shown = ", ".join(repr(d) for d in dups)
         raise ConfigError(
             f"{src}: duplicate [[{kind}]] {field} ({shown}) -- each {kind} needs "
-            f"a unique {field} (it is the join key `preset refresh` re-classifies "
-            f"by)")
+            f"a unique {field}")
 
 
 def _parse_preset_option(o, i: int, src: str) -> _Option:
@@ -830,7 +833,7 @@ class TemplatePreset:
     name: str
     provider: str | None
     secret: str | None
-    options: dict = None  # {id: value}, from the `[preset.options]` sub-table
+    options: dict = field(default_factory=dict)  # {id: value}, from `[preset.options]`
 
 
 def parse_template_presets(raw: dict, source: str) -> list[TemplatePreset]:
@@ -1123,9 +1126,10 @@ def _validate_require_path(val: str, preset: str, opt_id: str) -> None:
 
 @dataclass(frozen=True)
 class PresetExpansion:
-    """A preset expanded for stamping: the ordinary blocks/config it writes into
-    a workspace TOML. `rev` (the definition-file digest) rides every provenance
-    marker. Mounts/env/setup are the container half."""
+    """A preset expanded: the ordinary bindings/rules/container-half it merges into
+    a workspace's effective model (and the CLI snapshots in the lockfile). `rev`
+    (the definition-file digest) pins the snapshot to a pack revision.
+    Mounts/env/setup are the container half."""
     name: str
     rev: str
     bindings: tuple[Binding, ...]
@@ -1142,26 +1146,26 @@ class PresetExpansion:
 def build_preset(preset: str, provider: str | None = None,
                  secret: str | None = None,
                  options: dict | None = None,
-                 context: str = "add") -> PresetExpansion:
+                 context: str = "add",
+                 placeholder: str | None = None) -> PresetExpansion:
     """Expand `preset` into a `PresetExpansion`. All bindings share one
-    freshly-generated placeholder and resolve the same single-slot `secret` ref
-    via `provider` (both None for a pack with no bindings). Each rule's `name` is
-    filled to `<preset>-<suffix>`. Mounts/env/setup carry through verbatim.
-    Raises CredproxyError on an unknown preset.
+    placeholder (freshly generated, or `placeholder` when the caller reuses one
+    from the lock) and resolve the same single-slot `secret` ref via `provider`
+    (both None for a pack with no bindings). Each rule's `name` is filled to
+    `<preset>-<suffix>`. Mounts/env/setup carry through verbatim. Raises
+    CredproxyError on an unknown preset.
 
     `options` (#59) maps resolved option ids to values; when the pack declares
     `[[option]]`s they are substituted into the host-half markers (mount source)
-    BEFORE stamping, so the expansion is entirely literal. A missing value falls
+    BEFORE expansion, so the expansion is entirely literal. A missing value falls
     back to the option's default; an option with neither raises (porcelain resolves
     + reports the structured missing error before reaching here). `context`
-    (`"add"` | `"refresh"`) flavors that unresolved-option remedy (S3: refresh has
-    no `--opt` flag, so its remedy points at the read-back/re-add path)."""
+    (`"add"` | `"refresh"`) flavors that unresolved-option remedy."""
     spec = get_preset(preset)
     if spec.options:
-        # Mount-only substitution: the expansion carries no requires, so a
-        # requires-only option (which `refresh` can't read back) is never needed.
         spec = _substitute_mount_options(spec, options or {}, context)
-    placeholder = spec.placeholder.generate() if spec.placeholder else None
+    if placeholder is None:
+        placeholder = spec.placeholder.generate() if spec.placeholder else None
     bindings = tuple(
         Binding(
             name=f"{spec.name}-{part.suffix}",
@@ -1180,3 +1184,265 @@ def build_preset(preset: str, provider: str | None = None,
         name=spec.name, rev=spec.rev, bindings=bindings, rules=rules,
         mounts=spec.mounts, env=spec.env, setup=spec.setup,
     )
+
+
+# ---- intent-file `[[preset]]` references (config-v2) -------------------------
+
+
+@dataclass(frozen=True)
+class PresetRef:
+    """One `[[preset]]` reference in a workspace TOML (config-v2). A durable
+    pointer to a pack the resolver expands at resolve time and snapshots in the
+    lock. `provider`/`secret` may be omitted (pack defaults fill them at
+    expansion); `options` supplies pack `[[option]]` values; `disable` omits
+    part/rule suffixes from the expansion; `overrides` whole-field replaces a
+    binding/rule field by suffix. All are the operator's INPUTS -- the lock keys
+    the snapshot's reuse on them (a change re-expands on the next resolve)."""
+    name: str
+    provider: str | None
+    secret: str | dict | None
+    options: dict                 # {id: value}
+    disable: tuple[str, ...]      # part/rule suffixes to drop
+    overrides: dict               # {suffix: {field: value}}
+
+
+# Fields a `[preset.override.<suffix>]` may NOT replace: the identity that names
+# the expanded binding/rule (its `name`), a part's declared `suffix`, and the
+# generated shared `placeholder` (the pack's stable identity, reused from the lock
+# and never rotated -- overriding it would displace the recorded shared value).
+_OVERRIDE_FORBIDDEN = ("name", "suffix", "placeholder")
+
+# Fields a `[preset.override.<suffix>]` targeting a BINDING may replace: the
+# overridable `[[binding]]` fields, minus the identity/generated ones already in
+# `_OVERRIDE_FORBIDDEN` (`name`/`placeholder`). An unknown key here (e.g. `host`
+# for `hosts`) is a typo that would silently no-op forever, so it errors.
+_BINDING_OVERRIDE_FIELDS = ("hosts", "injector", "provider", "secret", "env")
+
+
+def parse_preset_refs(raw: dict, source: str) -> list[PresetRef]:
+    """Extract + validate the `[[preset]]` references from a parsed workspace
+    TOML. `source` labels errors. Returns [] when there are none. Known keys only
+    (`name`/`provider`/`secret`/`disable`/`options`/`override`); `disable` and
+    `override` suffixes are checked against the pack AT EXPANSION (the pack defines
+    the valid suffixes, not the loader)."""
+    entries_raw = raw.get("preset")
+    if entries_raw is None:
+        return []
+    if not isinstance(entries_raw, list):
+        raise ConfigError(f"{source}: `[[preset]]` must be an array of tables")
+    allowed = {"name", "provider", "secret", "disable", "options", "override"}
+    out: list[PresetRef] = []
+    seen: set[str] = set()
+    for i, e in enumerate(entries_raw):
+        where = f"{source}: preset[{i}]"
+        if not isinstance(e, dict):
+            raise ConfigError(f"{where} must be a table")
+        extra = sorted(set(e) - allowed)
+        if extra:
+            raise ConfigError(
+                f"{where} unknown key(s): {', '.join(extra)} "
+                f"(allowed: {', '.join(sorted(allowed))})")
+        name = e.get("name")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"{where} 'name' must be a non-empty string")
+        if name in seen:
+            raise ConfigError(
+                f"{where} duplicate `[[preset]]` reference for {name!r} "
+                f"(each pack is referenced once)")
+        seen.add(name)
+        where = f"{source}: preset '{name}'"
+        provider = e.get("provider")
+        if provider is not None and (not isinstance(provider, str) or not provider):
+            raise ConfigError(f"{where}: 'provider' must be a non-empty string")
+        secret = _parse_ref_secret(e.get("secret"), where)
+        disable = _parse_ref_disable(e.get("disable"), where)
+        options = e.get("options")
+        if options is not None and not isinstance(options, dict):
+            raise ConfigError(
+                f"{where}: 'options' must be a `[preset.options]` table of "
+                f"`id = value` pairs")
+        overrides = _parse_ref_overrides(e.get("override"), where)
+        out.append(PresetRef(
+            name=name, provider=provider, secret=secret,
+            options=dict(options) if options else {},
+            disable=disable, overrides=overrides))
+    return out
+
+
+def _parse_ref_secret(secret, where: str):
+    """A `[[preset]]` `secret`: a single ref (str) or a `{slot = ref}` table
+    (multi-slot), mirroring `preset add`'s one `--secret`, or absent (None)."""
+    if secret is None:
+        return None
+    if isinstance(secret, str):
+        if not secret:
+            raise ConfigError(f"{where}: 'secret' must be a non-empty string")
+        return secret
+    if isinstance(secret, dict):
+        if not secret or not all(
+                isinstance(k, str) and k and isinstance(v, str) and v
+                for k, v in secret.items()):
+            raise ConfigError(
+                f"{where}: 'secret' table must map non-empty slot names to "
+                f"non-empty refs")
+        return dict(secret)
+    raise ConfigError(f"{where}: 'secret' must be a string or a {{slot = ref}} table")
+
+
+def _parse_ref_disable(disable, where: str) -> tuple[str, ...]:
+    if disable is None:
+        return ()
+    if not isinstance(disable, list) or not all(
+            isinstance(s, str) and s for s in disable):
+        raise ConfigError(
+            f"{where}: 'disable' must be an array of non-empty suffix strings")
+    return tuple(disable)
+
+
+def _parse_ref_overrides(override, where: str) -> dict:
+    """A `[preset.override.<suffix>]` table-of-tables: each suffix maps to a table
+    of whole-field replacements. Identity fields (`name`/`suffix`) are refused."""
+    if override is None:
+        return {}
+    if not isinstance(override, dict):
+        raise ConfigError(
+            f"{where}: 'override' must be a `[preset.override.<suffix>]` "
+            f"table of per-suffix field tables")
+    out: dict = {}
+    for suffix, fields in override.items():
+        if not isinstance(suffix, str) or not suffix:
+            raise ConfigError(f"{where}: 'override' suffix keys must be non-empty")
+        if not isinstance(fields, dict):
+            raise ConfigError(
+                f"{where}: override '{suffix}' must be a table of field = value")
+        bad = sorted(set(fields) & set(_OVERRIDE_FORBIDDEN))
+        if bad:
+            raise ConfigError(
+                f"{where}: override '{suffix}' may not replace identity field(s): "
+                f"{', '.join(bad)}")
+        out[suffix] = dict(fields)
+    return out
+
+
+def preset_ref_inputs(ref: PresetRef) -> dict:
+    """The canonical, JSON-clean INPUTS of a `[[preset]]` ref -- what the lock
+    records so a later resolve can tell whether the operator changed the reference
+    (re-expand) or only the definition changed (stay inert). Omitted fields are
+    absent (a hand-authored ref that relies on pack defaults stays stable even if
+    a default changes); `disable` is sorted (order-insensitive)."""
+    d: dict = {}
+    if ref.provider is not None:
+        d["provider"] = ref.provider
+    if ref.secret is not None:
+        d["secret"] = dict(ref.secret) if isinstance(ref.secret, dict) else ref.secret
+    if ref.options:
+        d["options"] = dict(ref.options)
+    if ref.disable:
+        d["disable"] = sorted(ref.disable)
+    if ref.overrides:
+        d["overrides"] = {s: dict(f) for s, f in ref.overrides.items()}
+    return d
+
+
+def _suffix_of(preset: str, name: str) -> str:
+    """The `<suffix>` of an expanded `<preset>-<suffix>` binding/rule name."""
+    prefix = f"{preset}-"
+    return name[len(prefix):] if name.startswith(prefix) else name
+
+
+def _binding_to_dict(b: "Binding") -> dict:
+    """Serialize a Binding to the intent-level dict a `[[binding]]` table parses
+    to (via the shared renderer, so the round-trip is exact)."""
+    from .bindings import _render_binding_block
+    return tomllib.loads(_render_binding_block(b))["binding"][0]
+
+
+def _rule_to_dict(r: "core_rules.Rule") -> dict:
+    return tomllib.loads(core_rules._render_rule_block(r))["rule"][0]
+
+
+def expansion_to_lock(exp: PresetExpansion, ref: PresetRef) -> dict:
+    """Apply a ref's `disable`/`override` to `exp` and serialize the result to the
+    lock's intent-level `expansion` dicts. Validates that every `disable`/`override`
+    suffix names a real part/rule suffix of the pack (raising otherwise, naming the
+    valid suffixes). The shared placeholder is read off the bindings.
+
+    Returns the `expansion` mapping `{bindings, rules, mounts, env, setup}` (all
+    JSON-clean); the caller wraps it with `definition_rev`/`inputs`/`placeholder`."""
+    valid = {_suffix_of(exp.name, b.name) for b in exp.bindings} \
+        | {_suffix_of(exp.name, r.name) for r in exp.rules}
+
+    def _check(suffixes, what):
+        bad = [s for s in suffixes if s not in valid]
+        if bad:
+            raise ConfigError(
+                f"preset '{exp.name}': {what} names unknown suffix(es) "
+                f"{', '.join(repr(s) for s in bad)} -- valid suffixes: "
+                f"{', '.join(sorted(valid)) or '(none)'}")
+
+    _check(ref.disable, "disable")
+    _check(ref.overrides, "override")
+
+    # Validate binding-override field names for EVERY overridden binding suffix,
+    # BEFORE the disable filter -- a typo in a disabled binding's override should
+    # still error (a disabled entry is dropped, so an in-loop check would silently
+    # skip it). Rule-override fields are validated at read-back by the rule parser.
+    binding_suffixes = {_suffix_of(exp.name, b.name) for b in exp.bindings}
+    for suffix, ov in ref.overrides.items():
+        if suffix not in binding_suffixes:
+            continue
+        bad = sorted(set(ov) - set(_BINDING_OVERRIDE_FIELDS))
+        if bad:
+            raise ConfigError(
+                f"preset '{exp.name}': override '{suffix}' names unknown binding "
+                f"field(s) {', '.join(repr(k) for k in bad)} -- overridable "
+                f"binding fields: {', '.join(_BINDING_OVERRIDE_FIELDS)}")
+
+    disabled = set(ref.disable)
+
+    b_dicts, r_dicts = [], []
+    for b in exp.bindings:
+        suffix = _suffix_of(exp.name, b.name)
+        if suffix in disabled:
+            continue
+        d = _binding_to_dict(b)
+        d.update(ref.overrides.get(suffix, {}))
+        b_dicts.append(d)
+    for r in exp.rules:
+        suffix = _suffix_of(exp.name, r.name)
+        if suffix in disabled:
+            continue
+        d = _rule_to_dict(r)
+        d.update(ref.overrides.get(suffix, {}))
+        r_dicts.append(d)
+
+    return {
+        "bindings": b_dicts,
+        "rules": r_dicts,
+        "mounts": [mount_table(m) for m in exp.mounts],
+        "env": {k: v for k, v in exp.env},
+        "setup": [dict(s) for s in exp.setup],
+    }
+
+
+def lock_expansion_to_model(name: str, expansion: dict, source: str):
+    """Reconstruct effective bindings/rules + container-half dicts from a lock
+    `expansion` snapshot, feeding each intent dict back through the SAME field
+    parsers the literal path uses -- so a preset part is held to identical
+    validation and produces identical `Binding`/`Rule` objects. Returns
+    `(bindings, rules, mounts, env, setup)`; `mounts`/`env`/`setup` are the raw
+    intent dicts (the engine re-normalizes mounts through `config._parse_mount`)."""
+    from .bindings import _parse_bindings, _require_binding_names
+    from .rules import _parse_rules, _require_rule_names
+
+    b_raw = {"binding": list(expansion.get("bindings", []))}
+    r_raw = {"rule": list(expansion.get("rules", []))}
+    src = f"{source}: preset '{name}'"
+    bindings = _parse_bindings(b_raw, src)
+    _require_binding_names(bindings, src)
+    rules = _parse_rules(r_raw, src)
+    _require_rule_names(rules, src)
+    mounts = list(expansion.get("mounts", []))
+    env = dict(expansion.get("env", {}))
+    setup = list(expansion.get("setup", []))
+    return bindings, rules, mounts, env, setup
