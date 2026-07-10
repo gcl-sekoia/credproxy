@@ -407,7 +407,7 @@ def test_rule_row_includes_params():
     """`rule list`/`inspect`/`rule_added` rows carry params (operator-plaintext),
     so the docs' "shown in rule list" claim is true -- #36 review."""
     from credproxy_cli.core.model.rules import Rule
-    from credproxy_cli.porcelain.cli import _rule_row
+    from credproxy_cli.porcelain.cmd_rule import _rule_row
     row = _rule_row(Rule(name="g", hosts=("h",), action="script", script="s",
                          params={"allow": ["/a"]}))
     assert row["params"] == {"allow": ["/a"]}

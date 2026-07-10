@@ -14,7 +14,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-MODEL_DIR = Path(__file__).resolve().parents[2] / "cli" / "credproxy_cli" / "core" / "model"
+CORE_DIR = Path(__file__).resolve().parents[2] / "cli" / "credproxy_cli" / "core"
+MODEL_DIR = CORE_DIR / "model"
 
 # Bare engine module names (as they'd appear in `from ..engine import X` or a
 # stray `from ..docker import ...`). The model plane must not import any of them.
@@ -116,3 +117,29 @@ def test_model_never_imports_porcelain():
                 offenders.append(f"{f.name}:{node.lineno} imports porcelain: {m}")
     assert not offenders, (
         "model/ modules must not import porcelain:\n" + "\n".join(offenders))
+
+
+def _core_files():
+    """Every module under core/ (model/, engine/, and the shared leaves at the
+    root like providers.py, errors.py, paths.py) -- recursively."""
+    return sorted(CORE_DIR.rglob("*.py"))
+
+
+def test_core_never_imports_porcelain():
+    """The WHOLE core plane (model + engine + shared leaves) is porcelain-free:
+    porcelain may import core, never the reverse. This is the plane boundary the
+    #67 cli split must not blur -- a `from ..porcelain import X` (or a nested
+    function-body import of it) anywhere under core/ would let engine/model code
+    reach up into the CLI front-end. AST-walked so a lazy in-function import is
+    caught too."""
+    offenders = []
+    for f in _core_files():
+        tree = ast.parse(f.read_text(), filename=str(f))
+        for mod, names, node in _imports(tree):
+            m = mod or ""
+            if "porcelain" in m.split(".") or "porcelain" in names:
+                rel = f.relative_to(CORE_DIR)
+                offenders.append(f"{rel}:{node.lineno} imports porcelain: {m}")
+    assert not offenders, (
+        "core/ modules must not import porcelain (porcelain imports core, never "
+        "the reverse):\n" + "\n".join(offenders))

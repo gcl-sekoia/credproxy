@@ -111,7 +111,7 @@ def test_loose_resolves_default_announced(xdg, workspaces_dir, monkeypatch):
         lambda ws, notify=None: notify("stub") if notify else None,
     )
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cli.lifecycle.start_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.lifecycle.start_workspace",
         lambda ws, notify=None: None,
     )
 
@@ -1156,11 +1156,11 @@ def _stub_recreate(monkeypatch):
     recreate's argument plumbing, not the image check (that has its own suite)."""
     calls: list = []
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cli.lifecycle.recreate_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.lifecycle.recreate_workspace",
         lambda ws, notify=None, include_proxy=False, reset_volumes=None:
             calls.append((include_proxy, reset_volumes or [])),
     )
-    monkeypatch.setattr("credproxy_cli.porcelain.cli.ensure_proxy_image",
+    monkeypatch.setattr("credproxy_cli.porcelain.cmd_lifecycle.ensure_proxy_image",
                         lambda ctx: None)
     return calls
 
@@ -1495,7 +1495,7 @@ def test_logs_structured_records_are_forgery_resistant():
     escaped VALUE on ONE physical line -- it parses as kind=rule-error, never as a
     second audit line."""
     import json
-    from credproxy_cli.porcelain.cli import _parse_credproxy_line
+    from credproxy_cli.porcelain.cmd_lifecycle import _parse_credproxy_line
     # genuine audit record
     assert _parse_credproxy_line(
         'credproxy {"ts":"t","kind":"audit","event":"inject","binding":"gh"}\n') \
@@ -1517,7 +1517,7 @@ def test_logs_structured_records_are_forgery_resistant():
 def test_format_record_handles_every_kind():
     """The `logs` reformatter renders each record kind and never crashes on a
     missing key or an unknown/future kind."""
-    from credproxy_cli.porcelain.cli import _format_record
+    from credproxy_cli.porcelain.cmd_lifecycle import _format_record
     assert "inject" in _format_record(
         {"ts": "t", "kind": "audit", "event": "inject", "binding": "gh",
          "host": "h", "outcome": "injected"})
@@ -1534,7 +1534,7 @@ def test_format_record_handles_every_kind():
 
 def test_format_record_script_failure_shows_location():
     """A sanitized script-failure record renders its safe source:line (#33 rung 3)."""
-    from credproxy_cli.porcelain.cli import _format_record
+    from credproxy_cli.porcelain.cmd_lifecycle import _format_record
     line = _format_record(
         {"ts": "t", "kind": "script", "scheme": "ovh", "hook": "on_request",
          "reason": "StarlarkError", "source": "ovh.star", "line": 23,
@@ -1585,7 +1585,7 @@ def test_exec_empty_command_fails(xdg, workspaces_dir):
 def test_exec_propagates_exit_code(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cli.lifecycle.exec_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.lifecycle.exec_workspace",
         lambda ws, cmd, notify=None, *, mode="shim", user_override=None, push=False: 7)
     ec, out, err = _run(["workspace", "ws", "exec", "--", "false"])
     assert ec == 7
@@ -1597,7 +1597,7 @@ def test_exec_default_mode_is_shim(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     seen = {}
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cli.lifecycle.exec_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.lifecycle.exec_workspace",
         lambda ws, cmd, notify=None, *, mode="shim", user_override=None, push=False:
             seen.update(mode=mode, user=user_override) or 0)
     _run(["workspace", "ws", "exec", "--", "curl", "x"])
@@ -1608,7 +1608,7 @@ def test_exec_raw_and_login_flags_select_mode(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     seen = {}
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cli.lifecycle.exec_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.lifecycle.exec_workspace",
         lambda ws, cmd, notify=None, *, mode="shim", user_override=None, push=False:
             seen.update(mode=mode, user=user_override) or 0)
     _run(["workspace", "ws", "exec", "--raw", "--user", "root", "--", "id"])

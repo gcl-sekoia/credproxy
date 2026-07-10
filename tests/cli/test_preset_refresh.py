@@ -244,7 +244,7 @@ def test_refresh_container_half_env_and_setup(xdg, workspaces_dir, monkeypatch):
         run = "bash /opt/c2.sh"
         order = 45
     """)
-    from credproxy_cli.porcelain import cli as pcli
+    from credproxy_cli.porcelain import cmd_preset as pcli
     monkeypatch.setattr(pcli.core_docker, "container_status", lambda _n: "running")
     code, out, err = _run(["workspace", "w", "preset", "refresh", "cont"])
     assert code == 0, out + err
@@ -677,7 +677,7 @@ def test_refresh_check_suppresses_restart_hint_and_docker_probe(
     ws = _ws(workspaces_dir, "w", 'image = "x"\n[[preset]]\nname = "cont"\n')
     save_lock(ws, resolve_workspace(ws).lock)
     _preset("cont", '[env]\nC_VAR = "CHANGED"\n')
-    from credproxy_cli.porcelain import cli as pcli
+    from credproxy_cli.porcelain import cmd_preset as pcli
     called: list = []
     monkeypatch.setattr(pcli.core_docker, "container_status",
                         lambda n: called.append(n) or "running")

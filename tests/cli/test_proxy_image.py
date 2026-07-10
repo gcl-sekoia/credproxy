@@ -68,24 +68,26 @@ def _prep_ws(workspaces_dir, name="myws"):
 
 
 def _stub_build(monkeypatch):
-    """Replace do_dev_build so no real docker build runs; record invocations."""
-    from credproxy_cli.porcelain import cli
+    """Replace do_dev_build so no real docker build runs; record invocations.
+    `ensure_proxy_image` (in common) calls it via the cmd_dev module attribute."""
+    from credproxy_cli.porcelain import cmd_dev
     calls = []
-    monkeypatch.setattr(cli, "do_dev_build", lambda ctx: calls.append(ctx))
+    monkeypatch.setattr(cmd_dev, "do_dev_build", lambda ctx: calls.append(ctx))
     return calls
 
 
 def _stub_start(monkeypatch):
-    from credproxy_cli.porcelain import cli
+    from credproxy_cli.porcelain import cmd_lifecycle
     calls = []
-    monkeypatch.setattr(cli.lifecycle, "start_workspace",
+    monkeypatch.setattr(cmd_lifecycle.lifecycle, "start_workspace",
                         lambda ws, notify=None, **kw: calls.append(ws.name))
     return calls
 
 
 def _stub_inspect(monkeypatch, *, present, label=None):
-    """Fake core_docker.inspect: the presence probe ({{.Id}}) and the label read."""
-    from credproxy_cli.porcelain import cli
+    """Fake core_docker.inspect: the presence probe ({{.Id}}) and the label read.
+    ensure_proxy_image (in common) reads it via common.core_docker."""
+    from credproxy_cli.porcelain import common
 
     def fake(ref, fmt):
         if ".Id" in fmt:
@@ -93,7 +95,7 @@ def _stub_inspect(monkeypatch, *, present, label=None):
         if "Config.Labels" in fmt:
             return label
         return None
-    monkeypatch.setattr(cli.core_docker, "inspect", fake)
+    monkeypatch.setattr(common.core_docker, "inspect", fake)
 
 
 def _stub_digest(monkeypatch, value):
@@ -148,20 +150,21 @@ def test_digest_none_without_checkout(tmp_path, monkeypatch):
 
 def test_dev_build_stamps_src_digest_label(tmp_path, monkeypatch):
     from credproxy_cli.core import paths
-    from credproxy_cli.porcelain import cli
+    from credproxy_cli.porcelain import cmd_dev
+    from credproxy_cli.porcelain.common import Ctx
 
     proxy = tmp_path / "proxy"
     proxy.mkdir()
     (proxy / "Dockerfile").write_text("FROM scratch\n")
     # do_dev_build uses the module-global PROXY_DIR for is_dir()/str(); the digest
     # comes from paths.PROXY_DIR. Point both at the fake tree.
-    monkeypatch.setattr(cli, "PROXY_DIR", proxy)
+    monkeypatch.setattr(cmd_dev, "PROXY_DIR", proxy)
     monkeypatch.setattr(paths, "PROXY_DIR", proxy)
 
     calls = []
-    monkeypatch.setattr(cli.core_docker, "docker",
+    monkeypatch.setattr(cmd_dev.core_docker, "docker",
                         lambda args, **kw: calls.append(args))
-    cli.do_dev_build(cli.Ctx(loose=False, as_json=False, assume_yes=False))
+    cmd_dev.do_dev_build(Ctx(loose=False, as_json=False, assume_yes=False))
 
     args = calls[0]
     assert args[0] == "build" and "--label" in args

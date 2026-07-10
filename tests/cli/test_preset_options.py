@@ -899,6 +899,6 @@ def test_opt_bool_accepts_uppercase_true(xdg):
 
 
 def test_opt_duplicate_id_last_wins(xdg):
-    from credproxy_cli.porcelain.cli import _parse_opt_flags
+    from credproxy_cli.porcelain.cmd_preset import _parse_opt_flags
     out = _parse_opt_flags(["mode=/opt/a", "mode=/opt/b"])
     assert out["mode"] == "/opt/b"

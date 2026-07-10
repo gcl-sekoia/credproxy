@@ -17,7 +17,7 @@ import os
 
 import pytest
 
-from credproxy_cli.porcelain import cli as porcelain
+from credproxy_cli.porcelain import cmd_dev as porcelain
 
 
 class _FakeResult:

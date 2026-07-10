@@ -270,7 +270,7 @@ def test_recreate_announced_only_when_container_exists(xdg, monkeypatch):
     _install_cont_preset()
     ws = _make_ws("w", _WS_MIN)
     # No container -> no recreate hint.
-    from credproxy_cli.porcelain import cli as pcli
+    from credproxy_cli.porcelain import cmd_preset as pcli
     monkeypatch.setattr(pcli.core_docker, "container_status", lambda _n: None)
     code, out, err = _run(["workspace", "w", "preset", "add", "cont"])
     assert code == 0 and "restart to apply" not in (out + err)
