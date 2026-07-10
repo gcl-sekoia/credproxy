@@ -230,8 +230,9 @@ def push_workspace(ws: Workspace, notify: Notify = _noop, *,
     rather than race (never skip). Atomic fail-closed (I3): an unresolvable ref
     aborts the whole push before anything is sent (materialize/wire_config raise)."""
     from . import push as core_push
-    from ..model.bindings import materialize_bindings
-    from ..model.rules import combined_fingerprint, materialize_rules
+    from ..model.lock import save_lock
+    from ..model.resolver import resolve_workspace
+    from ..model.rules import combined_fingerprint
     from ..model.workspace import read_token
 
     admin_url = resolve_admin_url(ws, notify)
@@ -240,8 +241,10 @@ def push_workspace(ws: Workspace, notify: Notify = _noop, *,
     token = read_token(ws)
     with core_push.workspace_push_lock(ws):
         notify("pushing config...")
-        bindings = materialize_bindings(ws, notify)
-        rules = materialize_rules(ws, notify)
+        resolved = resolve_workspace(ws)
+        if resolved.lock_dirty:
+            save_lock(ws, resolved.lock)
+        bindings, rules = resolved.bindings, resolved.rules
         fp = combined_fingerprint(bindings, rules)
         core_push.push_to_target(admin_url, token, bindings, rules, fp, notify)
         _write_applied_bindings(ws, bindings)
@@ -256,13 +259,16 @@ def resolve_workspace_wire(ws: Workspace, notify: Notify = _noop) -> dict:
 
     The result carries real secrets: it is the one at-rest disclosure path, so
     `resolve --out` writes it mode 0600 and warns outside the state dir."""
-    from ..model.bindings import materialize_bindings
-    from ..model.rules import combined_fingerprint, materialize_rules
+    from ..model.lock import save_lock
+    from ..model.resolver import resolve_workspace
+    from ..model.rules import combined_fingerprint
     from ..model.wire import build_wire
 
     with ws.lock():
-        bindings = materialize_bindings(ws, notify)
-        rules = materialize_rules(ws, notify)
+        resolved = resolve_workspace(ws)
+        if resolved.lock_dirty:
+            save_lock(ws, resolved.lock)
+    bindings, rules = resolved.bindings, resolved.rules
     fp = combined_fingerprint(bindings, rules)
     return build_wire(bindings, rules, fp)
 
@@ -963,10 +969,13 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
     # provider calls it implies) when the already-running proxy reports the
     # intended config's fingerprint. The proxy's tmpfs config does not survive a
     # restart, so a (re)started proxy (proxy_fresh) always gets a push.
-    from ..model.bindings import materialize_bindings
-    from ..model.rules import combined_fingerprint, materialize_rules
-    bindings = materialize_bindings(ws, notify)
-    rules = materialize_rules(ws, notify)
+    from ..model.lock import save_lock
+    from ..model.resolver import resolve_workspace
+    from ..model.rules import combined_fingerprint
+    resolved = resolve_workspace(ws)
+    if resolved.lock_dirty:
+        save_lock(ws, resolved.lock)
+    bindings, rules = resolved.bindings, resolved.rules
     want_fp = combined_fingerprint(bindings, rules)
     status = None if (force_push or proxy_fresh) else proxy_status(ws, host_port)
     if _should_push(force_push, proxy_fresh, status, want_fp):
@@ -1513,11 +1522,9 @@ def _binding_summary_dict(b) -> dict:
 def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
     """Gather config + running state + a binding summary + drift report for `ws`.
 
-    Reads bindings WITHOUT fetching secrets or materializing the file (so
-    inspect is side-effect-free); a yet-unmaterialized name/placeholder shows
-    as its auto-derived name / None placeholder."""
-    from ..model.bindings import _parse_bindings, _with_auto_names
-    import tomllib
+    Reads through `resolve_workspace` (placeholders bound from the lock) WITHOUT
+    fetching secrets or persisting the lock, so inspect is side-effect-free."""
+    from ..model.resolver import resolve_workspace
 
     if not ws.exists():
         raise WorkspaceError(f"workspace '{ws.name}' not found")
@@ -1539,8 +1546,7 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
         except (ImageError, DockerError):
             host_port = None
 
-    raw = tomllib.loads(ws.config_path.read_text())
-    parsed = _with_auto_names(_parse_bindings(raw, str(ws.config_path)))
+    resolved = resolve_workspace(ws)
     bindings = tuple(
         BindingSummary(
             name=b.name,
@@ -1551,11 +1557,10 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
             placeholder=b.placeholder,
             env=b.env,
         )
-        for b in parsed
+        for b in resolved.bindings
     )
 
-    from ..model.rules import named_rules_from_raw
-    current_rules = named_rules_from_raw(raw, str(ws.config_path))
+    current_rules = resolved.rules
 
     drift = _compute_drift(ws, cfg, bindings, running, current_rules=current_rules)
 
@@ -1578,10 +1583,7 @@ def _inspect_attached(ws: Workspace, cfg: dict) -> WorkspaceInspect:
     currently resolves to (best-effort, tolerating docker absence), plus the
     binding/rule summary and drift against applied state -- but no container
     status (the containers are managed externally)."""
-    import tomllib
-
-    from ..model.bindings import _parse_bindings, _with_auto_names
-    from ..model.rules import named_rules_from_raw
+    from ..model.resolver import resolve_workspace
 
     attach = cfg["attach"]
     attach_target: str | None = None
@@ -1590,15 +1592,14 @@ def _inspect_attached(ws: Workspace, cfg: dict) -> WorkspaceInspect:
     except CredproxyError:
         attach_target = None
 
-    raw = tomllib.loads(ws.config_path.read_text())
-    parsed = _with_auto_names(_parse_bindings(raw, str(ws.config_path)))
+    resolved = resolve_workspace(ws)
     bindings = tuple(
         BindingSummary(name=b.name, injector=b.injector, provider=b.provider,
                        secret=b.secret, hosts=b.hosts, placeholder=b.placeholder,
                        env=b.env)
-        for b in parsed
+        for b in resolved.bindings
     )
-    current_rules = named_rules_from_raw(raw, str(ws.config_path))
+    current_rules = resolved.rules
     # No managed container, so "running" is not meaningful; drift is computed
     # against applied-bindings/-rules regardless (added/removed/changed).
     drift = _compute_drift(ws, cfg, bindings, running=False,
@@ -1635,8 +1636,7 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
 
     Returns ApplyResult; never raises on deferred items (exit 0 is the contract).
     """
-    from ..model.bindings import _parse_bindings, _with_auto_names
-    import tomllib
+    from ..model.resolver import resolve_workspace
 
     if docker.container_status(ws.proxy_container) != "running":
         raise WorkspaceError(
@@ -1648,11 +1648,18 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
     meta = ImageEnv.load()
     host_port = docker.resolve_host_port(ws.proxy_container, meta.http_port)
 
-    # Read current configured bindings (in-memory names only, no push yet).
-    raw = tomllib.loads(ws.config_path.read_text())
-    current_bindings_parsed = _with_auto_names(
-        _parse_bindings(raw, str(ws.config_path))
-    )
+    # Read current configured bindings/rules (placeholders bound from the lock,
+    # no secret fetch, no push yet). resolve_workspace is side-effect-free.
+    resolved = resolve_workspace(ws)
+
+    # Persist any newly-minted placeholders ONCE, up front, before drift and
+    # push. This keeps the placeholder identity deterministic: the drift report
+    # and the push (below, given explicit bindings/rules so push_config does NOT
+    # re-resolve and re-mint) both see the exact same values. It also lands a
+    # stale-drop-only dirty lock that has no drift to push.
+    if resolved.lock_dirty:
+        from ..model.lock import save_lock
+        save_lock(ws, resolved.lock)
 
     # Build the binding summaries for drift.
     current_binding_summaries = [
@@ -1665,11 +1672,10 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
             placeholder=b.placeholder,
             env=b.env,
         )
-        for b in current_bindings_parsed
+        for b in resolved.bindings
     ]
 
-    from ..model.rules import named_rules_from_raw
-    current_rules = named_rules_from_raw(raw, str(ws.config_path))
+    current_rules = resolved.rules
 
     drift = _compute_drift(ws, cfg, current_binding_summaries, running=True,
                            current_rules=current_rules)
@@ -1689,7 +1695,11 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
     binding_changes = [c for c in drift.changes if c.kind == "bindings"]
     rule_changes = [c for c in drift.changes if c.kind == "rules"]
     if binding_changes or rule_changes:
-        pushed_bindings, pushed_rules = push_config(ws, host_port, notify)
+        # Pass the already-resolved bindings/rules so push_config uses the same
+        # (now-persisted) placeholder identity instead of re-resolving/re-minting.
+        pushed_bindings, pushed_rules = push_config(
+            ws, host_port, notify,
+            bindings=resolved.bindings, rules=resolved.rules)
         _write_applied_bindings(ws, pushed_bindings)
         _write_applied_rules(ws, pushed_rules)
         if binding_changes:

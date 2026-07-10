@@ -1,6 +1,6 @@
-"""Tests for core/bindings.py: parse/validate, auto-name generation,
-materialization, append/remove surgical edits, multi-slot secrets, and
-wire_config shape."""
+"""Tests for core/bindings.py: parse/validate, auto-name generation, the
+name-required (hand-authored) contract, append/remove surgical edits, multi-slot
+secrets, and wire_config shape."""
 from __future__ import annotations
 
 import textwrap
@@ -420,69 +420,34 @@ def test_block_spans_ignores_brackets_and_hashes_in_strings():
     assert len(_spans(t)) == len(tomllib.loads(t)["binding"]) == 2
 
 
-# ---- materialization ---------------------------------------------------------
+# ---- name-required (hand-authored intent) -----------------------------------
 
 
-def test_materialize_with_commented_block_header(xdg, workspaces_dir):
-    """A `[[binding]]` header with a trailing comment still materializes (used to
-    crash with IndexError because the header matched no span)."""
+def test_block_spans_tolerate_commented_block_header(xdg, workspaces_dir):
+    """A `[[binding]]  # note` header still parses/loads (span machinery must
+    match it, or remove/load would miscount)."""
+    from credproxy_cli.core.model.bindings import load_bindings
     ws = _write_ws(workspaces_dir, "cmthdr", """\
         image = "x"
 
         [[binding]]  # github
+        name     = "gh"
         injector = "bearer"
         provider = "env"
         secret   = "GITHUB_TOKEN"
         hosts    = ["api.github.com"]
     """)
-    from credproxy_cli.core.model.bindings import materialize_bindings
-    import tomllib
-
-    bindings = materialize_bindings(ws)
-    assert bindings[0].name == "bearer-env"
-    raw = tomllib.loads(ws.config_path.read_text())
-    assert raw["binding"][0]["name"] == "bearer-env"
-    assert "# github" in ws.config_path.read_text()      # header comment preserved
+    assert load_bindings(ws)[0].name == "gh"
+    assert "# github" in ws.config_path.read_text()
 
 
-def test_materialize_writes_name_and_placeholder(xdg, workspaces_dir):
-    """A binding without name/placeholder gets both materialized on disk."""
-    ws = _write_ws(workspaces_dir, "mat", """\
-        image = "x"
-
-        [[binding]]
-        injector = "bearer"
-        provider = "env"
-        secret   = "GITHUB_TOKEN"
-        hosts    = ["api.github.com"]
-    """)
-    from credproxy_cli.core.model.bindings import materialize_bindings
-    import tomllib
-
-    notified = []
-    bindings = materialize_bindings(ws, notify=notified.append)
-
-    assert len(bindings) == 1
-    b = bindings[0]
-    assert b.name == "bearer-env"
-    assert b.placeholder is not None
-    assert b.placeholder.startswith("credproxy_")
-    assert len(b.placeholder) == 40
-
-    # File must be updated
-    raw = tomllib.loads(ws.config_path.read_text())
-    on_disk = raw["binding"][0]
-    assert on_disk["name"] == "bearer-env"
-    assert on_disk["placeholder"] == b.placeholder
-
-    # Two notifications
-    assert any("name" in msg for msg in notified)
-    assert any("placeholder" in msg for msg in notified)
-
-
-def test_materialize_idempotent(xdg, workspaces_dir):
-    """Running materialize_bindings twice must leave the file unchanged."""
-    ws = _write_ws(workspaces_dir, "idem", """\
+def test_missing_name_rejected_with_suggestion(xdg, workspaces_dir):
+    """A hand-authored `[[binding]]` without a `name` is rejected with a
+    prescriptive fix suggesting `<injector>-<provider>` -- the load path no longer
+    auto-names + writes back."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.model.bindings import load_bindings
+    ws = _write_ws(workspaces_dir, "noname", """\
         image = "x"
 
         [[binding]]
@@ -491,82 +456,8 @@ def test_materialize_idempotent(xdg, workspaces_dir):
         secret   = "GITHUB_TOKEN"
         hosts    = ["api.github.com"]
     """)
-    from credproxy_cli.core.model.bindings import materialize_bindings
-
-    bs1 = materialize_bindings(ws)
-    text_after_first = ws.config_path.read_text()
-
-    bs2 = materialize_bindings(ws)
-    text_after_second = ws.config_path.read_text()
-
-    assert text_after_first == text_after_second
-    assert bs1[0].placeholder == bs2[0].placeholder
-
-
-def test_materialize_preserves_comments(xdg, workspaces_dir):
-    """Comments in the binding block survive materialization."""
-    ws = _write_ws(workspaces_dir, "cmt", """\
-        image = "x"
-
-        # outer comment
-        [[binding]]
-        # inner comment
-        injector = "bearer"
-        provider = "env"
-        secret   = "GITHUB_TOKEN"
-        hosts    = ["api.github.com"]
-    """)
-    from credproxy_cli.core.model.bindings import materialize_bindings
-
-    materialize_bindings(ws)
-    text = ws.config_path.read_text()
-    assert "# outer comment" in text
-    assert "# inner comment" in text
-
-
-def test_materialize_auto_name_collision(xdg, workspaces_dir):
-    """Two unnamed bindings with the same injector/provider get distinct names."""
-    ws = _write_ws(workspaces_dir, "coll", """\
-        image = "x"
-
-        [[binding]]
-        injector = "bearer"
-        provider = "env"
-        secret   = "TOK1"
-        hosts    = ["api.github.com"]
-
-        [[binding]]
-        injector = "bearer"
-        provider = "env"
-        secret   = "TOK2"
-        hosts    = ["uploads.github.com"]
-    """)
-    from credproxy_cli.core.model.bindings import materialize_bindings
-
-    bindings = materialize_bindings(ws)
-    names = [b.name for b in bindings]
-    assert len(set(names)) == 2
-    assert "bearer-env" in names
-    assert "bearer-env-2" in names
-
-
-def test_materialize_placeholder_already_set(xdg, workspaces_dir):
-    """A binding that already has a placeholder keeps it unchanged."""
-    ws = _write_ws(workspaces_dir, "existing_ph", """\
-        image = "x"
-
-        [[binding]]
-        injector    = "bearer"
-        provider    = "env"
-        secret      = "GITHUB_TOKEN"
-        hosts       = ["api.github.com"]
-        name        = "mygh"
-        placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    """)
-    from credproxy_cli.core.model.bindings import materialize_bindings
-
-    bs = materialize_bindings(ws)
-    assert bs[0].placeholder == "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    with pytest.raises(ConfigError, match=r'missing a required `name`.*bearer-env'):
+        load_bindings(ws)
 
 
 # ---- append_binding / remove_binding ----------------------------------------
@@ -631,6 +522,140 @@ def test_remove_binding_with_multiline_hosts_neighbor(xdg, workspaces_dir):
     assert raw["binding"][0]["hosts"] == ["a.example.com", "b.example.com"]
 
 
+def test_remove_binding_with_child_table_first(xdg, workspaces_dir):
+    """A hand-written `[binding.params]` child sub-table must be removed WITH its
+    parent `[[binding]]`, not orphaned -- even when the child-bearing binding is
+    FIRST (its child must not end its span early and re-attach to nothing/leak)."""
+    from credproxy_cli.core.model.bindings import load_bindings, remove_binding
+    import tomllib
+
+    ws = _write_ws(workspaces_dir, "childfirst", """\
+        image = "x"
+
+        [[binding]]
+        name     = "aws"
+        injector = "sigv4"
+        provider = "env"
+        secret   = { access_key_id = "AKID", secret_access_key = "SAK" }
+        hosts    = ["s3.amazonaws.com"]
+        [binding.params]
+        region  = "us-east-1"
+        service = "s3"
+
+        [[binding]]
+        name     = "keep"
+        injector = "sigv4"
+        provider = "env"
+        secret   = { access_key_id = "AK2", secret_access_key = "SK2" }
+        hosts    = ["ec2.amazonaws.com"]
+        [binding.params]
+        region  = "us-west-2"
+        service = "ec2"
+    """)
+    assert [b.name for b in load_bindings(ws)] == ["aws", "keep"]
+
+    # The survivor's block (from its header to EOF) must be byte-identical after
+    # removing the FIRST binding.
+    before = ws.config_path.read_text()
+    survivor_block = before[before.index('name     = "keep"'):]
+
+    remove_binding(ws, "aws")
+    after = ws.config_path.read_text()
+    raw = tomllib.loads(after)                             # file still parses
+    assert [b["name"] for b in raw["binding"]] == ["keep"]
+    assert raw["binding"][0]["params"] == {"region": "us-west-2", "service": "ec2"}
+    assert "region  = \"us-east-1\"" not in after          # child went with parent
+    assert after.endswith(survivor_block)                 # survivor byte-identical
+
+
+def test_remove_binding_with_child_table_last(xdg, workspaces_dir):
+    """Same, but the child-bearing binding is LAST: removing it must not leave an
+    orphaned `[binding.params]` and must leave the survivor untouched."""
+    from credproxy_cli.core.model.bindings import load_bindings, remove_binding
+    import tomllib
+
+    ws = _write_ws(workspaces_dir, "childlast", """\
+        image = "x"
+
+        [[binding]]
+        name     = "keep"
+        injector = "sigv4"
+        provider = "env"
+        secret   = { access_key_id = "AK2", secret_access_key = "SK2" }
+        hosts    = ["ec2.amazonaws.com"]
+        [binding.params]
+        region  = "us-west-2"
+        service = "ec2"
+
+        [[binding]]
+        name     = "aws"
+        injector = "sigv4"
+        provider = "env"
+        secret   = { access_key_id = "AKID", secret_access_key = "SAK" }
+        hosts    = ["s3.amazonaws.com"]
+        [binding.params]
+        region  = "us-east-1"
+        service = "s3"
+    """)
+    assert [b.name for b in load_bindings(ws)] == ["keep", "aws"]
+
+    before = ws.config_path.read_text()
+    survivor_block = before[:before.index('[[binding]]\nname     = "aws"')]
+
+    remove_binding(ws, "aws")
+    after = ws.config_path.read_text()
+    raw = tomllib.loads(after)                             # file still parses
+    assert [b["name"] for b in raw["binding"]] == ["keep"]
+    assert raw["binding"][0]["params"] == {"region": "us-west-2", "service": "ec2"}
+    assert "region  = \"us-east-1\"" not in after          # child went with parent
+    # Everything outside the removed block is byte-identical.
+    assert after == survivor_block.rstrip("\n") + "\n"
+
+
+def test_remove_binding_inline_array_form_refused(xdg, workspaces_dir):
+    """The inline-array form (`binding = [ { ... } ]`) parses to entries but has
+    NO removable block span -- `remove_binding` must refuse prescriptively rather
+    than IndexError / edit the wrong block."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.model.bindings import remove_binding
+
+    ws = _write_ws(workspaces_dir, "inlinearr", """\
+        image = "x"
+        binding = [
+          { name = "a", injector = "bearer", provider = "env", secret = "A", hosts = ["a.io"] },
+        ]
+    """)
+    with pytest.raises(ConfigError, match="isn't a removable `\\[\\[binding\\]\\]` block"):
+        remove_binding(ws, "a")
+
+
+def test_remove_binding_duplicate_name_refused(xdg, workspaces_dir):
+    """Two `[[binding]]` blocks with the same name: `remove` must refuse as
+    ambiguous rather than silently drop the first."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.model.bindings import remove_binding
+
+    ws = _write_ws(workspaces_dir, "dupname", """\
+        image = "x"
+
+        [[binding]]
+        name     = "dup"
+        injector = "bearer"
+        provider = "env"
+        secret   = "A"
+        hosts    = ["a.io"]
+
+        [[binding]]
+        name     = "dup"
+        injector = "bearer"
+        provider = "env"
+        secret   = "B"
+        hosts    = ["b.io"]
+    """)
+    with pytest.raises(ConfigError, match="defined more than once"):
+        remove_binding(ws, "dup")
+
+
 def test_append_binding_multi_slot_inline_table(xdg, workspaces_dir):
     """A multi-slot secret round-trips through an inline table."""
     ws = _write_ws(workspaces_dir, "ms", 'image = "x"\n')
@@ -692,6 +717,41 @@ def test_test_binding_shared_ref_counted_once(xdg, workspaces_dir):
                 hosts=("h",), placeholder=None, env=None)
     r = test_binding(b, fetch_many=lambda p, refs: {ref: "ABCD" for ref in refs})
     assert r.ok and r.value_len == 4  # not 8
+
+
+def test_append_then_remove_preserves_comments_byte_for_byte(xdg, workspaces_dir):
+    """The intent TOML is hand-owned: appending a binding then removing it leaves
+    every existing byte (comments everywhere included) untouched -- machine edits
+    only append a whole block / delete a whole block."""
+    from credproxy_cli.core.model.bindings import (
+        Binding, append_binding, remove_binding)
+    original = (
+        "# top-of-file comment\n"
+        'image = "x"   # inline on image\n'
+        "\n"
+        "# a hand-authored binding, with comments\n"
+        "[[binding]]\n"
+        'name     = "keep"   # do not touch\n'
+        'injector = "bearer"\n'
+        'provider = "env"\n'
+        'secret   = "TOK"\n'
+        'hosts    = ["api.github.com"]   # scope\n'
+        "# trailing comment at EOF\n"
+    )
+    ws = _write_ws(workspaces_dir, "cmts", original)
+    ws.ensure_state_dir()
+
+    append_binding(ws, Binding(
+        name="added", injector="bearer", provider="env", secret="TOK2",
+        hosts=("api.example.com",), placeholder=None, env=None))
+    after_add = ws.config_path.read_text()
+    # The original text is preserved verbatim as a prefix; only a new block is
+    # appended at EOF.
+    assert after_add.startswith(original)
+
+    remove_binding(ws, "added")
+    # Back to byte-identical (the appended block, and only it, is gone).
+    assert ws.config_path.read_text() == original
 
 
 def test_remove_binding_not_found(xdg, workspaces_dir):
@@ -804,20 +864,24 @@ def test_validate_sign_scheme_requires_both_slots(xdg, workspaces_dir):
         validate([b], "test")
 
 
-def test_materialize_sign_scheme_adds_no_placeholder(xdg, workspaces_dir):
+def test_sign_scheme_resolves_no_placeholder(xdg, workspaces_dir):
+    """A sign-family binding holds no placeholder -- the resolver leaves it None
+    and records nothing in the lock."""
     ws = _write_ws(workspaces_dir, "awsmat", """\
         image = "x"
 
         [[binding]]
+        name     = "aws"
         injector = "sigv4"
         provider = "env"
         secret   = { access_key_id = "AKID", secret_access_key = "SAK" }
         hosts    = ["sts.amazonaws.com"]
     """)
-    from credproxy_cli.core.model.bindings import materialize_bindings
+    from credproxy_cli.core.model.resolver import resolve_workspace
 
-    bs = materialize_bindings(ws)
-    assert bs[0].placeholder is None
+    r = resolve_workspace(ws)
+    assert r.bindings[0].placeholder is None
+    assert r.lock["placeholders"] == {}
     assert "placeholder" not in ws.config_path.read_text()
 
 

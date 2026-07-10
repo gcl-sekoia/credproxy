@@ -1096,12 +1096,10 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         if bname in taken:
             fail(f"binding name '{bname}' already exists in workspace '{ws.name}'")
 
-        # Sign schemes (sigv4, ...) hold no inert placeholder; only substitute
-        # schemes do, and only those get one auto-generated.
-        if injector.spec.uses_placeholder:
-            placeholder = a.placeholder or injector.placeholder.generate()
-        else:
-            placeholder = a.placeholder
+        # An explicit --placeholder is written into the block (hand-owned, wins);
+        # otherwise the placeholder is LOCK-managed -- nothing is written into the
+        # TOML, and resolve_workspace mints its identity into the lock below.
+        placeholder = a.placeholder
         # `--no-env` writes `env = false` (suppress the injector's hint); else
         # bake the effective env (explicit override, or the injector's hint) so
         # the file records the concrete choice.
@@ -1123,7 +1121,30 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
             env_suppressed=env_suppressed,
         )
         core_bindings.validate(existing + [binding], str(ws.config_path))
+
+        # Snapshot BEFORE appending: resolve_workspace below runs the full
+        # container-half + wire validation, so a PRE-EXISTING unrelated error
+        # (missing image, bad [[mounts]]) would raise AFTER the block is on disk,
+        # leaving the hand-owned file half-written. Restore on any failure.
+        original = ws.config_path.read_text()
         core_bindings.append_binding(ws, binding)
+
+        # Mint the (lock-managed) placeholder identity now, so it is stable for a
+        # later `resolve`/`push --config` -- resolve_workspace re-validates the
+        # whole file and records generated placeholders into the lock.
+        from ..core.model.lock import save_lock
+        from ..core.model.resolver import resolve_workspace
+        from ..core.paths import atomic_write_text
+        try:
+            resolved = resolve_workspace(ws)
+        except CredproxyError as e:
+            atomic_write_text(ws.config_path, original)  # never half-write
+            fail(f"binding not added: workspace '{ws.name}' config has a "
+                 f"pre-existing error: {e}")
+        if resolved.lock_dirty:
+            save_lock(ws, resolved.lock)
+        placeholder = next((b.placeholder for b in resolved.bindings
+                            if b.name == bname), placeholder)
 
     from ..core.model import config as core_config
     render.OUT.binding_added(bname, ws.name, {
@@ -1605,14 +1626,14 @@ def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None
 
 
 def do_binding_list(ctx: Ctx, name: str | None) -> None:
-    from ..core.model import bindings as core_bindings
+    from ..core.model.resolver import resolve_workspace
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
-    # Hold the lock: materialize may write back generated names/placeholders, so
-    # a concurrent add/remove must not race this read-modify-write.
-    with ws.lock():
-        bindings = core_bindings.materialize_bindings(ws, notify=say)
+    # Read-only: resolve placeholders from the lock in memory, never persist (a
+    # not-yet-persisted placeholder is ephemeral until start/push/add/test mints
+    # it into the lock).
+    bindings = resolve_workspace(ws).bindings
     rows = [
         {
             "name": b.name,
@@ -1639,10 +1660,16 @@ def do_binding_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
-    # Hold the lock only for the materializing read-modify-write; the provider
-    # fetch below needs no lock (and can be slow).
+    # Resolve placeholders from the lock and PERSIST it: `binding test` mints the
+    # placeholder identity a later `push --config` (from `resolve`) relies on. The
+    # provider fetch below needs no lock (and can be slow).
+    from ..core.model.lock import save_lock
+    from ..core.model.resolver import resolve_workspace
     with ws.lock():
-        bindings = core_bindings.materialize_bindings(ws, notify=say)
+        resolved = resolve_workspace(ws)
+        if resolved.lock_dirty:
+            save_lock(ws, resolved.lock)
+    bindings = resolved.bindings
     if a.binding_name is not None:
         bindings = [b for b in bindings if b.name == a.binding_name]
         if not bindings:
@@ -1800,7 +1827,26 @@ def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         if rule.name in taken:
             fail(f"rule name '{rule.name}' already exists in workspace '{ws.name}'")
         core_rules.validate(existing + [rule], str(ws.config_path))
+
+        # Snapshot before the append: resolve_workspace runs the full config-plane
+        # validation, so a PRE-EXISTING unrelated error would raise after the block
+        # is on disk. Restore on failure (mirrors do_binding_add).
+        original = ws.config_path.read_text()
         core_rules.append_rule(ws, rule)
+        # Persist a dirty lock (spec: rule add persists it too) -- a rule carries
+        # no placeholder, but resolving the whole workspace may prune a stale
+        # lock entry / mint a sibling binding's placeholder that isn't recorded yet.
+        from ..core.model.lock import save_lock
+        from ..core.model.resolver import resolve_workspace
+        from ..core.paths import atomic_write_text
+        try:
+            resolved = resolve_workspace(ws)
+        except CredproxyError as e:
+            atomic_write_text(ws.config_path, original)  # never half-write
+            fail(f"rule not added: workspace '{ws.name}' config has a "
+                 f"pre-existing error: {e}")
+        if resolved.lock_dirty:
+            save_lock(ws, resolved.lock)
 
     from ..core.model import config as core_config
     render.OUT.rule_added(rule.name, ws.name, _rule_row(rule),
@@ -1816,18 +1862,31 @@ def do_rule_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     _confirm_destructive(ctx, ws, implicit, "remove rule from")
     with ws.lock():
         core_rules.remove_rule(ws, a.rule_name)
+        # Persist a dirty lock (spec: rule remove persists it too) -- e.g. a
+        # stale placeholder entry pruned on resolve. The removal already
+        # succeeded and is the user's intent, so a resolve failure from an
+        # UNRELATED pre-existing config error (a broken container half) must
+        # not fail the command; the lock reconciles on the next resolve.
+        from ..core.errors import CredproxyError
+        from ..core.model.lock import save_lock
+        from ..core.model.resolver import resolve_workspace
+        try:
+            resolved = resolve_workspace(ws)
+        except CredproxyError:
+            resolved = None
+        if resolved is not None and resolved.lock_dirty:
+            save_lock(ws, resolved.lock)
     render.OUT.rule_removed(a.rule_name, ws.name)
 
 
 def do_rule_list(ctx: Ctx, name: str | None) -> None:
-    from ..core.model import rules as core_rules
+    from ..core.model.resolver import resolve_workspace
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
-    # Hold the lock: materialize may write back generated names, so a concurrent
-    # add/remove must not race this read-modify-write.
-    with ws.lock():
-        rules = core_rules.materialize_rules(ws, notify=say)
+    # Read-only: rules carry no placeholder, so this just parses + validates
+    # (names are hand-authored now); nothing is written.
+    rules = resolve_workspace(ws).rules
     render.OUT.rule_list(ws.name, [_rule_row(r) for r in rules])
 
 
@@ -1848,9 +1907,9 @@ def do_rule_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     if not host:
         fail(f"'{a.url}' has no host (use a full URL, e.g. https://api.github.com/x)")
     path = parts.path or "/"
-    # Hold the lock only for the materializing read-modify-write.
-    with ws.lock():
-        rules = core_rules.materialize_rules(ws, notify=say)
+    # Read-only (offline dry-run): parse + validate, no write.
+    from ..core.model.resolver import resolve_workspace
+    rules = resolve_workspace(ws).rules
     matches = core_rules.match_rules(rules, a.method, host, path)
     # Enrich each match with the rule's action detail (status/script) for display.
     by_name = {r.name: r for r in rules}

@@ -27,7 +27,7 @@ applies it. For the netns/bootstrap side of a running workspace see
 | `$XDG_CONFIG_HOME/credproxy/workspaces/<name>.toml` | the workspace config (this doc). Default `~/.config/credproxy/workspaces/`. The file existing **is** the workspace existing. |
 | `$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml` | your injector definitions (shadow the builtin ones) |
 | `$XDG_CONFIG_HOME/credproxy/providers/<name>` | your provider executables (shadow the builtin ones) |
-| `$XDG_STATE_HOME/credproxy/workspaces/<name>/` | runtime state — `auth.token`, the last-applied spec/bindings, session pidfiles. Not hand-edited. Default `~/.local/state/credproxy/`. |
+| `$XDG_STATE_HOME/credproxy/workspaces/<name>/` | runtime state — `auth.token`, `lock.json` (machine-owned generated data: binding placeholders), the last-applied spec/bindings, session pidfiles. Not hand-edited. Default `~/.local/state/credproxy/`. |
 | `$XDG_STATE_HOME/credproxy/default-workspace` | the current default-workspace pointer (loose surface) |
 
 The config dir is editable; the state dir is owned by the tool. Point the two
@@ -97,18 +97,21 @@ auto_stop = true
 
 # Credential bindings — zero or more. See "Bindings" below.
 [[binding]]
-name        = "github-api"        # auto-generated if omitted
+name        = "github-api"        # REQUIRED — hand-authored (`binding add` writes it)
 injector    = "bearer"
 provider    = "env"
 secret      = "GITHUB_TOKEN"      # single-slot: a bare ref
 hosts       = ["api.github.com"]
-placeholder = "ghp_…"             # auto-generated if omitted
+# placeholder — omit it: the generated value lives in the lockfile, not here.
+# Set it explicitly only to pin a specific value (then it wins and stays out of
+# the lock).
 env         = "GITHUB_TOKEN"      # inherits the injector's hint; `false` suppresses
 
 # A multi-slot secret uses an inline table (slot -> provider ref) instead of a
 # bare string; the scheme declares which slots it needs. E.g. a sigv4 binding
 # (sign family — no placeholder; the proxy re-signs each request):
 [[binding]]
+name     = "aws-sts"
 injector = "sigv4"
 provider = "env"
 secret   = { access_key_id = "AWS_ACCESS_KEY_ID", secret_access_key = "AWS_SECRET_ACCESS_KEY" }
@@ -380,15 +383,28 @@ it for the real value on requests to the scoped hosts.
 | `provider` | yes | Name of a provider executable (`$XDG_CONFIG_HOME/credproxy/providers/<name>`, falling back to builtin). Builtin: `env`. |
 | `secret` | yes | Either a bare ref string (single-slot), or an inline table mapping the scheme's slot names to refs (multi-slot). A ref is opaque to credproxy and meaningful only to the provider — an env-var name, a vault path, an item id. |
 | `hosts` | yes | Non-empty list of hostnames the credential may be injected on. This is the security scope: a request to any other host never sees the real value. Each entry is a literal hostname (exact match) **or** a glob pattern containing `*` — see *Host patterns* below. |
-| `name` | no | Handle used to address the binding (`binding remove`, `binding test NAME`). Auto-generated as `<injector>-<provider>`, with a `-2`, `-3`, … suffix on collision. |
-| `placeholder` | no | The inert sentinel the workspace sends (substitute schemes). Auto-generated once from the injector's placeholder pattern (format-valid for the service), then written back to the file so it never drifts. Override only if you need a specific value. |
+| `name` | **yes** | Handle used to address the binding (`binding remove`, `binding test NAME`). Hand-authored — `binding add` writes it for you (`<injector>-<provider>`, `-2`/`-3`/… on collision), but a binding you write by hand must include one. Omitting it is an error that names the exact line to add. |
+| `placeholder` | no | The inert sentinel the workspace sends (substitute schemes). **Omit it** — the generated value lives in the machine-owned lockfile (`$XDG_STATE_HOME/credproxy/workspaces/<name>/lock.json`), not the TOML, so the CLI never rewrites your file. Set it explicitly only to pin a specific value: an explicit `placeholder` **wins** and never enters the lock. |
 | `env` | no | Suggested env var name surfaced to the workspace via `/setup` (and pre-exported via `/exports.sh`); must be a valid shell identifier (letters, digits, `_`; not starting with a digit). A non-empty string overrides; **absent** inherits the injector's `env` hint; **`env = false`** suppresses it entirely (no env exposed — `binding add --no-env`). `env = ""` and `env = true` are rejected. |
 
-**Materialization.** When the tool loads a binding that omits `name` or
-`placeholder`, it generates them and writes them back into the TOML with a
-surgical edit that preserves your comments and ordering. After that the values
-are static — the file stays the single source of truth, with nothing held only
-in memory.
+**One-way dataflow (intent file + lockfile).** The workspace TOML is your
+hand-owned **intent** file — credproxy never rewrites inside it (comments are
+sacred). The only edits it makes are appending a whole new `[[binding]]`/`[[rule]]`
+block at the end (`binding add`/`rule add`) or deleting a whole named block
+(`binding remove`/`rule remove`). Everything **generated** — today, each
+substitute-family binding's `placeholder` — lives in the machine-owned
+`lock.json` instead, keyed by binding **name**. Consequences:
+
+- A binding with no explicit `placeholder` gets one minted into the lock the
+  first time a mutating command runs (`start`, `push`, `apply`, `binding add`,
+  `binding test`, `resolve`); it is stable thereafter.
+- An explicit `placeholder` in the TOML always wins and is never copied into the
+  lock.
+- Placeholder identity is keyed by name, so **renaming a binding regenerates its
+  placeholder** (and drops the stale lock entry). Delete `lock.json` and it all
+  regenerates safely.
+- `[[rule]]` names are hand-authored the same way (rules carry no placeholder, so
+  they have no lock entry).
 
 #### Host patterns
 
@@ -457,10 +473,10 @@ file. You can always skip the command and edit the TOML directly.
 | Command | Effect on the config |
 |---|---|
 | `credproxy workspace create NAME` | Scaffold `<name>.toml` (and the state dir + `auth.token`) from the workspace template. Does not start anything. To use a non-default image, edit the scaffolded `image`. |
-| `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E | --no-env]` | Append a `[[binding]]` block, materializing `name`/`placeholder` immediately. Validates the whole set before writing, so a rejected binding never lands in the file. Repeat `--secret SLOT=REF` for a multi-slot secret; a single `--secret SLOT=REF` works too when `SLOT` is the scheme's slot name (e.g. `jwt-bearer`'s `private_key`). |
+| `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E | --no-env]` | Append a `[[binding]]` block (with a generated `name` unless you pass `--name`). The placeholder is minted into the lockfile unless you pass `--placeholder` (which writes it into the block). Validates the whole set before writing, so a rejected binding never lands in the file. Repeat `--secret SLOT=REF` for a multi-slot secret; a single `--secret SLOT=REF` works too when `SLOT` is the scheme's slot name (e.g. `jwt-bearer`'s `private_key`). |
 | `credproxy workspace NAME preset add PRESET [--provider P --secret REF] [--opt ID=VALUE …]` | Apply a **service setup pack**: stamp the preset's coordinated `[[binding]]` set (sharing one placeholder) **and** its `[[rule]]` guardrails, all-or-nothing. A binding-bearing preset takes provider/secret (or its defaults); a pure-rule pack takes none. `--opt` supplies a pack `[[option]]`'s host-half value (whole-field); an unresolved required option prompts on the loose surface + a terminal, else fails with a structured error. Announces any newly-intercepted host. `preset list` shows the full expansion first. |
 | `credproxy workspace NAME binding remove BINDING_NAME` | Remove that binding's block (surgical text edit). Reversible in principle, but loses tuning — gated by confirmation when targeting the default workspace on the loose surface. |
-| `credproxy workspace NAME binding list` | Read and print the bindings (materializing any missing `name`/`placeholder` first). Shows name, injector, provider, secret-id, hosts, env, and placeholder. |
+| `credproxy workspace NAME binding list` | Read and print the bindings (placeholders resolved from the lockfile, read-only — nothing is written). Shows name, injector, provider, secret-id, hosts, env, and placeholder. |
 | `credproxy workspace NAME binding test [BINDING_NAME]` | Dry-run: fetch each binding's secret through its provider and report success and **value length only** (never the value). Exit 1 if any fail. |
 | `credproxy workspace binding test --provider P --secret REF [--injector I]` | Ad-hoc variant: test a provider/injector combination **before** binding it. No workspace is required. |
 | `credproxy workspace NAME edit` | Open `<name>.toml` in `$VISUAL`/`$EDITOR` (default `vi`), then validate it: warns if the edit left it invalid (without reverting), otherwise hints `apply`/`start`. Pure sugar over opening the file yourself. |

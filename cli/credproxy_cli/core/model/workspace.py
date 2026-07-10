@@ -110,6 +110,14 @@ class Workspace:
         return self.state_dir / "sessions"
 
     @property
+    def lock_json_path(self) -> Path:
+        """The machine-owned state lockfile (`lock.json`): generated data (binding
+        placeholders, and later presets/applied) that the CLI must NOT write back
+        into the hand-owned TOML. Distinct from `lock_path` -- that is the
+        lifecycle flock (a concurrency primitive), this is durable state."""
+        return self.state_dir / "lock.json"
+
+    @property
     def lock_path(self) -> Path:
         """Advisory lock file serializing this workspace's lifecycle transitions."""
         return self.state_dir / "lifecycle.lock"

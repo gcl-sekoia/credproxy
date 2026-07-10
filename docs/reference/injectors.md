@@ -147,11 +147,12 @@ from `charset` (via Python's `secrets`) to reach `length`. The point is to be
 so client-side token-format checks pass, while the real value never leaves the
 host.
 
-A placeholder is generated **once**, when the binding is first materialized, and
-written back into the workspace's config file so the workspace's environment and
-the proxy's expectation can never drift. The injector only supplies the
-*pattern*; the concrete value lives on the binding. See
-[materialization](configuration.md#bindings).
+A placeholder is generated **once**, the first time a binding is resolved, and
+recorded in the workspace's machine-owned lockfile (`lock.json`, keyed by binding
+name) so the workspace's environment and the proxy's expectation can never drift.
+The injector only supplies the *pattern*; the concrete value lives in the lock
+(or, if you pin it, in the binding's explicit `placeholder`). See
+[one-way dataflow](configuration.md#bindings).
 
 Because injection is now scheme-aware, you send the credential the natural way
 for the service (e.g. `Authorization: Bearer <placeholder>`, or a
@@ -224,11 +225,13 @@ length  = 32
 charset = "hex"
 ```
 
-Because a binding's `placeholder` and `env` are materialized from the injector
-the first time the binding is loaded, change an injector's pattern *before*
-creating bindings that use it; existing bindings keep their already-materialized
-values (the file stays the source of truth). To re-shape an existing binding,
-edit or clear its `placeholder` in the workspace config.
+Because a binding's `placeholder` is generated from the injector the first time
+the binding is resolved (then recorded in the lockfile), change an injector's
+pattern *before* creating bindings that use it; existing bindings keep their
+already-recorded placeholder. To re-shape an existing binding, delete its
+`lock.json` entry (e.g. remove the file, or rename the binding) so a fresh
+placeholder is minted from the new pattern, or pin an explicit `placeholder` in
+the workspace config.
 
 ## Scripted injectors (the escape hatch)
 

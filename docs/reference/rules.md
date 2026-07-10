@@ -71,7 +71,7 @@ by hand.
 ```toml
 # Block repo deletion while allowing the rest of the GitHub API
 [[rule]]
-name    = "gh-no-delete"      # auto-generated if omitted
+name    = "gh-no-delete"      # REQUIRED — hand-authored (`rule add` writes it)
 hosts   = ["api.github.com"]
 methods = ["DELETE"]          # optional; absent = all methods
 path    = "/repos/**"         # optional; * within a segment, ** across segments

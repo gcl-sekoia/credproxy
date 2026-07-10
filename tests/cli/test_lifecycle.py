@@ -956,7 +956,7 @@ image = "x"
 
 [[binding]]
 name = "myb"
-injector = "github"
+injector = "bearer"
 provider = "env"
 secret = "TOK"
 hosts = ["api.github.com"]
@@ -985,7 +985,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
     pushed = []
 
-    def fake_push(ws, port, notify=None):
+    def fake_push(ws, port, notify=None, bindings=None, rules=None):
         pushed.append(True)
         return ([Binding(
             name="myb", injector="github", provider="env",
@@ -1013,7 +1013,7 @@ image = "x"
 
 [[binding]]
 name = "myb"
-injector = "github"
+injector = "bearer"
 provider = "env"
 secret = "TOK"
 hosts = ["api.github.com"]
@@ -1036,7 +1036,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     )
     pushed = []
 
-    def fake_push(ws, port, notify=None):
+    def fake_push(ws, port, notify=None, bindings=None, rules=None):
         pushed.append(True)
         return ([Binding(
             name="myb", injector="github", provider="env", secret="TOK",

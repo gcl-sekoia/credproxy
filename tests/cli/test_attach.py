@@ -124,7 +124,7 @@ def test_attach_directory_and_bindings_still_valid(xdg, workspaces_dir):
     ws = _attach_ws(workspaces_dir, "ok", (
         'attach = { container = "p" }\n'
         'directory = "/abs/proj"\n'
-        '[[binding]]\ninjector="bearer"\nprovider="env"\n'
+        '[[binding]]\nname="gh"\ninjector="bearer"\nprovider="env"\n'
         'secret="T"\nhosts=["api.github.com"]\n'))
     cfg = load_config(ws)
     assert cfg["directory"] == "/abs/proj"
@@ -230,7 +230,7 @@ def test_rule_test_live_routes_through_target(xdg, workspaces_dir, monkeypatch):
     from credproxy_cli.core.model.workspace import Workspace, ensure_token
     _attach_ws(workspaces_dir, "svc", (
         'attach = { admin_url = "http://127.0.0.1:7000" }\n'
-        '[[rule]]\naction="block"\nhosts=["api.github.com"]\n'))
+        '[[rule]]\nname="blk"\naction="block"\nhosts=["api.github.com"]\n'))
     ensure_token(Workspace("svc"))
     seen = {}
 
@@ -348,7 +348,7 @@ def test_push_managed_calls_engine_once_and_records(xdg, workspaces_dir,
 def test_push_attached_discovers_and_posts(xdg, workspaces_dir, monkeypatch):
     _attach_ws(workspaces_dir, "svc", (
         'attach = { discover = "role=proxy" }\n'
-        '[[binding]]\ninjector="bearer"\nprovider="env"\n'
+        '[[binding]]\nname="gh"\ninjector="bearer"\nprovider="env"\n'
         'secret="GH"\nhosts=["api.github.com"]\n'))
     monkeypatch.setenv("GH", "secretval")
     from credproxy_cli.core.model.workspace import Workspace, ensure_token
@@ -381,9 +381,9 @@ def test_push_attached_discovers_and_posts(xdg, workspaces_dir, monkeypatch):
 def _write_stateless_cfg(tmp_path) -> str:
     p = tmp_path / "cfg.toml"
     p.write_text(
-        '[[binding]]\ninjector="bearer"\nprovider="env"\n'
+        '[[binding]]\nname="gh"\ninjector="bearer"\nprovider="env"\n'
         'secret="GH"\nhosts=["api.github.com"]\n'
-        '[[rule]]\naction="block"\nhosts=["api.evil.com"]\n')
+        '[[rule]]\nname="blk"\naction="block"\nhosts=["api.evil.com"]\n')
     return str(p)
 
 
@@ -496,7 +496,7 @@ def test_two_sequential_stateless_pushes_both_send(xdg, tmp_path, monkeypatch):
 def _resolve_ws(workspaces_dir, name="r"):
     from credproxy_cli.core.model.workspace import Workspace
     (workspaces_dir / f"{name}.toml").write_text(
-        'image = "x"\n[[binding]]\ninjector="bearer"\nprovider="env"\n'
+        'image = "x"\n[[binding]]\nname="gh"\ninjector="bearer"\nprovider="env"\n'
         'secret="GH"\nhosts=["api.github.com"]\n')
     return Workspace(name)
 

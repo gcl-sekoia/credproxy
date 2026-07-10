@@ -511,8 +511,8 @@ def _secret_ref(secret) -> str | None:
 
 def _rule_checks(ws: Workspace) -> list[Check]:
     """The credential-free `[[rule]]` layer runs its own parse+validate at `start`
-    (`materialize_rules -> rules.validate`: bad path glob, unknown script, duplicate
-    names, action-field errors). Mirror the layer-2 bindings check so a broken rule
+    (`load_rules -> rules.validate`: missing/duplicate names, bad path glob, unknown
+    script, action-field errors). Mirror the layer-2 bindings check so a broken rule
     is caught by doctor too, not one PR later at `start`."""
     from ..model.rules import load_rules
     try:

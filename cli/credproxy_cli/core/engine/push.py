@@ -123,27 +123,34 @@ def push_to_target(admin_url: str, token: str, bindings, rules,
 
 def push_config(ws: "Workspace", http_port: int, notify: Notify = _noop,
                 bindings=None, rules=None, fingerprint=None):
-    """Materialize bindings + rules, fetch each secret from its provider, and
-    POST the resulting wire config (bindings + rules + a metadata `fingerprint`)
-    to the managed proxy's /admin/config on 127.0.0.1:<http_port>.
+    """Resolve bindings + rules (placeholders bound from the lock), fetch each
+    secret from its provider, and POST the resulting wire config (bindings + rules
+    + a metadata `fingerprint`) to the managed proxy's /admin/config on
+    127.0.0.1:<http_port>.
 
     `bindings`/`rules`/`fingerprint` may be supplied by the caller (the start
     path computes them to decide whether a push is even needed); otherwise they
-    are materialized/computed here. Materialization may rewrite the config file
-    (filling generated names/placeholders); announced via `notify`.
+    are resolved/computed here. Resolution reads (and, on a miss, mints) generated
+    placeholders in the lockfile -- a dirty lock is persisted here (this is a
+    mutating command).
 
     A thin wrapper over the shared push engine (`push_to_target`), so
     `start`/`apply` (this function) and the `push`/stateless verbs POST a
     byte-identical wire body for the same inputs. Returns `(bindings, rules)`
-    (the materialized instances) so the caller can record applied state."""
-    from ..model.bindings import materialize_bindings
-    from ..model.rules import combined_fingerprint, materialize_rules
+    so the caller can record applied state."""
+    from ..model.lock import save_lock
+    from ..model.resolver import resolve_workspace
+    from ..model.rules import combined_fingerprint
     from ..model.workspace import read_token
 
-    if bindings is None:
-        bindings = materialize_bindings(ws, notify)
-    if rules is None:
-        rules = materialize_rules(ws, notify)
+    if bindings is None or rules is None:
+        resolved = resolve_workspace(ws)
+        if resolved.lock_dirty:
+            save_lock(ws, resolved.lock)
+        if bindings is None:
+            bindings = resolved.bindings
+        if rules is None:
+            rules = resolved.rules
     if fingerprint is None:
         fingerprint = combined_fingerprint(bindings, rules)
     return push_to_target(
@@ -281,7 +288,11 @@ def load_stateless_config(path: str) -> tuple[list, list]:
     import tomllib
 
     from ..model.bindings import bindings_from_raw
-    from ..model.rules import named_rules_from_raw, validate as validate_rules
+    from ..model.rules import (
+        _parse_rules,
+        _require_rule_names,
+        validate as validate_rules,
+    )
 
     p = Path(path)
     if not p.exists():
@@ -300,6 +311,7 @@ def load_stateless_config(path: str) -> tuple[list, list]:
             f"(not a container spec); remove: {', '.join(extra)}")
 
     bindings = bindings_from_raw(raw, path, fill_placeholders=True)
-    rules = named_rules_from_raw(raw, path)
+    rules = _parse_rules(raw, path)
+    _require_rule_names(rules, path)
     validate_rules(rules, path)
     return bindings, rules

@@ -894,6 +894,118 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     assert ec == 0
 
 
+# ---- binding add / lock persistence (#62) ------------------------------------
+
+
+def _read_lock(name: str) -> dict:
+    import json
+    from credproxy_cli.core.model.workspace import Workspace
+    p = Workspace(name).lock_json_path
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+def test_binding_add_broken_container_half_leaves_toml_unchanged(xdg, workspaces_dir):
+    """A pre-existing container-half error (here: missing `image`) makes the
+    post-append resolve_workspace raise -- the hand-owned TOML must be restored,
+    never left with an orphaned half-written `[[binding]]` block (#62 fix 3)."""
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text("# no image line -- container half is broken\n")
+    before = cfg.read_text()
+
+    ec, out, err = _run(["workspace", "w", "binding", "add",
+                         "--injector", "bearer", "--provider", "env",
+                         "--secret", "TOK", "--host", "api.example.com"])
+    assert ec != 0
+    assert "pre-existing" in err or "image" in err
+    assert cfg.read_text() == before                 # byte-identical, no orphan
+    assert "[[binding]]" not in cfg.read_text()
+
+
+def test_binding_add_writes_lock_placeholder_absent_from_toml(xdg, workspaces_dir):
+    """`binding add` mints the lock-managed placeholder into lock.json (keyed by
+    binding name) and does NOT write it into the TOML block (#62 fix 7)."""
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text('image = "x"\n')
+
+    ec, out, err = _run(["workspace", "w", "binding", "add",
+                         "--injector", "bearer", "--provider", "env",
+                         "--secret", "TOK", "--host", "api.example.com"])
+    assert ec == 0, err
+    lock = _read_lock("w")
+    assert "bearer-env" in lock.get("placeholders", {})
+    ph = lock["placeholders"]["bearer-env"]
+    assert ph                                        # a real generated placeholder
+    assert "placeholder" not in cfg.read_text()      # never in the hand-owned TOML
+    assert ph not in cfg.read_text()
+
+
+def test_binding_list_does_not_touch_lock(xdg, workspaces_dir):
+    """`binding list` is read-only: resolving placeholders in memory must NOT
+    create or modify lock.json (#62 fix 7)."""
+    from credproxy_cli.core.model.workspace import Workspace
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text("""\
+image = "x"
+
+[[binding]]
+name     = "b"
+injector = "bearer"
+provider = "env"
+secret   = "TOK"
+hosts    = ["api.example.com"]
+""")
+    lock_path = Workspace("w").lock_json_path
+    assert not lock_path.exists()
+    ec, out, err = _run(["workspace", "w", "binding", "list"])
+    assert ec == 0, err
+    assert not lock_path.exists()                    # list minted nothing to disk
+
+
+def test_inspect_does_not_touch_lock(xdg, workspaces_dir, monkeypatch):
+    """`inspect` reads through resolve_workspace WITHOUT persisting the lock (#62
+    fix 7). Docker status is mocked so the managed-workspace path runs offline."""
+    from credproxy_cli.core.model.workspace import Workspace
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.docker.container_status",
+        lambda name: "missing")
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text("""\
+image = "x"
+
+[[binding]]
+name     = "b"
+injector = "bearer"
+provider = "env"
+secret   = "TOK"
+hosts    = ["api.example.com"]
+""")
+    lock_path = Workspace("w").lock_json_path
+    assert not lock_path.exists()
+    ec, out, err = _run(["workspace", "w", "inspect"])
+    assert ec == 0, err
+    assert not lock_path.exists()                    # inspect persisted nothing
+
+
+def test_binding_remove_drops_lock_placeholder(xdg, workspaces_dir):
+    """`binding remove` drops the removed binding's lock placeholder entry, so a
+    later same-named add mints a FRESH one (#62 fix 7)."""
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text('image = "x"\n')
+    # Add two bearer bindings so the lock holds two placeholder entries.
+    for host in ("a.example.com", "b.example.com"):
+        ec, out, err = _run(["workspace", "w", "binding", "add",
+                             "--injector", "bearer", "--provider", "env",
+                             "--secret", "TOK", "--host", host])
+        assert ec == 0, err
+    lock = _read_lock("w")
+    assert set(lock["placeholders"]) == {"bearer-env", "bearer-env-2"}
+
+    ec, out, err = _run(["workspace", "w", "binding", "remove", "bearer-env"])
+    assert ec == 0, err
+    lock = _read_lock("w")
+    assert set(lock["placeholders"]) == {"bearer-env-2"}   # removed entry dropped
+
+
 # ---- strict: no alias verbs --------------------------------------------------
 
 

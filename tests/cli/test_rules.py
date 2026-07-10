@@ -157,6 +157,7 @@ def test_missing_script_rejected(xdg, workspaces_dir):
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
+        name = "s"
         hosts = ["h.example.com"]
         action = "script"
         script = "does-not-exist-zzz"
@@ -165,7 +166,7 @@ def test_missing_script_rejected(xdg, workspaces_dir):
         load_rules(ws)
 
 
-# ---- auto-name + materialize -------------------------------------------------
+# ---- auto-name + name-required ----------------------------------------------
 
 def test_auto_name():
     from credproxy_cli.core.model.rules import Rule, _auto_name
@@ -174,23 +175,19 @@ def test_auto_name():
     assert _auto_name(r, {"block-api-github-com"}) == "block-api-github-com-2"
 
 
-def test_materialize_fills_name(xdg, workspaces_dir):
-    from credproxy_cli.core.model.rules import load_rules, materialize_rules
+def test_missing_name_rejected_with_suggestion(xdg, workspaces_dir):
+    """A hand-authored `[[rule]]` without a `name` is rejected with a prescriptive
+    fix (the intent TOML is hand-owned; names are no longer auto-written)."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.model.rules import load_rules
     ws = _write_ws(workspaces_dir, "w", """
         image = "x"
         [[rule]]
         hosts = ["api.github.com"]
         action = "block"
     """)
-    rules = materialize_rules(ws)
-    assert rules[0].name == "block-api-github-com"
-    assert 'name = "block-api-github-com"' in ws.config_path.read_text()
-    # Idempotent: a second materialize is a no-op.
-    before = ws.config_path.read_text()
-    materialize_rules(ws)
-    assert ws.config_path.read_text() == before
-    # Still loads clean.
-    assert load_rules(ws)[0].name == "block-api-github-com"
+    with pytest.raises(ConfigError, match=r'missing a required `name`.*block-api-github-com'):
+        load_rules(ws)
 
 
 # ---- append / remove ---------------------------------------------------------
@@ -477,6 +474,44 @@ def test_remove_rule_with_params_child_table(xdg, workspaces_dir):
     remove_rule(ws, "guard")
     assert [r.name for r in load_rules(ws)] == ["r2"]      # file still valid
     assert "[rule.params]" not in ws.config_path.read_text()
+
+
+def test_remove_rule_inline_array_form_refused(xdg, workspaces_dir):
+    """The inline-array form (`rule = [ { ... } ]`) parses to entries but has NO
+    removable block span -- `remove_rule` must refuse prescriptively, not
+    IndexError / mis-edit."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.model.rules import remove_rule
+    ws = _write_ws(workspaces_dir, "inlinearr", """\
+        image = "x"
+        rule = [
+          { name = "a", hosts = ["a.io"], action = "block" },
+        ]
+    """)
+    with pytest.raises(ConfigError, match="isn't a removable `\\[\\[rule\\]\\]` block"):
+        remove_rule(ws, "a")
+
+
+def test_remove_rule_duplicate_name_refused(xdg, workspaces_dir):
+    """Two `[[rule]]` blocks with the same name: `remove` refuses as ambiguous
+    rather than silently dropping the first."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.model.rules import remove_rule
+    ws = _write_ws(workspaces_dir, "dupname", """\
+        image = "x"
+
+        [[rule]]
+        name = "dup"
+        hosts = ["a.io"]
+        action = "block"
+
+        [[rule]]
+        name = "dup"
+        hosts = ["b.io"]
+        action = "block"
+    """)
+    with pytest.raises(ConfigError, match="defined more than once"):
+        remove_rule(ws, "dup")
 
 
 def test_rewrite_empty_container_rejected(xdg, workspaces_dir):
