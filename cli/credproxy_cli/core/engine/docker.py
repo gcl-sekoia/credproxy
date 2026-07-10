@@ -139,7 +139,7 @@ def seed_volume_from_container(
     recreated container.
 
     The extract helper runs with the SAME userns mapping as the workspace
-    container (`userns_flags`, from lifecycle._host_user_run_flags) so file
+    container (`userns_flags`, from containers._host_user_run_flags) so file
     ownership round-trips identically on rootless podman, and as `--user 0`
     (namespace-root) so it can restore ownership across the whole mapped uid
     range. On rootful Docker / a root workspace `userns_flags` is empty and it

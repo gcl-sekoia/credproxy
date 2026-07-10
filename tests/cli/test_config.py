@@ -1181,7 +1181,7 @@ def test_auto_stop_defaults_false_and_roundtrips(xdg, workspaces_dir):
     assert load_config(Workspace("w2"))["auto_stop"] is True
 
     # ...and it surfaces in `config --effective` (was absent from the dict before).
-    from credproxy_cli.core.engine.lifecycle import effective_config
+    from credproxy_cli.core.engine.sessions import effective_config
     assert effective_config(load_config(Workspace("w2")))["auto_stop"] is True
 
 

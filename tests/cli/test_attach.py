@@ -177,7 +177,7 @@ def test_delete_attached_removes_config_and_state_only(xdg, workspaces_dir,
     assert ws.config_path.exists() and ws.token_path.exists()
 
     rm_calls = []
-    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.docker.docker_quiet",
+    monkeypatch.setattr("credproxy_cli.core.engine.containers.docker.docker_quiet",
                         lambda argv: rm_calls.append(argv))
 
     ec, out, err = _run(["workspace", "svc", "delete"])
@@ -194,7 +194,7 @@ def test_apply_on_attached_is_push(xdg, workspaces_dir, monkeypatch):
     def fake_push(ws, notify=None, *, wait=False, timeout=120.0):
         called["ws"] = ws.name
         return "http://127.0.0.1:1234"
-    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_workspace", fake_push)
+    monkeypatch.setattr("credproxy_cli.core.engine.startup.push_workspace", fake_push)
 
     ec, out, err = _run(["workspace", "svc", "apply"])
     assert ec == 0
@@ -205,7 +205,7 @@ def test_apply_on_attached_is_push(xdg, workspaces_dir, monkeypatch):
 def test_inspect_attached_shows_target(xdg, workspaces_dir, monkeypatch):
     _attach_ws(workspaces_dir, "svc", _ATTACH_TOML)
     # attach target resolution is best-effort; make it resolve to a fake URL.
-    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.resolve_admin_url",
+    monkeypatch.setattr("credproxy_cli.core.engine.containers.resolve_admin_url",
                         lambda ws, notify=None: "http://127.0.0.1:5555")
     ec, out, err = _run(["workspace", "svc", "inspect"])
     assert ec == 0
@@ -215,7 +215,7 @@ def test_inspect_attached_shows_target(xdg, workspaces_dir, monkeypatch):
 
 def test_inspect_attached_json_carries_attach(xdg, workspaces_dir, monkeypatch):
     _attach_ws(workspaces_dir, "svc", _ATTACH_TOML)
-    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.resolve_admin_url",
+    monkeypatch.setattr("credproxy_cli.core.engine.containers.resolve_admin_url",
                         lambda ws, notify=None: "http://127.0.0.1:5555")
     ec, out, err = _run(["--json", "workspace", "svc", "inspect"])
     assert ec == 0
@@ -309,13 +309,13 @@ def test_discover_filters_one_per_pair(xdg, monkeypatch):
 
 def test_managed_push_proxy_stopped_errors_toward_start(xdg, workspaces_dir,
                                                         monkeypatch):
-    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.engine import containers, setup, startup, sessions
     from credproxy_cli.core.errors import WorkspaceError
     ws = _managed_ws(workspaces_dir, "m")
     _patch_imageenv(monkeypatch)
-    monkeypatch.setattr(lifecycle.docker, "container_status", lambda name: None)
+    monkeypatch.setattr(containers.docker, "container_status", lambda name: None)
     with pytest.raises(WorkspaceError, match="start"):
-        lifecycle.resolve_admin_url(ws)
+        containers.resolve_admin_url(ws)
 
 
 # ---- push shares the engine (managed) ----------------------------------------
@@ -323,11 +323,11 @@ def test_managed_push_proxy_stopped_errors_toward_start(xdg, workspaces_dir,
 
 def test_push_managed_calls_engine_once_and_records(xdg, workspaces_dir,
                                                     monkeypatch):
-    from credproxy_cli.core.engine import lifecycle, push as core_push
+    from credproxy_cli.core.engine import containers, setup, startup, sessions, push as core_push
     from credproxy_cli.core.model.workspace import ensure_token
     ws = _managed_ws(workspaces_dir, "m")
     ensure_token(ws)
-    monkeypatch.setattr(lifecycle, "resolve_admin_url",
+    monkeypatch.setattr(containers, "resolve_admin_url",
                         lambda ws, notify=None: "http://127.0.0.1:9")
     calls = []
 
@@ -336,7 +336,7 @@ def test_push_managed_calls_engine_once_and_records(xdg, workspaces_dir,
         return bindings, rules, 1
     monkeypatch.setattr(core_push, "push_to_target", fake_engine)
 
-    url = lifecycle.push_workspace(ws)
+    url = startup.push_workspace(ws)
     assert calls == ["http://127.0.0.1:9"]
     # #65: applied bindings/rules metadata is recorded under the lock's `applied`
     # section (was applied-bindings.json / applied-rules.json).

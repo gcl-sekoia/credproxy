@@ -143,7 +143,7 @@ def test_doctor_config_sync_ok_on_generation_match(xdg, workspaces_dir, monkeypa
     ws = _good_ws_with_token(workspaces_dir, "syncok")
     lock_update(ws, "applied", {"config_generation": 5})
     monkeypatch.setattr(
-        "credproxy_cli.core.engine.lifecycle.resolve_admin_url",
+        "credproxy_cli.core.engine.containers.resolve_admin_url",
         lambda ws, notify=None: "http://127.0.0.1:39998")
     monkeypatch.setattr(proxy_http, "get_config",
                         lambda url, token: {"generation": 5, "bindings": [], "rules": []})
@@ -160,7 +160,7 @@ def test_doctor_config_sync_fails_on_generation_mismatch(xdg, workspaces_dir, mo
     ws = _good_ws_with_token(workspaces_dir, "syncbad")
     lock_update(ws, "applied", {"config_generation": 5})
     monkeypatch.setattr(
-        "credproxy_cli.core.engine.lifecycle.resolve_admin_url",
+        "credproxy_cli.core.engine.containers.resolve_admin_url",
         lambda ws, notify=None: "http://127.0.0.1:39998")
     monkeypatch.setattr(proxy_http, "get_config",
                         lambda url, token: {"generation": 0, "bindings": [], "rules": []})
@@ -176,7 +176,7 @@ def test_doctor_config_sync_skips_when_proxy_stopped(xdg, workspaces_dir, monkey
     from credproxy_cli.core.errors import WorkspaceError
     _good_ws_with_token(workspaces_dir, "syncstop")
     monkeypatch.setattr(
-        "credproxy_cli.core.engine.lifecycle.resolve_admin_url",
+        "credproxy_cli.core.engine.containers.resolve_admin_url",
         lambda ws, notify=None: (_ for _ in ()).throw(WorkspaceError("not running")))
     c = _config_sync_check("syncstop", doctor.run("syncstop"))
     assert c is not None and c.ok

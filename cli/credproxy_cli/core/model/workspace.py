@@ -156,7 +156,7 @@ class Workspace:
         """Name prefix shared by all of this workspace's managed volumes. Just a
         human-readable namespace -- it is NOT used to enumerate volumes for
         delete (that's by the `credproxy.workspace` label, since one name can be
-        a prefix of another: `foo` vs `foo-bar`); see lifecycle._workspace_volumes."""
+        a prefix of another: `foo` vs `foo-bar`); see containers._workspace_volumes."""
         return f"credproxy-vol-{self.name}-"
 
     def volume(self, name: str) -> str:

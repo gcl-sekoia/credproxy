@@ -79,7 +79,7 @@ def _stub_build(monkeypatch):
 def _stub_start(monkeypatch):
     from credproxy_cli.porcelain import cmd_lifecycle
     calls = []
-    monkeypatch.setattr(cmd_lifecycle.lifecycle, "start_workspace",
+    monkeypatch.setattr(cmd_lifecycle.startup, "start_workspace",
                         lambda ws, notify=None, **kw: calls.append(ws.name))
     return calls
 

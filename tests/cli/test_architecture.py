@@ -20,9 +20,13 @@ MODEL_DIR = CORE_DIR / "model"
 # Bare engine module names (as they'd appear in `from ..engine import X` or a
 # stray `from ..docker import ...`). The model plane must not import any of them.
 ENGINE_MODULES = {
-    "docker", "imageenv", "runtime", "compose", "lifecycle", "push",
+    "docker", "imageenv", "runtime", "compose", "push",
     "proxy_http", "doctor", "scriptcheck",
+    # #68 split the old lifecycle monolith into these four.
+    "containers", "setup", "startup", "sessions",
 }
+
+ENGINE_DIR = CORE_DIR / "engine"
 
 
 def _model_files():
@@ -143,3 +147,62 @@ def test_core_never_imports_porcelain():
     assert not offenders, (
         "core/ modules must not import porcelain (porcelain imports core, never "
         "the reverse):\n" + "\n".join(offenders))
+
+
+# ---- intra-engine boundary (#68): startup is the sole sequencer --------------
+#
+# The #68 split made `startup` the ONLY cross-module sequencer: it imports
+# `containers`/`setup`/`sessions` and wires them together. Those three must NOT
+# top-level-import `startup` back (that would make the sequencing bidirectional
+# and risk an import cycle). `sessions` genuinely needs the start entry point
+# (`enter`/`exec` start the workspace), so it imports `startup` LAZILY inside the
+# functions that need it -- which is why this rule checks TOP-LEVEL imports only.
+
+
+def _toplevel_imports(tree: ast.Module):
+    """Yield (module_str_or_None, imported_names, node) for imports executed at
+    MODULE LOAD -- i.e. anywhere NOT inside a function body. This includes an
+    import nested in a module-level `try`/`if`/`with`/`for`/class body (all run at
+    import time), but NOT a lazy `def foo(): import ...` (which is allowed --
+    sessions uses one for the start entry point). Descends into every node except
+    Function/AsyncFunction bodies."""
+    def walk(node):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue  # a function body's imports are lazy, not load-time
+            if isinstance(child, ast.Import):
+                for alias in child.names:
+                    yield alias.name, [], child
+            elif isinstance(child, ast.ImportFrom):
+                prefix = "." * child.level
+                mod = (prefix + (child.module or "")) if child.level \
+                    else (child.module or "")
+                yield mod, [a.name for a in child.names], child
+            else:
+                yield from walk(child)
+    yield from walk(tree)
+
+
+def test_engine_leaves_never_toplevel_import_startup():
+    """`containers`/`setup`/`sessions` must not TOP-LEVEL-import `startup` -- the
+    one-directional sequencing boundary (#68). A lazy in-function import (which
+    sessions uses for the start entry point) is allowed and not flagged."""
+    offenders = []
+    for stem in ("containers", "setup", "sessions"):
+        f = ENGINE_DIR / f"{stem}.py"
+        tree = ast.parse(f.read_text(), filename=str(f))
+        for mod, names, node in _toplevel_imports(tree):
+            stripped = (mod or "").lstrip(".")
+            parts = stripped.split(".") if stripped else []
+            # `from .startup import X` / `from ..engine.startup import X` /
+            # `import credproxy_cli.core.engine.startup`
+            hit = parts and parts[-1] == "startup"
+            # `from . import startup` / `from ..engine import startup`
+            hit = hit or "startup" in names
+            if hit:
+                offenders.append(f"{f.name}:{node.lineno} top-level imports startup")
+    assert not offenders, (
+        "engine leaves (containers/setup/sessions) must not top-level-import "
+        "startup -- startup is the sole cross-module sequencer; use a lazy "
+        "in-function import if the start entry point is genuinely needed:\n"
+        + "\n".join(offenders))

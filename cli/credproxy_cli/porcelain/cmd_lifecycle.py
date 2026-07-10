@@ -1,14 +1,14 @@
 """The container-lifecycle verbs: enter/exec/start/stop/recreate/apply/push/
 resolve/logs, plus the stateless top-level `push`. These drive the engine-plane
-`lifecycle`/`push` modules; the log formatter turns the proxy's structured record
-stream into human lines."""
+`containers`/`sessions`/`startup`/`push` modules; the log formatter turns the
+proxy's structured record stream into human lines."""
 from __future__ import annotations
 
 import os
 import sys
 
 from ..core.engine import docker as core_docker
-from ..core.engine import lifecycle
+from ..core.engine import containers, sessions, startup
 from ..core.errors import DependencyError
 from ..core.model.workspace import Workspace
 from . import render
@@ -28,7 +28,7 @@ def do_enter(ctx: Ctx, name: str | None, trailing: list[str],
     # Empty trailing -> the core runs the config `shell` (default: a login
     # shell); an explicit `-- CMD` runs bare. Resolved in _enter_exec_cmd, which
     # has the loaded config.
-    exit_code = lifecycle.enter_workspace(
+    exit_code = sessions.enter_workspace(
         ws, trailing, notify=say, user_override=user_override, push=push)
     sys.exit(exit_code)
 
@@ -59,7 +59,7 @@ def do_exec(ctx: Ctx, name: str | None, trailing: list[str], *,
     mode = "login" if login else "raw" if raw else "shim"
     ws = _resolve_ws(ctx, name)
     _reject_if_attached(ws, "exec")
-    exit_code = lifecycle.exec_workspace(
+    exit_code = sessions.exec_workspace(
         ws, trailing, notify=say, mode=mode, user_override=user, push=push)
     sys.exit(exit_code)
 
@@ -68,7 +68,7 @@ def do_start(ctx: Ctx, name: str | None) -> None:
     ws = _resolve_ws(ctx, name)
     _reject_if_attached(ws, "start")
     ensure_proxy_image(ctx)
-    lifecycle.start_workspace(ws, notify=say)
+    startup.start_workspace(ws, notify=say)
     render.OUT.started(ws.name)
 
 
@@ -76,7 +76,7 @@ def do_stop(ctx: Ctx, name: str | None) -> None:
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
     _reject_if_attached(ws, "stop")
-    lifecycle.stop_workspace(ws)
+    containers.stop_workspace(ws)
     render.OUT.stopped(ws.name)
 
 
@@ -88,10 +88,10 @@ def do_apply(ctx: Ctx, name: str | None) -> None:
     # An attached workspace has no container spec to reconcile -- `apply` IS a
     # push (resolve secrets + POST the full wire config to its external proxy).
     if core_config.quick_attach(ws):
-        admin_url = lifecycle.push_workspace(ws, notify=say)
+        admin_url = startup.push_workspace(ws, notify=say)
         render.OUT.pushed(ws.name, admin_url, attached=True, as_apply=True)
         return
-    result = lifecycle.apply_config(ws, notify=say)
+    result = startup.apply_config(ws, notify=say)
     render.OUT.applied(ws.name, result)
 
 
@@ -104,7 +104,7 @@ def do_push(ctx: Ctx, name: str | None, wait: bool, timeout: float) -> None:
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
     attached = core_config.quick_attach(ws)
-    admin_url = lifecycle.push_workspace(ws, notify=say, wait=wait, timeout=timeout)
+    admin_url = startup.push_workspace(ws, notify=say, wait=wait, timeout=timeout)
     render.OUT.pushed(ws.name, admin_url, attached=attached)
 
 
@@ -117,7 +117,7 @@ def do_resolve(ctx: Ctx, name: str | None, out: str | None) -> None:
     if bool(ctx.json) == bool(out):
         fail("`resolve` needs exactly one of --json (blob to stdout) or "
              "--out FILE (writes mode 0600)")
-    wire = lifecycle.resolve_workspace_wire(ws, notify=say)
+    wire = startup.resolve_workspace_wire(ws, notify=say)
     if out is not None:
         _write_resolved(ws, wire, out)
         render.OUT.resolved(ws.name, out)
@@ -156,7 +156,7 @@ def do_recreate(ctx: Ctx, name: str | None, include_proxy: bool,
     if reset_volumes:
         _confirm_destructive(ctx, ws, implicit, "reset volume(s) of")
     ensure_proxy_image(ctx)
-    lifecycle.recreate_workspace(ws, notify=say, include_proxy=include_proxy,
+    startup.recreate_workspace(ws, notify=say, include_proxy=include_proxy,
                                  reset_volumes=reset_volumes)
     render.OUT.recreated(ws.name, include_proxy, reset_volumes)
 

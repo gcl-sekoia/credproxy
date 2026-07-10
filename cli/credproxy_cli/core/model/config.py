@@ -49,7 +49,7 @@ _VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 # Every top-level key a workspace TOML may carry: the container-side settings
 # load_config parses, `auto_stop` (host-side session behavior, read fresh by
-# lifecycle._maybe_auto_stop), and the two array-of-tables handled by their own
+# sessions._maybe_auto_stop), and the two array-of-tables handled by their own
 # modules (`binding` -> core/bindings.py, `rule` -> core/rules.py). load_config
 # rejects anything else so a typo (`mount` for `mounts`, `setup_cmd`, `user_id`)
 # is a hard error, not a silent no-op -- the TOML is the single source of truth,
@@ -607,7 +607,7 @@ def load_config_from_text(text: str, source: str, *,
     # `enter` session exits). Strict bool -- `auto_stop = "false"` is a truthy
     # STRING that would silently ENABLE auto-stop, the exact trap this rejects.
     # NOT part of the spec hash (host-side only, never touches the container).
-    # lifecycle._maybe_auto_stop re-reads it fresh (mid-session edits are
+    # sessions._maybe_auto_stop re-reads it fresh (mid-session edits are
     # intentional) but with the same `is True` strictness.
     auto_stop = raw.get("auto_stop", False)
     if not isinstance(auto_stop, bool):

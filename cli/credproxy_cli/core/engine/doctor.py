@@ -176,13 +176,13 @@ def _proxy_config_sync_check(ws: Workspace) -> list[Check]:
     Skip-with-note (ok=True) when the proxy is stopped/unreachable -- doctor stays
     green offline; a stopped proxy is nothing to reconcile. Rides the same admin
     URL resolution `push`/`apply` use, so it covers attached workspaces too."""
-    from . import lifecycle
+    from . import containers
     from .proxy_http import get_config
     from ..model.workspace import read_token
 
     cid = f"ws:{ws.name}:proxy:config-sync"
     try:
-        admin_url = lifecycle.resolve_admin_url(ws)
+        admin_url = containers.resolve_admin_url(ws)
         token = read_token(ws)
     except CredproxyError:
         # Proxy not running / unreachable / token missing -> nothing to compare.
@@ -192,7 +192,7 @@ def _proxy_config_sync_check(ws: Workspace) -> list[Check]:
     if live is None:
         return [Check(cid, True,
                       f"[{ws.name}] proxy did not answer -- config-sync check skipped")]
-    applied_gen = lifecycle._load_applied(ws).get("config_generation")
+    applied_gen = containers._load_applied(ws).get("config_generation")
     live_gen = live.get("generation")
     if live_gen == applied_gen:
         return [_ok(cid,
@@ -218,9 +218,9 @@ def _runc_keep_id_check(ws: Workspace, cfg: dict) -> list[Check]:
     on rootless podman + credproxy-owned keep-id; we add the runtime==runc check.
     Both read the SAME cached runtime probe doctor's env checks already ran, so
     no extra docker round-trip."""
-    from . import lifecycle
+    from . import containers
     from .runtime import oci_runtime
-    if not lifecycle.emits_keep_id(cfg) or oci_runtime() != "runc":
+    if not containers.emits_keep_id(cfg) or oci_runtime() != "runc":
         return []
     return [_fail(
         f"ws:{ws.name}:runc-sysfs",

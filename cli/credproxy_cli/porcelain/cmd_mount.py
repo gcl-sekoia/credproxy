@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 
 from ..core.engine import docker as core_docker
-from ..core.engine import lifecycle
+from ..core.engine import sessions as core_sessions, startup
 from . import render
 from .render import fail, say
 from .common import (
@@ -32,12 +32,12 @@ def do_mount_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     # editing the file, so it isn't gated (mirrors un-gated plain `recreate`).
     if a.mount_preserve:
         status = core_docker.container_status(ws.ws_container)
-        sessions = (lifecycle._count_live_sessions(ws)
+        sessions = (core_sessions._count_live_sessions(ws)
                     if status == "running" else 0)
         if sessions:
             _confirm_running_recreate(ctx, ws, sessions)
 
-    lifecycle.add_managed_volume(
+    startup.add_managed_volume(
         ws, name=a.mount_volume, target=a.mount_target,
         readonly=a.mount_ro, preserve=a.mount_preserve,
         user_owned=a.mount_user_owned, notify=say,

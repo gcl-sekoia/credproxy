@@ -107,11 +107,11 @@ def test_loose_resolves_default_announced(xdg, workspaces_dir, monkeypatch):
 
     # Stub docker so `start` doesn't actually run containers
     monkeypatch.setattr(
-        "credproxy_cli.core.engine.lifecycle.start_workspace",
+        "credproxy_cli.core.engine.startup.start_workspace",
         lambda ws, notify=None: notify("stub") if notify else None,
     )
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cmd_lifecycle.lifecycle.start_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.startup.start_workspace",
         lambda ws, notify=None: None,
     )
 
@@ -438,7 +438,7 @@ def test_list_marks_default(xdg, workspaces_dir, monkeypatch):
     from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("alpha"))
 
-    # list_workspaces (engine.lifecycle) queries the docker module; patch its attr.
+    # list_workspaces (engine.containers) queries the docker module; patch its attr.
     import credproxy_cli.core.engine.docker as _docker_mod
     monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
 
@@ -772,7 +772,7 @@ def test_delete_explicit_no_prompt(xdg, workspaces_dir, monkeypatch):
     (workspaces_dir / "target.toml").write_text('image = "x"\n')
 
     monkeypatch.setattr(
-        "credproxy_cli.core.engine.lifecycle.delete_workspace",
+        "credproxy_cli.core.engine.containers.delete_workspace",
         lambda ws, keep_volumes=False: None,
     )
 
@@ -789,7 +789,7 @@ def test_delete_implicit_non_tty_fails(xdg, workspaces_dir, monkeypatch):
     set_default(Workspace("target"))
 
     monkeypatch.setattr(
-        "credproxy_cli.core.engine.lifecycle.delete_workspace",
+        "credproxy_cli.core.engine.containers.delete_workspace",
         lambda ws, keep_volumes=False: None,
     )
 
@@ -807,7 +807,7 @@ def test_delete_implicit_yes_bypasses_gate(xdg, workspaces_dir, monkeypatch):
     set_default(Workspace("target"))
 
     monkeypatch.setattr(
-        "credproxy_cli.core.engine.lifecycle.delete_workspace",
+        "credproxy_cli.core.engine.containers.delete_workspace",
         lambda ws, keep_volumes=False: None,
     )
 
@@ -823,7 +823,7 @@ def test_delete_implicit_tty_yes_answer(xdg, workspaces_dir, monkeypatch):
     set_default(Workspace("target"))
 
     monkeypatch.setattr(
-        "credproxy_cli.core.engine.lifecycle.delete_workspace",
+        "credproxy_cli.core.engine.containers.delete_workspace",
         lambda ws, keep_volumes=False: None,
     )
 
@@ -839,7 +839,7 @@ def test_delete_implicit_tty_no_answer_aborts(xdg, workspaces_dir, monkeypatch):
     set_default(Workspace("target"))
 
     monkeypatch.setattr(
-        "credproxy_cli.core.engine.lifecycle.delete_workspace",
+        "credproxy_cli.core.engine.containers.delete_workspace",
         lambda ws, keep_volumes=False: None,
     )
 
@@ -966,7 +966,7 @@ def test_inspect_does_not_touch_lock(xdg, workspaces_dir, monkeypatch):
     fix 7). Docker status is mocked so the managed-workspace path runs offline."""
     from credproxy_cli.core.model.workspace import Workspace
     monkeypatch.setattr(
-        "credproxy_cli.core.engine.lifecycle.docker.container_status",
+        "credproxy_cli.core.engine.containers.docker.container_status",
         lambda name: "missing")
     cfg = workspaces_dir / "w.toml"
     cfg.write_text("""\
@@ -1150,13 +1150,13 @@ def test_loose_help_via_help_flag(xdg):
 
 
 def _stub_recreate(monkeypatch):
-    """Replace lifecycle.recreate_workspace with a recorder of
+    """Replace startup.recreate_workspace with a recorder of
     (include_proxy, reset_volumes). Also neutralize the proxy-image gate
     (`ensure_proxy_image`, which would otherwise hit docker): these tests cover
     recreate's argument plumbing, not the image check (that has its own suite)."""
     calls: list = []
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cmd_lifecycle.lifecycle.recreate_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.startup.recreate_workspace",
         lambda ws, notify=None, include_proxy=False, reset_volumes=None:
             calls.append((include_proxy, reset_volumes or [])),
     )
@@ -1373,14 +1373,15 @@ def _stub_preserve_docker(monkeypatch, *, running=True, sessions=1):
     """Stub the runtime probes do_mount_add consults for the --preserve gate, and
     no-op the actual add so no real docker runs."""
     from credproxy_cli.core.engine import docker as _d
-    from credproxy_cli.core.engine import lifecycle as _l
+    from credproxy_cli.core.engine import sessions as _sessions
+    from credproxy_cli.core.engine import startup as _startup
     monkeypatch.setattr(_d, "container_status",
                         lambda c: "running" if running else None)
-    monkeypatch.setattr(_l, "_count_live_sessions", lambda ws, **kw: sessions)
+    monkeypatch.setattr(_sessions, "_count_live_sessions", lambda ws, **kw: sessions)
     called = {}
     def _add(ws, **kw):
         called.update(kw)
-    monkeypatch.setattr(_l, "add_managed_volume", _add)
+    monkeypatch.setattr(_startup, "add_managed_volume", _add)
     return called
 
 
@@ -1585,7 +1586,7 @@ def test_exec_empty_command_fails(xdg, workspaces_dir):
 def test_exec_propagates_exit_code(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cmd_lifecycle.lifecycle.exec_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.sessions.exec_workspace",
         lambda ws, cmd, notify=None, *, mode="shim", user_override=None, push=False: 7)
     ec, out, err = _run(["workspace", "ws", "exec", "--", "false"])
     assert ec == 7
@@ -1597,7 +1598,7 @@ def test_exec_default_mode_is_shim(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     seen = {}
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cmd_lifecycle.lifecycle.exec_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.sessions.exec_workspace",
         lambda ws, cmd, notify=None, *, mode="shim", user_override=None, push=False:
             seen.update(mode=mode, user=user_override) or 0)
     _run(["workspace", "ws", "exec", "--", "curl", "x"])
@@ -1608,7 +1609,7 @@ def test_exec_raw_and_login_flags_select_mode(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     seen = {}
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cmd_lifecycle.lifecycle.exec_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.sessions.exec_workspace",
         lambda ws, cmd, notify=None, *, mode="shim", user_override=None, push=False:
             seen.update(mode=mode, user=user_override) or 0)
     _run(["workspace", "ws", "exec", "--raw", "--user", "root", "--", "id"])

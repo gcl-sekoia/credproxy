@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from ..core.engine import lifecycle
+from ..core.engine import containers
 from ..core.errors import CredproxyError
 from ..core.model.workspace import Workspace
 from . import render
@@ -205,7 +205,7 @@ def _do_rule_test_live(ctx: Ctx, ws: Workspace, a: argparse.Namespace) -> None:
     from ..core.engine import push as core_push
     from ..core.model.workspace import read_token
 
-    admin_url = lifecycle.resolve_admin_url(ws, notify=say)
+    admin_url = containers.resolve_admin_url(ws, notify=say)
     result = core_push.rule_test(admin_url, read_token(ws), a.method, a.url)
     render.OUT.rule_test_live(a.method.upper(), a.url, result)
 

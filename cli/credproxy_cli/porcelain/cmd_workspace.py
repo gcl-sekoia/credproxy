@@ -8,7 +8,7 @@ import os
 import tomllib
 
 from ..core.model import dirmatch
-from ..core.engine import lifecycle
+from ..core.engine import containers, sessions
 from ..core.model import pointer
 from ..core.model import workspace as core_workspace
 from ..core.errors import CredproxyError
@@ -67,9 +67,9 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
     final_text, preset_announces, prereq_inputs = _expand_template_presets(
         ctx, base_text, source)
     if attach is not None:
-        lifecycle.create_attached_workspace_files(ws, selector, text=final_text)
+        containers.create_attached_workspace_files(ws, selector, text=final_text)
     else:
-        lifecycle.create_workspace_files(ws, text=final_text)
+        containers.create_workspace_files(ws, text=final_text)
     # Host-prerequisite checks (#58) run only AFTER the atomic write succeeds, so
     # a `fetch=true` provider check never execs a provider for a create that then
     # aborts. Advisory -- the reference is durable, host state is fixable afterward.
@@ -233,9 +233,9 @@ def do_delete(ctx: Ctx, name: str | None, keep_volumes: bool) -> None:
     # An attached workspace owns no containers/volumes -- remove only its config
     # file + state dir (its `attach` gate keeps the confirmation flow the same).
     if core_config.quick_attach(ws):
-        lifecycle.delete_workspace(ws, keep_volumes=keep_volumes, containers=False)
+        containers.delete_workspace(ws, keep_volumes=keep_volumes, containers=False)
     else:
-        lifecycle.delete_workspace(ws, keep_volumes=keep_volumes)
+        containers.delete_workspace(ws, keep_volumes=keep_volumes)
     if was_default:
         pointer.clear_default()
     render.OUT.deleted(ws.name)
@@ -315,7 +315,7 @@ def do_list(ctx: Ctx, filter_: str | None) -> None:
         except CredproxyError:
             here_name = None
     rows = []
-    for s in lifecycle.list_workspaces():
+    for s in containers.list_workspaces():
         if filter_ and filter_ not in s.name:
             continue
         rows.append({
@@ -457,7 +457,7 @@ def do_config(ctx: Ctx, name: str | None, declared: bool) -> None:
         # Effective view: fold in any `[[preset]]` container half (config-v2) via
         # the resolver, then fill exec-time defaults.
         from ..core.model.resolver import resolve_workspace
-        cfg = lifecycle.effective_config(
+        cfg = sessions.effective_config(
             resolve_workspace(ws, check_bind_exists=True).config)
     render.OUT.config({
         "mode": "declared" if declared else "effective",
@@ -468,7 +468,7 @@ def do_config(ctx: Ctx, name: str | None, declared: bool) -> None:
 
 def do_inspect(ctx: Ctx, name: str | None) -> None:
     ws = _resolve_ws(ctx, name)
-    data = lifecycle.inspect_workspace(ws)
+    data = containers.inspect_workspace(ws)
     render.OUT.inspect({
         "name": data.name,
         "config_path": data.config_path,

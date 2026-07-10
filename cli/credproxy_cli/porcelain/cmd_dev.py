@@ -7,7 +7,7 @@ import os
 import sys
 
 from ..core.engine import docker as core_docker
-from ..core.engine import lifecycle
+from ..core.engine import startup
 from ..core.errors import DependencyError
 from ..core.model.workspace import for_name
 from ..core.paths import IMAGE_TAG, PROXY_DIR, TESTS_DIR
@@ -187,7 +187,7 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
 def do_dev_reload(ctx: Ctx, name: str | None) -> None:
     ws = _resolve_ws(ctx, name)
     _reject_if_attached(ws, "dev reload")
-    lifecycle.reload_proxy(ws)
+    startup.reload_proxy(ws)
     render.OUT.reloaded(ws.name)
 
 
