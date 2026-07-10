@@ -7,23 +7,32 @@ is silently dropped. The core never imports porcelain and never prints.
 
 Setup commands (config key `setup`) run once per container instance: on a
 freshly created/recreated container, and on the next `start` after a failed
-attempt (the <state_dir>/setup_done marker records the container id that
+attempt (the lock's `applied.setup_container_id` records the container id that
 COMPLETED setup, written only on success -- so a failure retries). A plain
 `start`/`stop` of an existing container does NOT re-run them (same id, writable
 layer intact). Because a recreate re-runs them, setup commands should be
 idempotent.
 
-Applied-state records (written by this module, no side effects on read):
-  <state_dir>/applied-spec.json   — the spec dict that fed the last
-      successful workspace container creation (image, home, mounts, env,
-      setup, proxy_id). Used by inspect/apply for itemizable drift.
-  <state_dir>/applied-bindings.json — binding metadata (name, injector,
-      provider, secret, hosts, placeholder, env) pushed to the proxy after
-      a successful config push. NO secret values. Used by inspect/apply.
+Applied-state (written by this module into the lock's `applied` section, no side
+effects on read -- #65 folded the old per-file artifacts into `lock.json`):
+  applied.spec              — the spec dict that fed the last successful
+      workspace container creation (image, mounts, env, setup, run_flags,
+      map_host_user, user_uid, hostname, proxy_id). inspect/apply itemizable drift.
+  applied.bindings          — binding metadata (name, injector, provider, secret,
+      hosts, placeholder, env) pushed to the proxy after a successful config
+      push. NO secret values. Used by inspect/apply.
+  applied.rules             — rule wire metadata last pushed. No secrets.
+  applied.config_generation — the generation the proxy returned for the last
+      accepted push (groundwork for #66).
+  applied.setup_container_id — the container id that last COMPLETED setup.
+
+All `applied` writes go through the model plane's `lock.update("applied", ...)`
+(load-modify-write the whole lock), so they preserve the resolver's
+`placeholders`/`presets` and vice versa -- sequenced AFTER any resolver
+`save_lock` within the same held workspace flock so neither reads a stale file.
 """
 from __future__ import annotations
 
-import json
 import os
 import posixpath
 import subprocess
@@ -75,15 +84,45 @@ def _noop(_msg: str) -> None:
     pass
 
 
-# ---- applied-state helpers --------------------------------------------------
+# ---- applied-state helpers (the lock's `applied` section) -------------------
+#
+# The old per-file artifacts (applied-spec.json / applied-bindings.json /
+# applied-rules.json / setup_done) are folded into `lock.json`'s `applied`
+# section (#65). Every write merges into that section via lock.update, which
+# load-modify-writes the WHOLE lock so the resolver's placeholders/presets are
+# preserved; every read tolerates a missing lock/section (== "nothing applied").
+
+
+def _load_applied(ws: Workspace) -> dict:
+    """The lock's `applied` section, or {} if the lock/section is absent (== a
+    fresh workspace with nothing applied yet -- the old missing-file case)."""
+    from ..model.lock import load_lock
+
+    try:
+        applied = load_lock(ws).get("applied")
+    except (ValueError, OSError):
+        return {}
+    return applied if isinstance(applied, dict) else {}
+
+
+def _update_applied(ws: Workspace, **fields) -> None:
+    """Merge `fields` into the lock's `applied` section, preserving the resolver's
+    placeholders/presets (and any applied keys not being written) by routing
+    through lock.update (load-modify-write of the whole lock). Callers hold the
+    workspace flock and have already persisted any dirty resolver lock, so this
+    reads a fresh file and clobbers nothing."""
+    from ..model.lock import update as lock_update
+
+    applied = dict(_load_applied(ws))
+    applied.update(fields)
+    lock_update(ws, "applied", applied)
 
 
 def _write_applied_spec(ws: Workspace, cfg: dict, proxy_id: str | None) -> None:
-    """Write the workspace launch spec to <state_dir>/applied-spec.json.
+    """Record the workspace launch spec in `applied.spec`.
 
     Called after creating the workspace container. The spec matches what
     workspace_spec_hash() hashes, so drift can be recomputed exactly."""
-    ws.ensure_state_dir()
     spec = {
         "image": cfg["image"],
         "mounts": cfg["mounts"],
@@ -95,17 +134,13 @@ def _write_applied_spec(ws: Workspace, cfg: dict, proxy_id: str | None) -> None:
         "hostname": hostname_for(ws.name),
         "proxy_id": proxy_id,
     }
-    atomic_write_text(ws.applied_spec_path, json.dumps(spec, indent=2) + "\n")
+    _update_applied(ws, spec=spec)
 
 
-def _write_applied_bindings(ws: Workspace, bindings) -> None:
-    """Write binding metadata (no secret values) to applied-bindings.json.
-
-    `bindings` is a list of Binding dataclass instances (from bindings.py).
-    Only structural metadata is recorded; `real` secret values are never
-    written here."""
-    ws.ensure_state_dir()
-    records = [
+def _binding_applied_records(bindings) -> list[dict]:
+    """Binding metadata (NO secret values) for the `applied.bindings` record.
+    `bindings` is a list of Binding dataclass instances (from bindings.py)."""
+    return [
         {
             "name": b.name,
             "injector": b.injector,
@@ -117,49 +152,32 @@ def _write_applied_bindings(ws: Workspace, bindings) -> None:
         }
         for b in bindings
     ]
-    atomic_write_text(ws.applied_bindings_path, json.dumps(records, indent=2) + "\n")
 
 
-def _load_applied_spec(ws: Workspace) -> dict | None:
-    """Load the last recorded applied spec. Returns None if not present."""
-    if not ws.applied_spec_path.exists():
-        return None
-    try:
-        return json.loads(ws.applied_spec_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def _load_applied_bindings(ws: Workspace) -> list[dict] | None:
-    """Load the last recorded applied bindings. Returns None if not present."""
-    if not ws.applied_bindings_path.exists():
-        return None
-    try:
-        return json.loads(ws.applied_bindings_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def _write_applied_rules(ws: Workspace, rules) -> None:
-    """Write rule metadata to applied-rules.json (a sibling of
-    applied-bindings.json). Rules carry no secret, so this records the whole wire
-    shape -- name, hosts, methods, path, action, visibility, action params, and
-    a script rule's source. Used for drift detection."""
+def _write_applied_push(ws: Workspace, bindings, rules,
+                        generation: int | None) -> None:
+    """Record the metadata of a successful config push into `applied`: binding
+    metadata (no secret values), rule wire metadata (rules carry no secret), and
+    the `config_generation` the proxy returned (None if the response omitted it).
+    Written in ONE lock update so the three move together."""
     from ..model.rules import rule_wire_entries
 
-    ws.ensure_state_dir()
-    atomic_write_text(ws.applied_rules_path,
-                      json.dumps(rule_wire_entries(rules), indent=2) + "\n")
+    fields = {
+        "bindings": _binding_applied_records(bindings),
+        "rules": rule_wire_entries(rules),
+        # Always overwrite: a None generation (the proxy omitted it -- e.g. an
+        # attach.admin_url target on a proxy build that doesn't return it) must
+        # NOT leave a PREVIOUS push's generation attributed to this one. Stored
+        # null reads back as None == "unknown" for #66's reality comparison.
+        "config_generation": generation,
+    }
+    _update_applied(ws, **fields)
 
 
 def _load_applied_rules(ws: Workspace) -> list[dict] | None:
-    """Load the last recorded applied rules. Returns None if not present."""
-    if not ws.applied_rules_path.exists():
-        return None
-    try:
-        return json.loads(ws.applied_rules_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
+    """The last recorded applied rules (`applied.rules`), or None if not present."""
+    r = _load_applied(ws).get("rules")
+    return r if isinstance(r, list) else None
 
 
 def create_workspace_files(ws: Workspace, text: str | None = None) -> None:
@@ -222,8 +240,9 @@ def push_workspace(ws: Workspace, notify: Notify = _noop, *,
                    wait: bool = False, timeout: float = 120.0) -> str:
     """The `push` verb: resolve every binding's secret and POST the FULL wire
     config (bindings + rules, the SAME body `start` sends) to the workspace's
-    proxy -- managed or attached. Records applied-bindings/-rules (G5) so
-    `inspect` drift works. Returns the admin URL pushed to.
+    proxy -- managed or attached. Records applied bindings/rules metadata + the
+    returned config_generation into the lock's `applied` section (G5) so `inspect`
+    drift works. Returns the admin URL pushed to.
 
     `wait` polls `/health` (never `/ready`, I1) until capture-ready or `timeout`.
     A blocking per-workspace push lock makes a concurrent push WAIT then re-push
@@ -244,13 +263,16 @@ def push_workspace(ws: Workspace, notify: Notify = _noop, *,
         resolved = resolve_workspace(ws)
         for n in resolved.notes:
             notify(f"note: {n}")
+        # Persist any newly-minted resolver placeholders FIRST, then record the
+        # `applied` section -- both under the held flock, so the applied update's
+        # load-modify-write reads the fresh lock and preserves the placeholders.
         if resolved.lock_dirty:
             save_lock(ws, resolved.lock)
         bindings, rules = resolved.bindings, resolved.rules
         fp = combined_fingerprint(bindings, rules)
-        core_push.push_to_target(admin_url, token, bindings, rules, fp, notify)
-        _write_applied_bindings(ws, bindings)
-        _write_applied_rules(ws, rules)
+        _, _, generation = core_push.push_to_target(
+            admin_url, token, bindings, rules, fp, notify)
+        _write_applied_push(ws, bindings, rules, generation)
     return admin_url
 
 
@@ -658,14 +680,15 @@ def create_ws_container(
 
 
 def _read_setup_marker(ws: Workspace) -> str | None:
-    """The container id that last COMPLETED setup, or None."""
-    p = ws.setup_done_path
-    return p.read_text().strip() if p.exists() else None
+    """The container id that last COMPLETED setup (`applied.setup_container_id`),
+    or None. Not a docker label -- setup completes AFTER create, and labels are
+    immutable post-create."""
+    cid = _load_applied(ws).get("setup_container_id")
+    return cid if isinstance(cid, str) else None
 
 
 def _write_setup_marker(ws: Workspace, container_id: str) -> None:
-    ws.ensure_state_dir()
-    atomic_write_text(ws.setup_done_path, container_id + "\n")
+    _update_applied(ws, setup_container_id=container_id)
 
 
 def _setup_needed(marker: str | None, container_id: str) -> bool:
@@ -990,11 +1013,10 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
     status = None if (force_push or proxy_fresh) else proxy_status(ws, host_port)
     if _should_push(force_push, proxy_fresh, status, want_fp):
         notify("pushing config...")
-        pushed_bindings, pushed_rules = push_config(
+        pushed_bindings, pushed_rules, generation = push_config(
             ws, host_port, notify, bindings=bindings, rules=rules,
             fingerprint=want_fp)
-        _write_applied_bindings(ws, pushed_bindings)
-        _write_applied_rules(ws, pushed_rules)
+        _write_applied_push(ws, pushed_bindings, pushed_rules, generation)
     else:
         notify("config unchanged on the proxy; skipped push "
                "(use `enter --push` to refresh)")
@@ -1330,18 +1352,21 @@ def _compute_drift(
 ) -> DriftReport:
     """Compare current config against the last applied spec + bindings + rules.
 
-    Container-spec drift is compared against applied-spec.json.
-    Bindings drift is compared against applied-bindings.json.
-    Rules drift is compared against applied-rules.json.
+    All three baselines come from the lock's `applied` section (#65 folded the
+    old applied-*.json files into it): `applied.spec`, `applied.bindings`,
+    `applied.rules`. A missing lock/section reads as "nothing applied".
     Returns a DriftReport with all detected changes."""
     changes: list[DriftItem] = []
 
-    applied_spec = _load_applied_spec(ws)
-    applied_bindings = _load_applied_bindings(ws)
+    applied = _load_applied(ws)
+    applied_spec = applied.get("spec") if isinstance(applied.get("spec"), dict) else None
+    applied_bindings = applied.get("bindings")
+    if not isinstance(applied_bindings, list):
+        applied_bindings = None
 
     # ---- container-spec drift ----
     if applied_spec is None:
-        # No (or unreadable) applied-spec record. NOT running -> just "never
+        # No applied.spec record. NOT running -> just "never
         # started", genuinely no drift. Running -> we can't confirm the container
         # matches config, so surface it as UNKNOWN rather than silently "in sync"
         # (a restart re-records the spec).
@@ -1403,7 +1428,7 @@ def _compute_drift(
 
     # ---- bindings drift ----
     if applied_bindings is None:
-        # No (or unreadable) applied-bindings record. Running WITH configured
+        # No applied.bindings record. Running WITH configured
         # bindings -> we can't confirm the proxy holds them, so treat as drift so
         # apply re-pushes (never silently assume "in sync"). Not running, or no
         # configured bindings, is genuinely no drift.
@@ -1470,7 +1495,7 @@ def _compute_drift(
 
 
 def _rules_drift(ws: Workspace, current_rules: list, running: bool) -> list:
-    """Rule drift against applied-rules.json, keyed by name. inspect/apply parse
+    """Rule drift against `applied.rules`, keyed by name. inspect/apply parse
     rules WITHOUT validate() (so they don't crash on a config the push path would
     reject), so validate() HERE and surface any config error -- a duplicate name,
     a bad host/path glob, an unresolved script -- as a single drift item, rather
@@ -1615,7 +1640,7 @@ def _inspect_attached(ws: Workspace, cfg: dict) -> WorkspaceInspect:
     )
     current_rules = resolved.rules
     # No managed container, so "running" is not meaningful; drift is computed
-    # against applied-bindings/-rules regardless (added/removed/changed).
+    # against applied.bindings/.rules regardless (added/removed/changed).
     drift = _compute_drift(ws, cfg, bindings, running=False,
                            current_rules=current_rules)
     return WorkspaceInspect(
@@ -1642,7 +1667,7 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
     """Best-effort reconcile: apply what can be applied live; defer the rest.
 
     - Bindings drift → re-resolve + push to the running proxy. Reports
-      "applied: bindings (...)". Updates applied-bindings.json on success.
+      "applied: bindings (...)". Updates the lock's `applied` section on success.
     - Container-spec drift (image/home/mounts/env/setup) → CANNOT be applied
       live; reported as "deferred: <field> (restart to apply: ...)".
     - Nothing drifted → both lists empty.
@@ -1650,13 +1675,22 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
 
     Returns ApplyResult; never raises on deferred items (exit 0 is the contract).
     """
-    from ..model.resolver import resolve_workspace
-
     if docker.container_status(ws.proxy_container) != "running":
         raise WorkspaceError(
             f"workspace '{ws.name}' is not running; "
             f"start it first (`credproxy workspace {ws.name} start`)"
         )
+
+    # Hold the workspace flock across the WHOLE read-modify-write: resolve reads
+    # the lock, then we persist placeholders and record `applied` -- a concurrent
+    # flocked start/push must not interleave between the read and those writes and
+    # clobber a section (#65 review). Reentrant, so a nested push_config is fine.
+    with ws.lock():
+        return _apply_config_locked(ws, notify)
+
+
+def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
+    from ..model.resolver import resolve_workspace
 
     meta = ImageEnv.load()
     host_port = docker.resolve_host_port(ws.proxy_container, meta.http_port)
@@ -1714,11 +1748,10 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
     if binding_changes or rule_changes:
         # Pass the already-resolved bindings/rules so push_config uses the same
         # (now-persisted) placeholder identity instead of re-resolving/re-minting.
-        pushed_bindings, pushed_rules = push_config(
+        pushed_bindings, pushed_rules, generation = push_config(
             ws, host_port, notify,
             bindings=resolved.bindings, rules=resolved.rules)
-        _write_applied_bindings(ws, pushed_bindings)
-        _write_applied_rules(ws, pushed_rules)
+        _write_applied_push(ws, pushed_bindings, pushed_rules, generation)
         if binding_changes:
             applied_labels.append(
                 f"bindings ({', '.join(c.item for c in binding_changes)})")

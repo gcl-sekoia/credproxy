@@ -240,9 +240,9 @@ def atomic_write_text(path: Path, text: str) -> None:
     an interrupted or concurrent write never leaves a truncated/partial file --
     the path always holds either the prior complete contents or the new complete
     contents. The shared writer for every file that is itself a source of truth
-    or drives drift/setup state (the workspace TOML, applied-spec/-bindings,
-    setup_done, the default pointer); a torn write to any of those silently
-    corrupts state.
+    or drives drift/setup state (the workspace TOML, the machine-owned lock.json
+    -- including its `applied` section --, the default pointer); a torn write to
+    any of those silently corrupts state.
 
     A new file gets the usual umask-derived mode; an overwrite preserves the
     existing file's permissions. The temp name carries the pid so two processes

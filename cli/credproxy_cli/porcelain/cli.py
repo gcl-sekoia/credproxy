@@ -893,7 +893,7 @@ def do_inspect(ctx: Ctx, name: str | None) -> None:
             ],
         },
         # Context for drift label: stopped workspace means bindings in
-        # applied-bindings.json were "last applied" not "live".
+        # the lock's `applied.bindings` were "last applied" not "live".
         "_running": data.running,
     })
 

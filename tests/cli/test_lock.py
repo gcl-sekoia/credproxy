@@ -68,3 +68,63 @@ def test_lock_json_path_distinct_from_flock(xdg, workspaces_dir):
     ws = _ws(workspaces_dir)
     assert ws.lock_json_path.name == "lock.json"
     assert ws.lock_json_path != ws.lock_path
+
+
+def test_update_sets_only_its_section(xdg, workspaces_dir):
+    """`update(section, value)` replaces just that section, backfilling defaults
+    without dropping anything else."""
+    from credproxy_cli.core.model.lock import load_lock, update
+    ws = _ws(workspaces_dir)
+    update(ws, "applied", {"config_generation": 3})
+    lock = load_lock(ws)
+    assert lock["applied"] == {"config_generation": 3}
+    assert lock["placeholders"] == {}          # backfilled
+    assert lock["version"] == 1
+
+
+def test_applied_write_preserves_placeholders_and_presets_byte_for_byte(
+        xdg, workspaces_dir):
+    """The #65 acceptance invariant, direction 1: an engine `update("applied", …)`
+    preserves the resolver's `placeholders`/`presets` byte-for-byte."""
+    from credproxy_cli.core.model.lock import save_lock, update
+    ws = _ws(workspaces_dir)
+    # Resolver persists placeholders + presets.
+    save_lock(ws, {
+        "version": 1,
+        "placeholders": {"gh": "ghp_x"},
+        "presets": {"github": {"rev": "abc123", "sha": "def456"}},
+    })
+    before = ws.lock_json_path.read_text()
+    # Engine records applied state.
+    update(ws, "applied", {"spec": {"image": "x"}, "config_generation": 2})
+    after = ws.lock_json_path.read_text()
+    # The placeholders/presets lines are unchanged; only `applied` was added.
+    import json
+    a = json.loads(after)
+    assert a["placeholders"] == {"gh": "ghp_x"}
+    assert a["presets"] == {"github": {"rev": "abc123", "sha": "def456"}}
+    assert a["applied"] == {"spec": {"image": "x"}, "config_generation": 2}
+    # And the pre-existing sections are byte-for-byte identical in the re-serialized
+    # canonical JSON (deleting `applied` from `after` reproduces `before`).
+    del a["applied"]
+    assert json.dumps(a, sort_keys=True, indent=2) + "\n" == before
+
+
+def test_resolver_save_preserves_applied_byte_for_byte(xdg, workspaces_dir):
+    """The #65 acceptance invariant, direction 2: a resolver `save_lock` that
+    only rewrites `placeholders` preserves the engine's `applied` section
+    byte-for-byte."""
+    from credproxy_cli.core.model.lock import load_lock, save_lock, update
+    import json
+    ws = _ws(workspaces_dir)
+    update(ws, "applied", {"bindings": [{"name": "gh"}], "config_generation": 5})
+    applied_before = load_lock(ws)["applied"]
+    # Resolver re-saves after minting a placeholder (round-tripping unknown keys).
+    lock = load_lock(ws)
+    lock["placeholders"]["gh"] = "ghp_new"
+    save_lock(ws, lock)
+    reloaded = load_lock(ws)
+    assert reloaded["placeholders"] == {"gh": "ghp_new"}
+    assert reloaded["applied"] == applied_before   # untouched
+    assert json.dumps(reloaded["applied"], sort_keys=True) == \
+        json.dumps(applied_before, sort_keys=True)

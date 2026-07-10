@@ -58,9 +58,9 @@ path   = "/repos/**"
 ```
 
 - **Identity is the workspace name, as everywhere.** The token
-  (`state/workspaces/<name>/auth.token`), state dir, applied-bindings/-rules
-  drift files, the `directory` cwd resolver, and the loose default pointer are
-  all the existing machinery, untouched.
+  (`state/workspaces/<name>/auth.token`), state dir, the lock's `applied`
+  bindings/rules drift metadata, the `directory` cwd resolver, and the loose
+  default pointer are all the existing machinery, untouched.
 - `attach` is **mutually exclusive** with every container-lifecycle key
   (`image`, `home`, `mounts`, `env`, `setup`, `user`, `user_uid`,
   `map_host_user`, `run_flags`, `shell`, `workdir`, `enter_prelude`,
@@ -165,17 +165,18 @@ attached one. `start`/`apply` call this same engine internally.
 - **`--wait`** polls **`/health`** (never `/ready` — I1) until capture-ready,
   then pushes; `--timeout` (default 120s) bounds it, and the poll interval is
   ~0.5s (a provider may prompt/unlock, so the default is generous).
-- **Lock** — a blocking `flock` on `<state>/push.lock` is held around the
-  resolve+POST. A second concurrent `push` of the same workspace **waits for the
-  holder, then re-pushes** (the config may have changed underneath) — collapse
-  never means skip. Foreground by default; the *caller* backgrounds it with `&`
-  if its orchestration needs to (I5).
+- **Lock** — a blocking `flock` on the per-workspace `<state>/lifecycle.lock`
+  (the same reentrant lock that serializes `start`/`apply`/`recreate`) is held
+  around the resolve+POST. A second concurrent `push` of the same workspace
+  **waits for the holder, then re-pushes** (the config may have changed
+  underneath) — collapse never means skip. Foreground by default; the *caller*
+  backgrounds it with `&` if its orchestration needs to (I5).
 - **Managed proxy stopped** — `push` on a managed workspace whose proxy is not
   running is a clean error pointing at `start` (it does not auto-start; that is
   `start`'s job — G4).
 
-The pushed drift files (`applied-bindings.json` / `applied-rules.json`) update
-on an attached push exactly as on a managed one, so `inspect` drift works
+The pushed drift metadata (the lock's `applied.bindings` / `applied.rules`)
+updates on an attached push exactly as on a managed one, so `inspect` drift works
 identically (G5).
 
 ### `credproxy push --admin URL --config FILE --token FILE [--wait] [--timeout SECS]`

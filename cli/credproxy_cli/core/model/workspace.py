@@ -10,7 +10,14 @@ Storage layout (XDG):
   Config:  $XDG_CONFIG_HOME/credproxy/workspaces/<name>.toml
   State:   $XDG_STATE_HOME/credproxy/workspaces/<name>/
              auth.token         -- bearer token for the proxy API
-             setup_done         -- container id that last COMPLETED setup
+             lock.json          -- machine-owned state: generated placeholders,
+                                   presets, and the `applied` section (last-applied
+                                   spec, pushed bindings/rules metadata,
+                                   config_generation, setup-completed container id)
+             lifecycle.lock     -- the per-workspace flock (serializes lifecycle
+                                   transitions AND config pushes; concurrency
+                                   primitive, never durable state)
+             sessions/          -- per-session pidfiles for auto-stop tracking
 """
 from __future__ import annotations
 
@@ -79,47 +86,24 @@ class Workspace:
         return self.state_dir / "auth.token"
 
     @property
-    def setup_done_path(self) -> Path:
-        """Marker file recording the container id that last COMPLETED setup.
-        Written only on success, so a failed setup re-runs on the next start;
-        keyed on container id, so a plain stop/start (same id) skips setup but a
-        recreate (new id) re-runs it."""
-        return self.state_dir / "setup_done"
-
-    @property
-    def applied_spec_path(self) -> Path:
-        """JSON file recording the workspace launch spec that was last
-        successfully applied (written when a workspace container is created)."""
-        return self.state_dir / "applied-spec.json"
-
-    @property
-    def applied_bindings_path(self) -> Path:
-        """JSON file recording binding metadata last pushed to the proxy
-        (written after a successful push). No secret values."""
-        return self.state_dir / "applied-bindings.json"
-
-    @property
-    def applied_rules_path(self) -> Path:
-        """JSON file recording rule metadata last pushed to the proxy (written
-        after a successful push). No secrets -- rules never carry any."""
-        return self.state_dir / "applied-rules.json"
-
-    @property
     def sessions_dir(self) -> Path:
         """Directory holding per-session pidfiles for auto-stop tracking."""
         return self.state_dir / "sessions"
 
     @property
     def lock_json_path(self) -> Path:
-        """The machine-owned state lockfile (`lock.json`): generated data (binding
-        placeholders, and later presets/applied) that the CLI must NOT write back
-        into the hand-owned TOML. Distinct from `lock_path` -- that is the
-        lifecycle flock (a concurrency primitive), this is durable state."""
+        """The machine-owned state lockfile (`lock.json`): generated data the CLI
+        must NOT write back into the hand-owned TOML -- binding placeholders and
+        presets (resolver-written) plus the `applied` section (engine-written:
+        last-applied spec, pushed bindings/rules metadata, config_generation, and
+        the setup-completed container id). Distinct from `lock_path` -- that is
+        the flock (a concurrency primitive), this is durable state."""
         return self.state_dir / "lock.json"
 
     @property
     def lock_path(self) -> Path:
-        """Advisory lock file serializing this workspace's lifecycle transitions."""
+        """Advisory flock serializing this workspace's lifecycle transitions AND
+        config pushes (one reentrant lock, see `lock()`)."""
         return self.state_dir / "lifecycle.lock"
 
     @contextlib.contextmanager

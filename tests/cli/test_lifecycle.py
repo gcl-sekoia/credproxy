@@ -2,7 +2,6 @@
 applied/deferred partitioning (stubbed push), and auto-stop session counting."""
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -27,8 +26,8 @@ def _write_ws(workspaces_dir: Path, name: str, content: str = 'image = "x"\n'):
 
 def _write_applied_spec(ws, image="x", home="/root", mounts=None, env=None,
                         setup=None, proxy_id=None):
-    """Write a fake applied-spec.json for drift testing."""
-    ws.ensure_state_dir()
+    """Seed a fake `applied.spec` in the lock for drift testing (#65 moved the
+    old applied-spec.json under the lock's `applied` section)."""
     spec = {
         "image": image,
         "home": home,
@@ -37,13 +36,20 @@ def _write_applied_spec(ws, image="x", home="/root", mounts=None, env=None,
         "setup": setup or [],
         "proxy_id": proxy_id,
     }
-    ws.applied_spec_path.write_text(json.dumps(spec))
+    _merge_applied(ws, spec=spec)
 
 
 def _write_applied_bindings(ws, bindings: list):
-    """Write a fake applied-bindings.json for drift testing."""
-    ws.ensure_state_dir()
-    ws.applied_bindings_path.write_text(json.dumps(bindings))
+    """Seed a fake `applied.bindings` in the lock for drift testing."""
+    _merge_applied(ws, bindings=bindings)
+
+
+def _merge_applied(ws, **fields):
+    """Merge `fields` into the lock's `applied` section (test helper)."""
+    from credproxy_cli.core.model.lock import load_lock, update as lock_update
+    applied = dict(load_lock(ws).get("applied") or {})
+    applied.update(fields)
+    lock_update(ws, "applied", applied)
 
 
 def _make_binding_summary(name="b", injector="github", provider="env",
@@ -992,7 +998,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
             secret="TOK", hosts=("api.github.com",),
             placeholder="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             env="GITHUB_TOKEN",
-        )], [])
+        )], [], 1)
 
     monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_config", fake_push)
 
@@ -1000,6 +1006,95 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     assert len(pushed) == 1
     assert any("bindings" in a for a in result.applied)
     assert result.deferred == ()
+
+
+def _apply_env(monkeypatch):
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.docker.container_status",
+        lambda name: "running")
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.docker.resolve_host_port",
+        lambda container, port: 39998)
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.lifecycle.ImageEnv.load",
+        classmethod(lambda cls: type("FakeEnv", (), {
+            "http_port": 39998, "tmpfs": "/run/secrets",
+            "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
+            "mitmproxy_uid": 31337,
+        })()))
+
+
+def test_apply_holds_workspace_lock_during_writes(xdg, workspaces_dir, monkeypatch):
+    """apply_config's whole read-modify-write runs under ws.lock() (#65 review:
+    it was the one lock.json writer outside the flock -- a concurrent flocked
+    start/push could clobber a section)."""
+    from credproxy_cli.core.engine.lifecycle import apply_config
+    from credproxy_cli.core.model.bindings import Binding
+    from credproxy_cli.core.model.workspace import _lock_depth
+
+    ws = _write_ws(workspaces_dir, "aplock", """\
+image = "x"
+
+[[binding]]
+name = "myb"
+injector = "bearer"
+provider = "env"
+secret = "TOK"
+hosts = ["api.github.com"]
+placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+""")
+    ws.ensure_state_dir()
+    _write_applied_spec(ws)
+    _write_applied_bindings(ws, [])
+    _apply_env(monkeypatch)
+
+    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+        # The flock is held (depth > 0) at the moment the push + applied write run.
+        assert _lock_depth.get(str(ws.lock_path), 0) > 0
+        return ([Binding(name="myb", injector="github", provider="env",
+                         secret="TOK", hosts=("api.github.com",),
+                         placeholder="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                         env="GITHUB_TOKEN")], [], 1)
+
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_config", fake_push)
+    apply_config(ws)
+    # Lock fully released afterward.
+    assert _lock_depth.get(str(ws.lock_path), 0) == 0
+
+
+def test_apply_none_generation_overwrites_stale(xdg, workspaces_dir, monkeypatch):
+    """A push whose response omits `generation` (None) must overwrite a PREVIOUS
+    config_generation, not leave the stale value attributed to the new push."""
+    from credproxy_cli.core.engine.lifecycle import apply_config, _update_applied
+    from credproxy_cli.core.model.bindings import Binding
+    from credproxy_cli.core.model.lock import load_lock
+
+    ws = _write_ws(workspaces_dir, "apgen", """\
+image = "x"
+
+[[binding]]
+name = "myb"
+injector = "bearer"
+provider = "env"
+secret = "TOK"
+hosts = ["api.github.com"]
+placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+""")
+    ws.ensure_state_dir()
+    _write_applied_spec(ws)
+    _write_applied_bindings(ws, [])
+    _update_applied(ws, config_generation=99)   # a stale prior generation
+    _apply_env(monkeypatch)
+
+    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+        return ([Binding(name="myb", injector="github", provider="env",
+                         secret="TOK", hosts=("api.github.com",),
+                         placeholder="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                         env="GITHUB_TOKEN")], [], None)   # proxy omitted generation
+
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_config", fake_push)
+    apply_config(ws)
+    assert load_lock(ws)["applied"]["config_generation"] is None
 
 
 def test_apply_pushes_when_applied_bindings_record_absent(xdg, workspaces_dir, monkeypatch):
@@ -1042,7 +1137,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
             name="myb", injector="github", provider="env", secret="TOK",
             hosts=("api.github.com",),
             placeholder="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            env="GITHUB_TOKEN")], [])
+            env="GITHUB_TOKEN")], [], 1)
 
     monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.push_config", fake_push)
 
@@ -1637,6 +1732,172 @@ def test_setup_marker_and_retry(xdg, ws_factory):
     assert _setup_needed("cid1", "cid1") is False       # plain restart -> skip
     assert _setup_needed("cid1", "cid2") is True        # recreate -> re-run
     assert _setup_needed(None, "") is False             # defensive: no container
+
+
+# ---- full lifecycle integration: the lock is the SOLE applied-state baseline --
+
+
+def _fake_env():
+    return type("FakeEnv", (), {
+        "http_port": 39998, "tmpfs": "/run/secrets",
+        "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
+        "mitmproxy_uid": 31337,
+    })()
+
+
+class _StartFakeDocker:
+    """A stateful docker fake for driving start_workspace end-to-end: it tracks
+    which containers are 'created' (running), records each container's
+    credproxy.spec label from its `run` argv, and lets the test flip a container's
+    id (a recreate) between starts."""
+
+    def __init__(self):
+        self.created: set[str] = set()
+        self.spec_labels: dict[str, str] = {}
+        self.ids: dict[str, str] = {}
+
+    # docker.container_status
+    def container_status(self, name):
+        return "running" if name in self.created else None
+
+    # docker.docker / docker.docker_quiet
+    def docker(self, argv, **kw):
+        if argv and argv[0] == "run" and "--name" in argv:
+            name = argv[argv.index("--name") + 1]
+            self.created.add(name)
+            for i, tok in enumerate(argv):
+                if tok == "--label" and argv[i + 1].startswith("credproxy.spec="):
+                    self.spec_labels[name] = argv[i + 1].split("=", 1)[1]
+        if argv and argv[0] == "rm":
+            self.created.discard(argv[-1])
+
+    def docker_quiet(self, argv):
+        self.docker(argv)
+
+    # docker.inspect
+    def inspect(self, target, fmt):
+        from credproxy_cli.core.engine import lifecycle
+        if target == lifecycle.IMAGE_TAG:
+            return "imgid"
+        if fmt == "{{.Id}}":
+            return self.ids.get(target)
+        if "credproxy.spec" in fmt:
+            return self.spec_labels.get(target)
+        if fmt == "{{.Image}}":
+            return "imgid"
+        return "x"
+
+    def resolve_host_port(self, name, port):
+        return 40000
+
+
+def _drive_start(monkeypatch, ws, fake, generation=7):
+    """Run start_workspace against `fake`, stubbing the network-y bits
+    (wait_for_ready, ImageEnv, push_config) so the real engine writes the lock."""
+    from credproxy_cli.core.engine import lifecycle
+    monkeypatch.setattr(lifecycle.docker, "container_status", fake.container_status)
+    monkeypatch.setattr(lifecycle.docker, "docker", fake.docker)
+    monkeypatch.setattr(lifecycle.docker, "docker_quiet", fake.docker_quiet)
+    monkeypatch.setattr(lifecycle.docker, "inspect", fake.inspect)
+    monkeypatch.setattr(lifecycle.docker, "resolve_host_port", fake.resolve_host_port)
+    monkeypatch.setattr(lifecycle, "wait_for_ready", lambda port: None)
+    monkeypatch.setattr("credproxy_cli.core.engine.lifecycle.ImageEnv.load",
+                        classmethod(lambda cls: _fake_env()))
+
+    def fake_push_config(ws, port, notify=None, bindings=None, rules=None,
+                         fingerprint=None):
+        return (bindings or [], rules or [], generation)
+    monkeypatch.setattr(lifecycle, "push_config", fake_push_config)
+    lifecycle.start_workspace(ws)
+
+
+def test_lifecycle_lock_is_sole_applied_baseline(xdg, workspaces_dir, monkeypatch):
+    """create -> start -> recreate(new id) -> plain start(same id), with the lock
+    as the ONLY applied-state store: `applied.spec`/`.bindings`/`.rules`/
+    `.config_generation`/`.setup_container_id` are all written into lock.json, and
+    setup re-runs only when the container id changes."""
+    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.model.lock import load_lock
+
+    ws = _write_ws(workspaces_dir, "life", 'image = "img:1"\n')
+    fake = _StartFakeDocker()
+    fake.ids[ws.proxy_container] = "pid1"
+    fake.ids[ws.ws_container] = "cid1"
+
+    # ---- fresh create + start ----
+    _drive_start(monkeypatch, ws, fake, generation=7)
+
+    applied = load_lock(ws)["applied"]
+    assert applied["spec"]["image"] == "img:1"
+    assert applied["spec"]["proxy_id"] == "pid1"
+    assert applied["bindings"] == []
+    assert applied["rules"] == []
+    assert applied["config_generation"] == 7
+    assert applied["setup_container_id"] == "cid1"        # setup ran
+
+    # State dir after a fresh create+start: exactly the consolidated set
+    # (push.lock was folded into lifecycle.lock; sessions/ appears only once an
+    # enter/exec registers a session, so it is absent after a bare start).
+    names = sorted(p.name for p in ws.state_dir.iterdir())
+    assert names == ["auth.token", "lifecycle.lock", "lock.json"]
+
+    # No legacy applied-*.json / setup_done files were written.
+    assert not (ws.state_dir / "applied-spec.json").exists()
+    assert not (ws.state_dir / "applied-bindings.json").exists()
+    assert not (ws.state_dir / "applied-rules.json").exists()
+    assert not (ws.state_dir / "setup_done").exists()
+    assert not (ws.state_dir / "push.lock").exists()
+
+    # Spy on run_setup so we can prove WHEN it runs (id-keyed gate).
+    setup_runs: list = []
+    monkeypatch.setattr(lifecycle, "run_setup",
+                        lambda *a, **k: setup_runs.append(True))
+
+    # ---- recreate: the ws container gets a NEW id -> setup re-runs ----
+    fake.created.discard(ws.ws_container)                 # `rm -f` in recreate
+    fake.ids[ws.ws_container] = "cid2"
+    _drive_start(monkeypatch, ws, fake, generation=8)
+    applied = load_lock(ws)["applied"]
+    assert applied["setup_container_id"] == "cid2"        # marker advanced
+    assert applied["config_generation"] == 8
+    assert len(setup_runs) == 1                           # setup re-ran (new id)
+
+    # ---- plain start, SAME id, container already running -> setup skipped ----
+    _drive_start(monkeypatch, ws, fake, generation=9)
+    applied = load_lock(ws)["applied"]
+    assert applied["setup_container_id"] == "cid2"        # marker unchanged
+    assert applied["config_generation"] == 9              # push still happened
+    assert len(setup_runs) == 1                           # NOT re-run (same id)
+
+
+def test_start_applied_write_preserves_resolver_placeholders(xdg, workspaces_dir,
+                                                             monkeypatch):
+    """A start that pushes bindings writes `applied` WITHOUT clobbering the
+    resolver's placeholders in the same lock.json (the two-writer invariant)."""
+    from credproxy_cli.core.engine import lifecycle
+    from credproxy_cli.core.model.lock import load_lock
+
+    ws = _write_ws(workspaces_dir, "life2", """\
+image = "img:1"
+
+[[binding]]
+name = "gh"
+injector = "bearer"
+provider = "env"
+secret = "TOK"
+hosts = ["api.github.com"]
+""")
+    monkeypatch.setenv("TOK", "sekret")
+    fake = _StartFakeDocker()
+    fake.ids[ws.proxy_container] = "pid1"
+    fake.ids[ws.ws_container] = "cid1"
+    _drive_start(monkeypatch, ws, fake, generation=3)
+
+    lock = load_lock(ws)
+    # The resolver minted a placeholder for `gh` and it SURVIVED the applied write.
+    assert "gh" in lock["placeholders"]
+    assert lock["applied"]["config_generation"] == 3
+    assert lock["applied"]["spec"]["image"] == "img:1"
 
 
 # ---- recreate ----------------------------------------------------------------

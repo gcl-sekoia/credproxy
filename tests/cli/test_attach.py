@@ -333,13 +333,18 @@ def test_push_managed_calls_engine_once_and_records(xdg, workspaces_dir,
 
     def fake_engine(admin_url, token, bindings, rules, fp=None, notify=None):
         calls.append(admin_url)
-        return bindings, rules
+        return bindings, rules, 1
     monkeypatch.setattr(core_push, "push_to_target", fake_engine)
 
     url = lifecycle.push_workspace(ws)
     assert calls == ["http://127.0.0.1:9"]
-    assert ws.applied_bindings_path.exists()
-    assert ws.applied_rules_path.exists()
+    # #65: applied bindings/rules metadata is recorded under the lock's `applied`
+    # section (was applied-bindings.json / applied-rules.json).
+    from credproxy_cli.core.model.lock import load_lock
+    applied = load_lock(ws).get("applied") or {}
+    assert "bindings" in applied
+    assert "rules" in applied
+    assert applied.get("config_generation") == 1
 
 
 # ---- push (attached) end-to-end via mocked discovery + POST ------------------

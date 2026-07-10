@@ -231,8 +231,8 @@ response`) and the intercept decision, and it verifies what's *actually running*
 — which may lag the edited TOML until `apply`/`start`. The default (offline) form
 needs no running proxy and reflects the config file; `--live` needs the proxy up.
 
-Rules ride the existing push path (`start` / `apply`), drift tracking (an
-`applied-rules.json` sibling of `applied-bindings.json`), and `inspect`. Because
+Rules ride the existing push path (`start` / `apply`), drift tracking (the lock's
+`applied.rules`, a sibling of `applied.bindings`), and `inspect`. Because
 `/admin/config` is replace-all, **a rule edit re-pushes the whole config on the
 next `apply`/`start`, re-fetching every binding's secret from its provider** — so
 a credential-free rule change can still trigger a keychain/1Password prompt. A
@@ -326,7 +326,7 @@ def on_request():
   behavior; each sees only its own params, and a script can't mutate a param
   value across requests or rules (values are copied at the Starlark boundary).
 - **Params are config, not secrets.** They appear in plaintext in the TOML, `rule
-  list`, `inspect`, and `applied-rules.json` — correct for the credential-free
+  list`, `inspect`, and the lock's `applied.rules` — correct for the credential-free
   layer — and are **excluded from `/setup`** even for a `visible = true` rule (a
   workspace never sees them). **Don't paste tokens into params**; they have no
   provider and no redaction (that's the injector/binding layer's job).

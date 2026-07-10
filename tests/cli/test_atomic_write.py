@@ -1,5 +1,5 @@
 """atomic_write_text: torn-write safety for the source-of-truth / state files
-(workspace TOML, applied-spec/-bindings, setup_done, the default pointer)."""
+(workspace TOML, the machine-owned lock.json, the default pointer)."""
 from __future__ import annotations
 
 import os
@@ -17,7 +17,7 @@ def test_creates_file_and_leaves_no_tmp(tmp_path):
 
 
 def test_makes_missing_parent_dirs(tmp_path):
-    p = tmp_path / "state" / "ws" / "applied-spec.json"
+    p = tmp_path / "state" / "ws" / "lock.json"
     atomic_write_text(p, "{}")
     assert p.read_text() == "{}"
 

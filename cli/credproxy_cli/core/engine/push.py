@@ -106,13 +106,17 @@ def push_to_target(admin_url: str, token: str, bindings, rules,
                    notify: Notify = _noop) -> tuple:
     """Resolve secrets + POST the wire body to `<admin_url>/admin/config`, bearer
     token. The shared engine every push path funnels through. Returns
-    `(bindings, rules)` so the caller can record applied-state. Raises ProxyError
-    on connect/401/non-200. The URL must already be loopback-validated."""
+    `(bindings, rules, generation)` so the caller can record applied-state --
+    `generation` is the monotonic counter the proxy returns for this accepted
+    push (`{"ok": true, "generation": N}`), or None if the response omitted it.
+    Raises ProxyError on connect/401/non-200. The URL must already be
+    loopback-validated."""
     wire = build_wire(bindings, rules, fingerprint)
     body = json.dumps(wire).encode()
     status, payload = _http_post_json(f"{admin_url}/admin/config", body, token)
     if status == 200:
-        return bindings, rules
+        gen = payload.get("generation") if isinstance(payload, dict) else None
+        return bindings, rules, gen
     if status == 401:
         raise ProxyError(
             f"proxy at {admin_url} rejected the token (HTTP 401)")
@@ -136,8 +140,9 @@ def push_config(ws: "Workspace", http_port: int, notify: Notify = _noop,
 
     A thin wrapper over the shared push engine (`push_to_target`), so
     `start`/`apply` (this function) and the `push`/stateless verbs POST a
-    byte-identical wire body for the same inputs. Returns `(bindings, rules)`
-    so the caller can record applied state."""
+    byte-identical wire body for the same inputs. Returns
+    `(bindings, rules, generation)` so the caller can record applied state
+    (including the `config_generation` the proxy returned)."""
     from ..model.lock import save_lock
     from ..model.resolver import resolve_workspace
     from ..model.rules import combined_fingerprint
@@ -242,11 +247,20 @@ except ImportError:  # pragma: no cover - non-POSIX
 
 @contextmanager
 def workspace_push_lock(ws):
-    """Blocking flock on `<state>/push.lock`, held around a workspace's
-    resolve+POST. A second concurrent `push` of the same workspace WAITS for the
-    holder then re-pushes (config may have changed) -- never skips."""
-    ws.ensure_state_dir()
-    yield from _flock(ws.state_dir / "push.lock")
+    """Held around a workspace's resolve+POST so a second concurrent `push` of the
+    same workspace WAITS for the holder then re-pushes (config may have changed)
+    -- never skips.
+
+    This IS the per-workspace lifecycle flock (`ws.lock()` on
+    `<state>/lifecycle.lock`), NOT a separate `push.lock` (#65 consolidated the
+    two): the same lock already serializes `start`/`apply`/`recreate`, all of
+    which resolve + push + write the lock's `applied` section, so sharing it means
+    a concurrent `start` and `push` can no longer race those lock.json writes. It
+    is REENTRANT within a process (via `ws.lock()`'s depth counter) so nesting
+    can't self-deadlock, and still flock-serializes across separate processes.
+    The stateless push keeps its own `target_push_lock` (no workspace state)."""
+    with ws.lock():
+        yield
 
 
 @contextmanager
