@@ -14,7 +14,7 @@ import pytest
 
 @pytest.fixture
 def runtime():
-    from credproxy_cli.core import runtime
+    from credproxy_cli.core.engine import runtime
     # Both predicates share one memoized probe (`_probe`); clear it between
     # cases so each stub is observed.
     runtime._probe.cache_clear()

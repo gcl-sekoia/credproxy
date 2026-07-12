@@ -178,11 +178,22 @@ async def admin_config(request: web.Request) -> web.Response:
 
 
 async def admin_config_get(request: web.Request) -> web.Response:
-    """GET /admin/config -- bearer-gated. Report whether config is currently
-    loaded and its `fingerprint`, so the host can skip a redundant re-push (the
-    `enter` fast path) when the proxy already holds the intended config. Config
-    lives on tmpfs, so a restarted proxy reports `loaded: false` and the host
-    re-pushes."""
+    """GET /admin/config -- bearer-gated. A SUPERSET response with two roles:
+
+    1. `loaded` + `fingerprint` (read from the tmpfs config file) power the host's
+       `enter` fast path -- it skips a redundant re-push when the proxy already
+       holds the intended config's fingerprint. Config lives on tmpfs, so a
+       restarted proxy reports `loaded: false` and the host re-pushes.
+    2. `generation` + a SANITIZED `bindings`/`rules` projection report what the
+       proxy is ACTUALLY running -- built from the LOADED config objects
+       (`state.creds`/`.generation`), not a tmpfs re-read -- so `inspect`/`apply`/
+       `doctor` can drift the resolved intent against reality (a proxy that lost
+       its tmpfs on restart, or a stateless push from elsewhere).
+
+    The projection is deliberately tighter than /setup -- NEVER a secret value,
+    `params`, or a header/body value (see config.sanitized_live_config). Empty
+    config (nothing loaded) returns generation 0 + empty lists, still 200."""
+    state = request.app[STATE_KEY]
     err = _auth_error(request)
     if err is not None:
         return err
@@ -194,7 +205,14 @@ async def admin_config_get(request: web.Request) -> web.Response:
             loaded = True
         except (OSError, json.JSONDecodeError):
             loaded = False
-    return web.json_response({"loaded": loaded, "fingerprint": fingerprint})
+    projection = config.sanitized_live_config(state.creds)
+    return web.json_response({
+        "loaded": loaded,
+        "fingerprint": fingerprint,
+        "generation": state.generation,
+        "bindings": projection["bindings"],
+        "rules": projection["rules"],
+    })
 
 
 async def admin_rule_test(request: web.Request) -> web.Response:

@@ -814,3 +814,33 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
     rule_set = _load_rules(raw.get("rules", []), source)
 
     return BindingCredentials(hosts, inward, patterns, rules=rule_set)
+
+
+def sanitized_live_config(creds: Credentials) -> dict:
+    """Host-facing projection of the LOADED credentials for GET /admin/config: what
+    the proxy is actually running, built from the in-memory config objects (not a
+    tmpfs re-read).
+
+    SANITIZATION INVARIANT (a security requirement -- this endpoint is bearer-gated
+    but host-facing): the field set is DELIBERATELY tighter than the workspace-facing
+    /setup. It NEVER carries a secret value, NEVER `params` (which can hold
+    semi-sensitive config), and NEVER a header/body value -- only:
+      - bindings: name, hosts, scheme, placeholder (inert), env
+      - rules:    name, hosts, action, visible
+    The CLI mirrors this projection in core/model/wire.summarize_wire (a separate
+    deploy unit; wire-parity tested), so a drift compare can't disagree on field
+    meaning. Rule VISIBILITY is a workspace-facing concept (/setup hides hidden
+    rules); here the operator sees every rule with its `visible` flag -- hidden means
+    hidden from the WORKSPACE, never the operator."""
+    return {
+        "bindings": [
+            {"name": b.name, "hosts": list(b.hosts), "scheme": b.scheme,
+             "placeholder": b.placeholder, "env": b.env}
+            for b in creds.inward_bindings()
+        ],
+        "rules": [
+            {"name": r.name, "hosts": list(r.hosts), "action": r.action,
+             "visible": r.visible}
+            for r in creds.rule_set().all()
+        ],
+    }

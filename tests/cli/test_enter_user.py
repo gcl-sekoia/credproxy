@@ -9,7 +9,7 @@ from __future__ import annotations
 
 
 def _cmd(cfg, *, user_override=None, isatty=True, cmd=None):
-    from credproxy_cli.core.lifecycle import _enter_exec_cmd
+    from credproxy_cli.core.engine.sessions import _enter_exec_cmd
     return _enter_exec_cmd(cfg, "ctr", cmd or ["bash"],
                            user_override=user_override, isatty=isatty)
 
@@ -36,14 +36,14 @@ def test_config_user():
 
 def test_default_enter_is_login_shell():
     """No `-- CMD` -> a login shell (`bash -l`), wrapped by the env shim."""
-    from credproxy_cli.core.lifecycle import _enter_exec_cmd
+    from credproxy_cli.core.engine.sessions import _enter_exec_cmd
     out = _enter_exec_cmd({}, "ctr", [], user_override=None, isatty=True)
     assert out[-2:] == ["bash", "-l"]
     assert out[out.index("ctr") + 1] == "sh"   # still shim-wrapped
 
 
 def test_shell_field_overrides_default():
-    from credproxy_cli.core.lifecycle import _enter_exec_cmd
+    from credproxy_cli.core.engine.sessions import _enter_exec_cmd
     out = _enter_exec_cmd({"shell": ["zsh"]}, "ctr", [], user_override=None, isatty=True)
     assert out[-1] == "zsh"
     assert "-l" not in out
@@ -51,7 +51,7 @@ def test_shell_field_overrides_default():
 
 def test_explicit_command_is_bare_and_beats_shell():
     """`enter -- CMD` runs bare (non-login) and overrides `shell`."""
-    from credproxy_cli.core.lifecycle import _enter_exec_cmd
+    from credproxy_cli.core.engine.sessions import _enter_exec_cmd
     out = _enter_exec_cmd({"shell": ["zsh"]}, "ctr", ["npm", "test"],
                           user_override=None, isatty=True)
     assert out[-2:] == ["npm", "test"]

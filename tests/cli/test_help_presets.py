@@ -19,6 +19,16 @@ import pytest
 from test_porcelain import _run
 
 
+def _rbindings(ws):
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    return resolve_workspace(ws).bindings
+
+
+def _rrules(ws):
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    return resolve_workspace(ws).rules
+
+
 # ---- scaffold --help no longer mutates state ---------------------------------
 
 
@@ -48,7 +58,7 @@ def test_scaffold_rejects_flag_like_name(kind, xdg):
 
 
 def test_scaffold_core_rejects_bad_names():
-    from credproxy_cli.core.scaffold import scaffold
+    from credproxy_cli.core.model.scaffold import scaffold
     from credproxy_cli.core.errors import CredproxyError
     for bad in ("--help", "", "a/b", ".."):
         with pytest.raises(CredproxyError):
@@ -163,8 +173,8 @@ def test_preset_github_defaults_provider_and_secret(ws_factory):
     ws = ws_factory("demo")
     code, out, err = _run(["workspace", "demo", "preset", "add", "github"])
     assert code == 0, out + err
-    from credproxy_cli.core.bindings import load_bindings
-    bindings = load_bindings(ws)
+    from credproxy_cli.core.model.bindings import load_bindings
+    bindings = _rbindings(ws)
     assert {b.name for b in bindings} == {"github-api", "github-git", "github-ghcr"}
     assert all(b.provider == "gh-cli" and b.secret == "github.com" for b in bindings)
 
@@ -176,9 +186,9 @@ def test_preset_github_secret_override_keeps_default_provider(ws_factory):
     code, out, err = _run(["workspace", "demo", "preset", "add", "github",
                            "--secret", "ghe.corp.com"])
     assert code == 0, out + err
-    from credproxy_cli.core.bindings import load_bindings
+    from credproxy_cli.core.model.bindings import load_bindings
     assert all(b.provider == "gh-cli" and b.secret == "ghe.corp.com"
-               for b in load_bindings(ws))
+               for b in _rbindings(ws))
 
 
 def test_preset_nondefault_provider_requires_secret(ws_factory):
@@ -207,7 +217,7 @@ def test_injector_add_still_requires_provider(ws_factory):
 def test_template_uses_real_injector_and_verb_order(ws_factory):
     """The template must not present the `github` PRESET as an injector, and
     must use the canonical `workspace NAME start` verb order."""
-    from credproxy_cli.core.config import render_template
+    from credproxy_cli.core.model.config import render_template
     rendered = render_template("demo")
     assert 'injector = "github"' not in rendered
     assert 'injector = "bearer"' in rendered
@@ -259,10 +269,10 @@ def test_preset_add_stamps_bindings_and_rules(ws_factory):
     code, out, err = _run(["workspace", "demo", "preset", "add", "gh-guarded",
                            "--provider", "env", "--secret", "GITHUB_TOKEN"])
     assert code == 0, out + err
-    from credproxy_cli.core.bindings import load_bindings
-    from credproxy_cli.core.rules import load_rules
-    assert [b.name for b in load_bindings(ws)] == ["gh-guarded-api"]
-    rules = load_rules(ws)
+    from credproxy_cli.core.model.bindings import load_bindings
+    from credproxy_cli.core.model.rules import load_rules
+    assert [b.name for b in _rbindings(ws)] == ["gh-guarded-api"]
+    rules = _rrules(ws)
     assert [r.name for r in rules] == ["gh-guarded-readonly"]
     # the [rule.params] sub-table round-trips through the surgical stamp + reload.
     assert rules[0].params == {"allow_prefixes": ["/repos/scratch-"]}
@@ -275,10 +285,10 @@ def test_preset_add_pure_rule_no_flags(ws_factory):
                     'action="block"\nmethods=["DELETE"]\n')
     code, out, err = _run(["workspace", "demo", "preset", "add", "policy"])
     assert code == 0, out + err
-    from credproxy_cli.core.bindings import load_bindings
-    from credproxy_cli.core.rules import load_rules
-    assert load_bindings(ws) == []
-    assert [r.name for r in load_rules(ws)] == ["policy-noDelete"]
+    from credproxy_cli.core.model.bindings import load_bindings
+    from credproxy_cli.core.model.rules import load_rules
+    assert _rbindings(ws) == []
+    assert [r.name for r in _rrules(ws)] == ["policy-noDelete"]
 
 
 def test_preset_add_pure_rule_rejects_provider(ws_factory):
@@ -295,17 +305,16 @@ def test_preset_add_atomic_collision_no_partial_stamp(ws_factory):
     ws = ws_factory("demo")
     _install_preset("gh-guarded", _MIXED_PRESET, scripts={"guard": _GUARD_STAR})
     # Pre-create a binding whose name collides with the preset's rule expansion.
-    from credproxy_cli.core.bindings import Binding, append_bindings
+    from credproxy_cli.core.model.bindings import Binding, append_bindings
     append_bindings(ws, [Binding(
         name="gh-guarded-api", injector="bearer", provider="env", secret="T",
         hosts=("api.github.com",), placeholder="ghp_x", env=None)])
     code, out, err = _run(["workspace", "demo", "preset", "add", "gh-guarded",
                            "--provider", "env", "--secret", "T"])
     assert code == 1
-    assert "already exists" in (out + err)
+    assert "collides with a literal" in (out + err)
     # No PARTIAL stamp: the rule must NOT have been written.
-    from credproxy_cli.core.rules import load_rules
-    assert load_rules(ws) == []
+    assert _rrules(ws) == []
 
 
 def test_preset_add_announces_newly_intercepted(ws_factory):
@@ -326,15 +335,15 @@ def test_binding_add_preset_flag_retired(ws_factory):
 
 
 def test_preset_add_loose_resolves_default_workspace(ws_factory):
-    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.model.pointer import set_default
     ws = ws_factory("demo")
     set_default(ws)
     _install_preset("policy", '[[rule]]\nsuffix="b"\nhosts=["h.example"]\n'
                               'action="block"\n')
     code, out, err = _run(["--loose", "preset", "add", "policy"])
     assert code == 0, out + err
-    from credproxy_cli.core.rules import load_rules
-    assert [r.name for r in load_rules(ws)] == ["policy-b"]
+    from credproxy_cli.core.model.rules import load_rules
+    assert [r.name for r in _rrules(ws)] == ["policy-b"]
 
 
 def test_preset_add_strict_top_level_needs_workspace():

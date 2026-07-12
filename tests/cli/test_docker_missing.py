@@ -1,7 +1,7 @@
 """A missing `docker` binary must surface as a DependencyError (one clean
 `[credproxy] ...` line), never a raw FileNotFoundError traceback (#16).
 
-Every CHECKED docker call routes through core.docker._run/_popen, which
+Every CHECKED docker call routes through core.engine.docker._run/_popen, which
 translate FileNotFoundError -> DependencyError; the odd-shaped porcelain call
 sites (imageenv.load, dev-test execvp) catch-and-translate to the same shared
 message. Best-effort calls (docker_quiet, logs_tail) must SWALLOW a missing
@@ -13,7 +13,7 @@ import subprocess
 
 import pytest
 
-from credproxy_cli.core import docker
+from credproxy_cli.core.engine import docker
 from credproxy_cli.core.errors import DependencyError
 
 
@@ -64,7 +64,7 @@ def test_logs_tail_returns_empty_on_missing_binary(no_docker):
 # ---- imageenv.load: the first docker call a Docker-less new user hits ----
 
 def test_imageenv_load_translates_missing_docker(monkeypatch):
-    from credproxy_cli.core import imageenv
+    from credproxy_cli.core.engine import imageenv
 
     def boom(*a, **k):
         raise FileNotFoundError(2, "No such file or directory", "docker")

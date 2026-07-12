@@ -18,43 +18,43 @@ from test_porcelain import _run, _run_loose
 
 
 def test_parse_secret_single_bare():
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     assert _parse_secret_args(["GITHUB_TOKEN"]) == "GITHUB_TOKEN"
 
 
 def test_parse_secret_single_bare_with_equals():
     """A lone ref containing '=' stays a bare single-slot ref (not split)."""
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     assert _parse_secret_args(["op://v/i?ver=2"]) == "op://v/i?ver=2"
 
 
 def test_parse_secret_none():
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     assert _parse_secret_args(None) is None
     assert _parse_secret_args([]) is None
 
 
 def test_parse_secret_multi_slot():
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     assert _parse_secret_args(["access_key_id=A", "secret_access_key=B"]) == {
         "access_key_id": "A", "secret_access_key": "B"}
 
 
 def test_parse_secret_multi_slot_ref_with_equals():
     """REF is split on the FIRST '=', so a ref containing '=' survives."""
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     assert _parse_secret_args(["k=op://v/i?x=1", "j=B"]) == {
         "k": "op://v/i?x=1", "j": "B"}
 
 
 def test_parse_secret_multi_requires_slot_eq():
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     with pytest.raises(SystemExit):
         _parse_secret_args(["bare1", "bare2"])
 
 
 def test_parse_secret_multi_duplicate_slot():
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     with pytest.raises(SystemExit):
         _parse_secret_args(["k=A", "k=B"])
 
@@ -64,14 +64,14 @@ def test_parse_secret_multi_duplicate_slot():
 
 def test_parse_secret_single_named_slot():
     """A lone SLOT=REF whose SLOT is a declared slot -> that named slot."""
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     assert _parse_secret_args(["private_key=PK_REF"], ("private_key",)) == {
         "private_key": "PK_REF"}
 
 
 def test_parse_secret_single_named_slot_ref_with_equals():
     """REF after the slot name keeps any further '=' (split on the first only)."""
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     assert _parse_secret_args(["private_key=op://v/i?ver=2"], ("private_key",)) == {
         "private_key": "op://v/i?ver=2"}
 
@@ -79,12 +79,12 @@ def test_parse_secret_single_named_slot_ref_with_equals():
 def test_parse_secret_single_unknown_slot_stays_bare_ref():
     """A lone ref containing '=' whose prefix is NOT a declared slot stays a bare
     ref -- the disambiguation that keeps vault-path refs working."""
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     assert _parse_secret_args(["op://v/i?ver=2"], ("value",)) == "op://v/i?ver=2"
 
 
 def test_parse_secret_single_value_slot_explicit():
-    from credproxy_cli.porcelain.cli import _parse_secret_args
+    from credproxy_cli.porcelain.cmd_binding import _parse_secret_args
     assert _parse_secret_args(["value=REF"], ("value",)) == {"value": "REF"}
 
 
@@ -107,8 +107,8 @@ def test_current_no_default_json(xdg, workspaces_dir, tmp_path, monkeypatch):
 
 def test_current_reports_pointer(xdg, workspaces_dir, tmp_path, monkeypatch):
     (workspaces_dir / "proj.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("proj"))
     monkeypatch.chdir(tmp_path)  # no cwd association -> resolves to the default
 
@@ -127,7 +127,7 @@ def test_workspace_use_is_loose_only(xdg, workspaces_dir):
     """`workspace use` mutates the loose default pointer, so the strict surface
     must reject it (it's the scriptable contract); loose accepts it."""
     (workspaces_dir / "w.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import read_default
+    from credproxy_cli.core.model.pointer import read_default
 
     ec, out, err = _run(["workspace", "use", "w"])          # strict
     assert ec != 0 and "loose-only" in (out + err)

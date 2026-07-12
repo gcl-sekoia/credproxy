@@ -50,7 +50,7 @@ def ask_option(opt):
     (the caller passes it straight through -- `resolve_options` does not re-coerce
     a prompted value). Loops until valid. `string` = free text (empty accepts the
     default when one exists, else re-asks); `enum` = numbered pick; `bool` = y/n."""
-    from ..core.presets import coerce_option_value
+    from ..core.model.presets import coerce_option_value
 
     desc = f" ({opt.description})" if opt.description else ""
     if opt.type == "bool":
@@ -131,7 +131,7 @@ def ask_secret(provider: str, default: str | None, slots=()):
     validate it via the ad-hoc `binding test` fetch path -- report the fetched
     length (never the value) and loop on failure, turning a typo'd secret into an
     immediate fixable moment. Returns the accepted ref."""
-    from ..core import bindings as core_bindings
+    from ..core.model import bindings as core_bindings
 
     while True:
         d = f" [{default}]" if default else ""

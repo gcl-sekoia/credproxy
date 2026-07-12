@@ -26,7 +26,7 @@ def _write_script(name: str, body: str):
 
 
 def test_find_builtin_scripts(xdg):
-    from credproxy_cli.core.scripts import find_script
+    from credproxy_cli.core.model.scripts import find_script
 
     for name in ("bearer", "basic", "body"):
         s = find_script(name)
@@ -36,7 +36,7 @@ def test_find_builtin_scripts(xdg):
 
 def test_user_script_shadows_builtin(xdg):
     _write_script("bearer", "def on_request():\n    return True\n")
-    from credproxy_cli.core.scripts import find_script
+    from credproxy_cli.core.model.scripts import find_script
 
     s = find_script("bearer")
     assert s.source_origin == "user"
@@ -44,14 +44,14 @@ def test_user_script_shadows_builtin(xdg):
 
 def test_find_script_missing(xdg):
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.scripts import find_script
+    from credproxy_cli.core.model.scripts import find_script
 
     with pytest.raises(InjectorError, match="not found"):
         find_script("nope_zzz")
 
 
 def test_list_scripts_includes_builtin(xdg):
-    from credproxy_cli.core.scripts import list_scripts
+    from credproxy_cli.core.model.scripts import list_scripts
 
     names = [s.name for s in list_scripts()]
     assert {"bearer", "basic", "body", "ovh", "jwt-bearer"} <= set(names)
@@ -61,8 +61,8 @@ def test_list_scripts_includes_builtin(xdg):
 
 
 def test_builtin_ovh_injector(xdg):
-    from credproxy_cli.core.injectors import find_injector
-    from credproxy_cli.core.scripts import find_script
+    from credproxy_cli.core.model.injectors import find_injector
+    from credproxy_cli.core.model.scripts import find_script
 
     inj = find_injector("ovh")
     assert inj.scheme == "script" and inj.script == "ovh"
@@ -72,8 +72,8 @@ def test_builtin_ovh_injector(xdg):
 
 
 def test_builtin_jwt_bearer_injector(xdg):
-    from credproxy_cli.core.injectors import find_injector
-    from credproxy_cli.core.scripts import find_script
+    from credproxy_cli.core.model.injectors import find_injector
+    from credproxy_cli.core.model.scripts import find_script
 
     inj = find_injector("jwt-bearer")
     assert inj.scheme == "script" and inj.script == "jwt-bearer"
@@ -96,7 +96,7 @@ def test_scripted_injector_parses(xdg):
         [params]
         header = "X-Api-Key"
     """)
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     inj = find_injector("custom")
     assert inj.scheme == "script"
@@ -114,7 +114,7 @@ def test_scripted_sign_family(xdg):
         family = "sign"
         slots  = ["app_secret", "consumer_key"]
     """)
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     inj = find_injector("signer")
     assert inj.spec.family == "sign"
@@ -125,7 +125,7 @@ def test_scripted_sign_family(xdg):
 def test_scripted_missing_script_field(xdg):
     _write_injector("bad", 'scheme = "script"\nfamily = "substitute"\nslots = ["value"]\n')
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     with pytest.raises(InjectorError, match="needs `script`"):
         find_injector("bad")
@@ -134,7 +134,7 @@ def test_scripted_missing_script_field(xdg):
 def test_scripted_bad_family(xdg):
     _write_injector("bad", 'scheme = "script"\nscript = "x"\nfamily = "bogus"\nslots = ["value"]\n')
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     with pytest.raises(InjectorError, match="family must be"):
         find_injector("bad")
@@ -143,7 +143,7 @@ def test_scripted_bad_family(xdg):
 def test_scripted_empty_slots(xdg):
     _write_injector("bad", 'scheme = "script"\nscript = "x"\nfamily = "sign"\nslots = []\n')
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     with pytest.raises(InjectorError, match="slots must be"):
         find_injector("bad")
@@ -157,7 +157,7 @@ def test_scripted_api_version_parsed(xdg):
         family = "sign"
         slots  = ["app_secret"]
     """)
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     assert find_injector("v2signer").api == 2
 
@@ -169,7 +169,7 @@ def test_scripted_default_api_is_one(xdg):
         family = "substitute"
         slots  = ["value"]
     """)
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     assert find_injector("noapi").api == 1
 
@@ -178,7 +178,7 @@ def test_scripted_bad_api_rejected(xdg):
     _write_injector("badapi",
                     'scheme="script"\nscript="x"\napi="nope"\nfamily="sign"\nslots=["value"]\n')
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     with pytest.raises(InjectorError, match="`api` must be an integer"):
         find_injector("badapi")
@@ -196,7 +196,7 @@ def test_wire_config_scripted_pushes_source(xdg, workspaces_dir):
         [params]
         header = "Authorization"
     """)
-    from credproxy_cli.core.bindings import Binding, wire_config
+    from credproxy_cli.core.model.bindings import Binding, wire_config
 
     b = Binding(name="b", injector="custom", provider="env", secret="TOK",
                 hosts=("api.example.com",), placeholder="tok_xxxxxxxxxxxx", env=None)
@@ -220,7 +220,7 @@ def test_validate_scripted_slot_mismatch(xdg, workspaces_dir):
         family = "sign"
         slots  = ["app_secret", "consumer_key"]
     """)
-    from credproxy_cli.core.bindings import Binding, validate
+    from credproxy_cli.core.model.bindings import Binding, validate
     from credproxy_cli.core.errors import ConfigError
 
     # single-slot secret for a two-slot scripted scheme -> rejected

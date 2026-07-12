@@ -18,7 +18,7 @@ def _write_preset(name: str, placeholder_toml: str):
 
 def test_preset_rejects_unknown_charset(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("badcs", '[placeholder]\nprefix = "p_"\nlength = 32\ncharset = "nope"\n')
     with pytest.raises(ConfigError, match="charset"):
         load_presets()
@@ -28,14 +28,14 @@ def test_preset_rejects_zero_entropy_length(xdg):
     """length <= len(prefix) would generate just the prefix -- identical across
     workspaces, defeating placeholder uniqueness. Must fail at parse."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("badlen", '[placeholder]\nprefix = "p_"\nlength = 2\ncharset = "hex"\n')
     with pytest.raises(ConfigError, match="must exceed"):
         load_presets()
 
 
 def test_preset_valid_placeholder_builds(xdg):
-    from credproxy_cli.core.presets import get_preset
+    from credproxy_cli.core.model.presets import get_preset
     _write_preset("good", '[placeholder]\nprefix = "g_"\nlength = 18\ncharset = "hex"\n')
     ph = get_preset("good").placeholder.generate()
     assert ph.startswith("g_") and len(ph) == 18
@@ -44,7 +44,7 @@ def test_preset_valid_placeholder_builds(xdg):
 def test_preset_placeholder_defaults_missing_fields(xdg):
     """Missing placeholder fields now DEFAULT (consistent with injector parsing)
     rather than raising a KeyError; only present-but-invalid values are rejected."""
-    from credproxy_cli.core.presets import get_preset
+    from credproxy_cli.core.model.presets import get_preset
     _write_preset("partial", '[placeholder]\nprefix = "x_"\n')   # no length/charset
     assert get_preset("partial").placeholder.prefix == "x_"
 
@@ -83,7 +83,7 @@ message = "scratch only"
 
 
 def test_preset_mixed_parses_bindings_and_rules(xdg):
-    from credproxy_cli.core.presets import build_preset, get_preset
+    from credproxy_cli.core.model.presets import build_preset, get_preset
     _write_raw_preset("gh-guarded", _MIXED)
     spec = get_preset("gh-guarded")
     assert spec.needs_credential is True
@@ -110,7 +110,7 @@ methods = ["DELETE"]
 
 def test_preset_pure_rule_needs_no_credential(xdg):
     """A pure-rule pack: no [placeholder], no [[part]] -> no provider/secret."""
-    from credproxy_cli.core.presets import build_preset, get_preset
+    from credproxy_cli.core.model.presets import build_preset, get_preset
     _write_raw_preset("policy", _RULE_ONLY)
     spec = get_preset("policy")
     assert spec.needs_credential is False and spec.placeholder is None
@@ -122,7 +122,7 @@ def test_preset_pure_rule_needs_no_credential(xdg):
 
 def test_preset_binding_without_placeholder_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_raw_preset("nop", '[[part]]\nsuffix="api"\ninjector="bearer"\n'
                              'hosts=["h.example"]\n')
     with pytest.raises(ConfigError, match="missing \\[placeholder\\]"):
@@ -131,7 +131,7 @@ def test_preset_binding_without_placeholder_rejected(xdg):
 
 def test_preset_pure_rule_with_placeholder_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_raw_preset("bad", '[placeholder]\nprefix="p_"\n' + _RULE_ONLY)
     with pytest.raises(ConfigError, match="meaningless without"):
         load_presets()
@@ -139,7 +139,7 @@ def test_preset_pure_rule_with_placeholder_rejected(xdg):
 
 def test_preset_empty_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_raw_preset("empty", '[placeholder]\nprefix="p_"\n')  # no parts, no rules
     with pytest.raises(ConfigError, match="at least one"):
         load_presets()
@@ -147,7 +147,7 @@ def test_preset_empty_rejected(xdg):
 
 def test_preset_rule_literal_name_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_raw_preset("bad", '[[rule]]\nname="x"\nsuffix="g"\n'
                              'hosts=["h.example"]\naction="block"\n')
     with pytest.raises(ConfigError, match="uses 'suffix'"):
@@ -159,7 +159,7 @@ def test_preset_rule_field_error_surfaces_with_preset_path(xdg):
     with the preset path in the message ONCE (not doubled -- review #38), not a
     deferred crash at apply."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_raw_preset("bad", '[[rule]]\nsuffix="g"\nhosts=["h.example"]\n'
                              'action="nope"\n')
     with pytest.raises(ConfigError, match="action must be one of") as ei:
@@ -170,7 +170,7 @@ def test_preset_rule_field_error_surfaces_with_preset_path(xdg):
 
 
 def test_describe_presets_includes_rules(xdg):
-    from credproxy_cli.core.presets import describe_presets
+    from credproxy_cli.core.model.presets import describe_presets
     _write_raw_preset("gh-guarded", _MIXED)
     row = next(p for p in describe_presets() if p["name"] == "gh-guarded")
     assert row["needs_credential"] is True
@@ -185,9 +185,9 @@ def test_describe_presets_includes_rules(xdg):
 
 def test_preset_rejects_duplicate_setup_order(xdg):
     """Two `[[setup]]` steps sharing an `order` are a definition error -- `order`
-    is the join key `preset refresh` re-classifies setup elements by."""
+    is the join key the lock snapshots setup elements by (must be unique)."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_raw_preset(
         "dupsetup",
         '[[setup]]\nrun = "a"\norder = 1\n[[setup]]\nrun = "b"\norder = 1\n')
@@ -199,7 +199,7 @@ def test_preset_rejects_duplicate_mount_target(xdg):
     """Two `[[mount]]` entries with the same target (trailing slash normalized)
     are a definition error -- `target` is the mount join key."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_raw_preset(
         "dupmount",
         '[[mount]]\nvolume = "a"\ntarget = "/x"\n'
@@ -210,7 +210,7 @@ def test_preset_rejects_duplicate_mount_target(xdg):
 
 def test_preset_distinct_setup_orders_ok(xdg):
     """Distinct orders / targets parse fine (the guard is duplicate-only)."""
-    from credproxy_cli.core.presets import get_preset
+    from credproxy_cli.core.model.presets import get_preset
     _write_raw_preset(
         "okpack",
         '[[setup]]\nrun = "a"\norder = 1\n[[setup]]\nrun = "b"\norder = 2\n'

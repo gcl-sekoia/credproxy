@@ -10,7 +10,14 @@ Storage layout (XDG):
   Config:  $XDG_CONFIG_HOME/credproxy/workspaces/<name>.toml
   State:   $XDG_STATE_HOME/credproxy/workspaces/<name>/
              auth.token         -- bearer token for the proxy API
-             setup_done         -- container id that last COMPLETED setup
+             lock.json          -- machine-owned state: generated placeholders,
+                                   presets, and the `applied` section (last-applied
+                                   spec, pushed bindings/rules metadata,
+                                   config_generation, setup-completed container id)
+             lifecycle.lock     -- the per-workspace flock (serializes lifecycle
+                                   transitions AND config pushes; concurrency
+                                   primitive, never durable state)
+             sessions/          -- per-session pidfiles for auto-stop tracking
 """
 from __future__ import annotations
 
@@ -26,8 +33,8 @@ except ImportError:  # pragma: no cover - non-POSIX (e.g. Windows)
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import WorkspaceError
-from .paths import workspaces_config_dir, workspaces_state_dir
+from ..errors import WorkspaceError
+from ..paths import workspaces_config_dir, workspaces_state_dir
 
 # Reentrancy depth of the per-workspace lifecycle lock held by THIS process,
 # keyed by lock-file path. flock would deadlock a process against itself on a
@@ -79,39 +86,24 @@ class Workspace:
         return self.state_dir / "auth.token"
 
     @property
-    def setup_done_path(self) -> Path:
-        """Marker file recording the container id that last COMPLETED setup.
-        Written only on success, so a failed setup re-runs on the next start;
-        keyed on container id, so a plain stop/start (same id) skips setup but a
-        recreate (new id) re-runs it."""
-        return self.state_dir / "setup_done"
-
-    @property
-    def applied_spec_path(self) -> Path:
-        """JSON file recording the workspace launch spec that was last
-        successfully applied (written when a workspace container is created)."""
-        return self.state_dir / "applied-spec.json"
-
-    @property
-    def applied_bindings_path(self) -> Path:
-        """JSON file recording binding metadata last pushed to the proxy
-        (written after a successful push). No secret values."""
-        return self.state_dir / "applied-bindings.json"
-
-    @property
-    def applied_rules_path(self) -> Path:
-        """JSON file recording rule metadata last pushed to the proxy (written
-        after a successful push). No secrets -- rules never carry any."""
-        return self.state_dir / "applied-rules.json"
-
-    @property
     def sessions_dir(self) -> Path:
         """Directory holding per-session pidfiles for auto-stop tracking."""
         return self.state_dir / "sessions"
 
     @property
+    def lock_json_path(self) -> Path:
+        """The machine-owned state lockfile (`lock.json`): generated data the CLI
+        must NOT write back into the hand-owned TOML -- binding placeholders and
+        presets (resolver-written) plus the `applied` section (engine-written:
+        last-applied spec, pushed bindings/rules metadata, config_generation, and
+        the setup-completed container id). Distinct from `lock_path` -- that is
+        the flock (a concurrency primitive), this is durable state."""
+        return self.state_dir / "lock.json"
+
+    @property
     def lock_path(self) -> Path:
-        """Advisory lock file serializing this workspace's lifecycle transitions."""
+        """Advisory flock serializing this workspace's lifecycle transitions AND
+        config pushes (one reentrant lock, see `lock()`)."""
         return self.state_dir / "lifecycle.lock"
 
     @contextlib.contextmanager
@@ -164,7 +156,7 @@ class Workspace:
         """Name prefix shared by all of this workspace's managed volumes. Just a
         human-readable namespace -- it is NOT used to enumerate volumes for
         delete (that's by the `credproxy.workspace` label, since one name can be
-        a prefix of another: `foo` vs `foo-bar`); see lifecycle._workspace_volumes."""
+        a prefix of another: `foo` vs `foo-bar`); see containers._workspace_volumes."""
         return f"credproxy-vol-{self.name}-"
 
     def volume(self, name: str) -> str:
@@ -255,28 +247,6 @@ def list_names() -> list[str]:
     if not d.exists():
         return []
     return sorted(p.stem for p in d.iterdir() if p.suffix == ".toml" and p.is_file())
-
-
-@dataclass(frozen=True)
-class WorkspaceStatus:
-    name: str
-    running: bool
-    image: str
-
-
-def list_workspaces() -> list[WorkspaceStatus]:
-    """Structured status for every workspace: name, running?, image.
-
-    Docker is queried for the running state; image is read from the TOML."""
-    from . import docker
-    from .config import quick_image
-
-    out = []
-    for name in list_names():
-        ws = Workspace(name)
-        running = docker.container_status(ws.ws_container) == "running"
-        out.append(WorkspaceStatus(name, running, quick_image(ws)))
-    return out
 
 
 def ensure_token(ws: Workspace) -> None:

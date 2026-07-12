@@ -51,6 +51,15 @@ first terminal action (`block`/`respond`, or a `script` that calls one)
 short-circuits. A rule script that errors fails **closed** toward the policy —
 the workspace gets `502 credproxy: rule 'NAME' failed`, never a proceed-un-governed.
 
+That declaration order spans both sources of rules: the resolver builds the
+effective rule list as **literal `[[rule]]` blocks first, then the rules a
+`[[preset]]` reference expands to, in `[[preset]]` declaration order** (a preset
+is a durable reference the resolver expands — see
+[`configuration.md`](configuration.md)). So a literal rule always evaluates
+before a preset-supplied one on the same host, and two preset packs evaluate in
+the order their `[[preset]]` blocks appear. Order your `[[preset]]` blocks
+accordingly when two packs govern overlapping traffic.
+
 ## Interception is a union — a rule can flip a host to intercepted
 
 Adding a rule to a host with no bindings makes that host TLS-terminated (it was
@@ -71,7 +80,7 @@ by hand.
 ```toml
 # Block repo deletion while allowing the rest of the GitHub API
 [[rule]]
-name    = "gh-no-delete"      # auto-generated if omitted
+name    = "gh-no-delete"      # REQUIRED — hand-authored (`rule add` writes it)
 hosts   = ["api.github.com"]
 methods = ["DELETE"]          # optional; absent = all methods
 path    = "/repos/**"         # optional; * within a segment, ** across segments
@@ -222,8 +231,8 @@ response`) and the intercept decision, and it verifies what's *actually running*
 — which may lag the edited TOML until `apply`/`start`. The default (offline) form
 needs no running proxy and reflects the config file; `--live` needs the proxy up.
 
-Rules ride the existing push path (`start` / `apply`), drift tracking (an
-`applied-rules.json` sibling of `applied-bindings.json`), and `inspect`. Because
+Rules ride the existing push path (`start` / `apply`), drift tracking (the lock's
+`applied.rules`, a sibling of `applied.bindings`), and `inspect`. Because
 `/admin/config` is replace-all, **a rule edit re-pushes the whole config on the
 next `apply`/`start`, re-fetching every binding's secret from its provider** — so
 a credential-free rule change can still trigger a keychain/1Password prompt. A
@@ -317,7 +326,7 @@ def on_request():
   behavior; each sees only its own params, and a script can't mutate a param
   value across requests or rules (values are copied at the Starlark boundary).
 - **Params are config, not secrets.** They appear in plaintext in the TOML, `rule
-  list`, `inspect`, and `applied-rules.json` — correct for the credential-free
+  list`, `inspect`, and the lock's `applied.rules` — correct for the credential-free
   layer — and are **excluded from `/setup`** even for a `visible = true` rule (a
   workspace never sees them). **Don't paste tokens into params**; they have no
   provider and no redaction (that's the injector/binding layer's job).
@@ -333,7 +342,8 @@ A shared script plus per-rule params is only half the story — the other half i
 *wiring it into a workspace in one command*. That's the **preset**: a preset's
 optional `[[rule]]` array ships the guardrails alongside (or instead of) a
 credential's bindings, so `credproxy workspace NAME preset add org-guardrails`
-stamps the whole policy — hosts, params, visibility — in one move. An org overlay
+applies the whole policy — hosts, params, visibility — in one move (a durable
+`[[preset]]` reference the resolver expands). An org overlay
 ships the `.star` under `scripts/` and the pack under `presets/` in the same
 overlay, and every workspace applies it identically. See the preset section in
 [`configuration.md`](configuration.md#bindings) and [`overlays.md`](../advanced/overlays.md);

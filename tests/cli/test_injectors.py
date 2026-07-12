@@ -9,7 +9,7 @@ import pytest
 
 
 def test_find_builtin_bearer(xdg):
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     inj = find_injector("bearer")
     assert inj.name == "bearer"
@@ -20,7 +20,7 @@ def test_find_builtin_bearer(xdg):
 
 
 def test_find_builtin_basic(xdg):
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     inj = find_injector("basic")
     assert inj.scheme == "basic"
@@ -29,7 +29,7 @@ def test_find_builtin_basic(xdg):
 
 
 def test_find_builtin_body(xdg):
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     inj = find_injector("body")
     assert inj.scheme == "body"
@@ -38,7 +38,7 @@ def test_find_builtin_body(xdg):
 
 
 def test_find_builtin_sigv4(xdg):
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     inj = find_injector("sigv4")
     assert inj.scheme == "sigv4"
@@ -47,7 +47,7 @@ def test_find_builtin_sigv4(xdg):
 
 def test_find_injector_not_found(xdg):
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     with pytest.raises(InjectorError, match="not found"):
         find_injector("totally_nonexistent_zzz")
@@ -66,7 +66,7 @@ def test_user_injector_shadows_builtin(xdg, tmp_path, monkeypatch):
         'scheme = "bearer"\n[params]\nheader = "X-Custom-Auth"\n'
     )
 
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
     inj = find_injector("bearer")
     assert inj.params["header"] == "X-Custom-Auth"
     assert inj.source == "user"
@@ -77,7 +77,7 @@ def test_user_injector_shadows_builtin(xdg, tmp_path, monkeypatch):
 
 def test_injector_missing_scheme(xdg):
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
     from credproxy_cli.core.paths import injectors_config_dir
 
     user_dir = injectors_config_dir()
@@ -90,7 +90,7 @@ def test_injector_missing_scheme(xdg):
 
 def test_injector_unknown_scheme(xdg):
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
     from credproxy_cli.core.paths import injectors_config_dir
 
     user_dir = injectors_config_dir()
@@ -103,7 +103,7 @@ def test_injector_unknown_scheme(xdg):
 
 def test_injector_params_not_table(xdg):
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
     from credproxy_cli.core.paths import injectors_config_dir
 
     user_dir = injectors_config_dir()
@@ -116,7 +116,7 @@ def test_injector_params_not_table(xdg):
 
 def test_injector_params_value_non_string(xdg):
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
     from credproxy_cli.core.paths import injectors_config_dir
 
     user_dir = injectors_config_dir()
@@ -129,7 +129,7 @@ def test_injector_params_value_non_string(xdg):
 
 def test_injector_placeholder_unknown_charset(xdg):
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
     from credproxy_cli.core.paths import injectors_config_dir
 
     user_dir = injectors_config_dir()
@@ -145,7 +145,7 @@ def test_injector_placeholder_unknown_charset(xdg):
 
 def test_injector_placeholder_length_too_short(xdg):
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
     from credproxy_cli.core.paths import injectors_config_dir
 
     user_dir = injectors_config_dir()
@@ -163,7 +163,7 @@ def test_injector_placeholder_length_too_short(xdg):
 
 
 def test_placeholder_generate_length_and_prefix():
-    from credproxy_cli.core.injectors import Placeholder
+    from credproxy_cli.core.model.injectors import Placeholder
 
     ph = Placeholder(prefix="ghp_", length=40, charset="alnumeric")
     value = ph.generate()
@@ -172,7 +172,7 @@ def test_placeholder_generate_length_and_prefix():
 
 
 def test_placeholder_generate_uses_correct_charset_hex():
-    from credproxy_cli.core.injectors import Placeholder
+    from credproxy_cli.core.model.injectors import Placeholder
 
     ph = Placeholder(prefix="", length=32, charset="hex")
     value = ph.generate()
@@ -182,7 +182,7 @@ def test_placeholder_generate_uses_correct_charset_hex():
 
 def test_placeholder_generate_randomness():
     """Two generated placeholders should (almost certainly) differ."""
-    from credproxy_cli.core.injectors import Placeholder
+    from credproxy_cli.core.model.injectors import Placeholder
 
     ph = Placeholder(prefix="credproxy_", length=40, charset="alnumeric")
     values = {ph.generate() for _ in range(10)}
@@ -190,7 +190,7 @@ def test_placeholder_generate_randomness():
 
 
 def test_placeholder_generate_base64url_charset():
-    from credproxy_cli.core.injectors import Placeholder
+    from credproxy_cli.core.model.injectors import Placeholder
     import string
 
     ph = Placeholder(prefix="t_", length=20, charset="base64url")
@@ -203,7 +203,7 @@ def test_placeholder_generate_base64url_charset():
 
 
 def test_list_injectors_includes_builtin(xdg):
-    from credproxy_cli.core.injectors import list_injectors
+    from credproxy_cli.core.model.injectors import list_injectors
 
     names = [i.name for i in list_injectors()]
     assert "bearer" in names
@@ -214,7 +214,7 @@ def test_list_injectors_includes_builtin(xdg):
 
 def test_list_injectors_user_shadows(xdg):
     from credproxy_cli.core.paths import injectors_config_dir
-    from credproxy_cli.core.injectors import list_injectors
+    from credproxy_cli.core.model.injectors import list_injectors
 
     user_dir = injectors_config_dir()
     user_dir.mkdir(parents=True, exist_ok=True)

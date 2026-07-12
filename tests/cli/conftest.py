@@ -45,7 +45,7 @@ def ws_factory(xdg, workspaces_dir):
     """Return a factory that creates a minimal workspace TOML and returns
     the Workspace object."""
     def make(name: str, content: str | None = None) -> "Workspace":
-        from credproxy_cli.core.workspace import Workspace
+        from credproxy_cli.core.model.workspace import Workspace
         path = workspaces_dir / f"{name}.toml"
         if content is None:
             content = f'image = "python:3.12-slim"\n'

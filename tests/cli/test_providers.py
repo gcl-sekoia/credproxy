@@ -666,23 +666,33 @@ def test_scaffold_sh_provider_runs_via_cli(xdg, monkeypatch):
 
 
 def _scaffold_sh_provider(name: str) -> Path:
-    from credproxy_cli.core.scaffold import scaffold
+    from credproxy_cli.core.model.scaffold import scaffold
     return scaffold("provider", name, "sh").path
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="sh provider needs jq")
-def test_sh_provider_ref_with_space_not_split(xdg, monkeypatch):
-    """A ref containing a space (common for op/bw/keychain item names) must be
-    treated as ONE ref, not word-split -- and multiple refs still accumulate
-    (the loop runs in the pipe subshell where it also emits)."""
+def test_sh_provider_ref_with_space_not_split(xdg):
+    """A ref containing a space OR a glob char (common for op/bw/keychain item
+    names) must reach fetch() as ONE literal ref -- not word-split, not
+    pathname-expanded -- and multiple refs still accumulate (the loop runs in the
+    pipe subshell where it also emits).
+
+    We swap the template's env backend (`printenv "$1"`) for an echo, so each
+    ref round-trips as its own value: the assertion then observes exactly what
+    the loop passed to fetch(). This exercises the shipped loop directly and,
+    unlike an env lookup, doesn't depend on a space-*named* env var surviving an
+    intermediate /bin/sh (some minimal shells drop such vars before a child)."""
     import subprocess
     prov = _scaffold_sh_provider("shp")
-    monkeypatch.setenv("My Token", "SPACED")
-    monkeypatch.setenv("PLAIN", "p")
-    req = json.dumps({"version": 1, "op": "get", "secrets": ["My Token", "PLAIN"]})
+    prov.write_text(prov.read_text().replace('printenv "$1"', 'printf %s "$1"'))
+    req = json.dumps({"version": 1, "op": "get",
+                      "secrets": ["My Token", "a*b", "PLAIN"]})
     r = subprocess.run([str(prov)], input=req, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout)["values"] == {"My Token": "SPACED", "PLAIN": "p"}
+    # A word-split ref would produce keys "My"/"Token"; a glob-expanded "a*b"
+    # would change or drop the key. Exact round-trip proves neither happened.
+    assert json.loads(r.stdout)["values"] == {
+        "My Token": "My Token", "a*b": "a*b", "PLAIN": "PLAIN"}
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="sh provider needs jq")

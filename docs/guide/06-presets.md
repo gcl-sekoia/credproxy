@@ -10,7 +10,7 @@ command.
 
 ## See the expansion first
 
-`credproxy preset list` shows every preset and exactly what it would stamp, so
+`credproxy preset list` shows every preset and exactly what it expands to, so
 you know before you apply:
 
 ```console
@@ -49,33 +49,30 @@ pass `--provider` and `--secret` just like a binding:
 credp preset add github --provider op --secret 'op://Private/GitHub/token'
 ```
 
-## What got stamped
+## What the reference expands to
 
-A preset is **expansion, not a link**: it writes ordinary `[[binding]]` blocks
-into your config file and then forgets about them. The proxy never hears the word
-"preset". Look in the TOML and you will find three plain bindings sharing one
-placeholder:
+A preset is a durable **reference**: `preset add` appends a small `[[preset]]`
+block to your config file, and credproxy expands it — into ordinary bindings,
+rules, and container config — every time it resolves the workspace. The proxy
+never hears the word "preset"; it only ever sees the expanded bindings. Look in
+the TOML and you will find just the reference:
 
 ```toml
-[[binding]]
-name     = "github-api"
-injector = "bearer"
+[[preset]]
+name     = "github"
 provider = "gh-cli"
 secret   = "github.com"
-hosts    = ["api.github.com"]
-placeholder = "ghp_8Rrm2ERZeHSTAhrJmugGqJWiISluAsiBguAs"
-
-[[binding]]
-name     = "github-git"
-injector = "basic"
-# ... same provider, same placeholder ...
 ```
 
-They all carry the same `placeholder`, so a single fake token works everywhere,
-and any client-side token-shape check still passes. Because they are ordinary
-bindings, you edit or remove them exactly as in chapter 04 — `credp binding
-list`, `credp binding remove github-ghcr`, or hand-editing the file. Nothing
-tracks that they came from a preset.
+That reference expands to three plain bindings sharing one placeholder — a
+GitHub PAT is `bearer` on `api.github.com` but HTTP `basic` on `github.com` /
+`ghcr.io`. They all carry the same placeholder, so a single fake token works
+everywhere and any client-side token-shape check still passes. The full
+expansion (names, hosts, the shared placeholder) is snapshotted in the workspace
+lockfile (`lock.json`), never written into your hand-owned TOML. `credp binding
+list` shows the expanded bindings like any other; to change them, edit the
+`[[preset]]` block's own inputs (below) — you don't hand-edit the expansion.
+
 
 ## Presets can carry rules too
 
@@ -88,8 +85,8 @@ all. Rules are the next chapter.
 
 A service often needs more than a token: a setup script, an env var, a mounted
 file. A preset can ship those as well — `[[mount]]`, `[env]`, and `[[setup]]`
-sections that stamp into the container-side of your workspace config, right
-alongside the bindings. A pack can be *only* container config, with no
+sections that the resolver merges into the container-side of your effective
+workspace config, right alongside the bindings. A pack can be *only* container config, with no
 credential at all. A `github-auth` pack might look like this:
 
 ```toml
@@ -113,8 +110,8 @@ run   = "bash /opt/github-auth.sh"
 order = 45                            # `order` is required in a pack
 ```
 
-Applying it stamps the mount and the setup step next to the bindings — as plain
-config, still **expansion, not a link**:
+Applying it references the pack; the resolver merges the mount and the setup step
+into your effective container config, alongside the bindings:
 
 ```console
 $ credp preset add github-auth
@@ -126,8 +123,8 @@ applied preset 'github-auth' to workspace 'myproject': 1 binding(s), 0 rule(s), 
 
 The container half (`mounts`/`env`/`setup`) changes the workspace spec, so if
 the container already exists credproxy tells you to `start` again to apply it.
-Each stamped block carries an inert `# credproxy:preset …` provenance comment so
-a second `preset add` of the same pack is refused rather than duplicated. An
+A second `preset add` of the same pack is refused (a `[[preset]]` block already
+names it) rather than duplicated. An
 [attached workspace](../advanced/composability.md) — whose container credproxy
 does not manage — refuses a container-half pack; binding/rule-only packs still
 apply there.
@@ -136,39 +133,61 @@ Files a pack ships (that `setup.d/github-auth.sh`) live in the same layered
 registry as the pack itself and are resolved from the pack's own tier →
 [Overlays](../advanced/overlays.md).
 
-## Refreshing a stamped pack
+## When a pack's definition changes
 
-A preset is expansion, **not a link**: once `preset add` stamps its blocks, they
-are ordinary config that never re-reads the definition. When a pack's definition
-changes upstream (a new host, an added rule, a dropped part), re-expand the
-stamped blocks on your own clock with `preset refresh`:
+The reference is a **snapshot**: the expansion recorded in the lockfile is pinned
+at the moment you added the pack, so a definition that changes upstream (a new
+host, an added rule, a dropped part) is **inert** until you ask for it —
+credproxy surfaces a note that the definition drifted but keeps serving the
+snapshot.
 
+Re-expanding a snapshot on your own clock is `preset refresh`:
+
+```console
+$ credp preset refresh github --check      # preview; writes nothing
+preset 'github': 1 added
+  binding github-ghcr  added
+$ credp preset refresh github              # apply: re-snapshot the expansion
+preset 'github': 1 added
+  binding github-ghcr  added
 ```
-$ credp preset refresh github          # one pack; omit NAME for every applied pack
+
+`preset refresh` force-re-expands the reference against the **current** pack
+definition and structurally diffs the new expansion against the locked one
+(per entry: `added` / `removed` / `changed`, with a field-level diff for a change).
+A dropped definition part simply becomes a `removed` entry — there is no `--prune`
+flag. `--check` prints the same diff **without writing** (a preview, and the
+CI-friendly "is anything stale?" probe; it exits 0 whether or not anything
+changed). Omitting the pack name refreshes **every** `[[preset]]` reference in the
+file. Identity is preserved exactly: the shared placeholder is reused (never
+rotated — rotating it would break placeholder-consuming state and cross-binding
+sharing), and a refresh that would collide with a literal entry (or another
+preset) fails atomically, naming both sides, with nothing written.
+
+You *can* also change a pack's inputs yourself: edit the `[[preset]]` block's
+own fields — `provider`, `secret`, `[preset.options]`, `disable`, or
+`[preset.override.<suffix>]` — and the next resolve re-expands automatically
+against the current definition (you touched the reference; that is your clock).
+**That is also how you keep a hand change across a refresh:** there is no stamped
+text to edit, so express the customization as a `disable` or
+`[preset.override.<suffix>]` on the reference — those are the reference's own
+inputs, so a refresh preserves them.
+
+To drop a pack entirely, `preset remove PRESET` deletes its `[[preset]]` block
+(and any `[preset.options]` / `[preset.override.*]` sub-tables) and its lock
+snapshot, reporting what leaves the effective model:
+
+```console
+$ credp preset remove github
+removed preset 'github' from workspace 'myproject': 3 binding(s), 0 rule(s) left the effective model
+  binding github-api       bearer  api.github.com
+  ...
 ```
 
-It compares each stamped block against what the current definition would write,
-using the two provenance hashes the stamp recorded, and classifies per block:
-
-- **up to date** — the block already matches; nothing written.
-- **updated** — the definition changed and the block is untouched since stamping
-  → the block is replaced (and its provenance marker refreshed).
-- **skipped (hand-edited)** — you edited the block since it was stamped → it is
-  **never** overwritten; refresh prints a diff of what it *would* write so you can
-  reconcile by hand (or delete it and re-run).
-- **added** — the definition gained a block → it is stamped additively, reusing
-  the pack's existing shared placeholder and provider/secret.
-- **vanished** — a stamped block whose definition counterpart is gone → reported
-  only; pass `--prune` to delete it (a destructive action, so on the loose
-  surface an implicit default workspace asks first).
-
-The shared placeholder and the provider/secret are **preserved** (read back from
-the stamped bindings, never regenerated — rotating the placeholder would break
-placeholder-consuming state and cross-binding sharing). The write is
-all-or-nothing. There is no merge: a hand-edited block is yours to resolve. A
-pack that no longer resolves in the registry errors for an explicit
-`refresh NAME` and is skipped-with-a-note when refreshing all; an attached
-workspace refuses a container-half refresh (same as `preset add`).
+`preset refresh` (when it has real changes) and `preset remove` are both gated
+like the destructive set on the loose surface when they target an implicitly-
+resolved workspace: they confirm first (`--yes` bypasses, and they fail closed
+without a terminal). `--check` never gates.
 
 ## Pack options (host-half parameters)
 
@@ -207,12 +226,12 @@ declared `default` → otherwise the add fails listing the missing options.
 $ credp preset add git-signing --opt sock_dir=/run/user/1000/gcr
 ```
 
-The resolved value is stamped as ordinary literal config
-(`bind = "/run/user/1000/gcr"`); the `{ option = … }` marker never reaches your
-workspace file, and `preset refresh` reads the value back from the stamped mount
-(so a refresh never re-prompts or resets it). On the strict `credproxy` surface
-(and on `credp` without a terminal), a required option with no `--opt` and no
-default fails with a structured error naming what to supply — never a prompt.
+The resolved value is written explicitly into the reference's `[preset.options]`
+sub-table (`sock_dir = "/run/user/1000/gcr"`) and substituted into the expanded
+mount source; the `{ option = … }` marker itself never reaches your workspace
+file. On the strict `credproxy` surface (and on `credp` without a terminal), a
+required option with no `--opt` and no default fails with a structured error
+naming what to supply — never a prompt.
 
 The same loose-surface prompting can fill an omitted **provider**/**secret** (a
 picker over your registry and a free-text ref with an offered validate-now fetch),
@@ -267,7 +286,7 @@ unmet prerequisite (path): /home/you/.ssh/credproxy-agent does not exist -- run 
 1 unmet prerequisite(s) above -- fix them, then `credproxy doctor myproject` to re-check
 ```
 
-The pack still **stamps** — the config is durable and the host state is fixable
+The reference still lands — the config is durable and the host state is fixable
 afterward, so failing checks warn but never block the add (it exits 0). Once you
 fix the prerequisite, `credproxy doctor myproject` goes green:
 
@@ -279,8 +298,8 @@ $ credproxy doctor myproject
 ✓ [myproject] preset 'git-signing' requires (path): /home/you/.ssh/credproxy-agent exists
 ```
 
-`doctor` discovers which packs a workspace uses from the provenance comments the
-stamp left behind, so it re-checks exactly the packs you applied. A
+`doctor` discovers which packs a workspace uses from its `[[preset]]` references
+and the lock snapshot, so it re-checks exactly the packs you applied. A
 `fetch = true` provider check runs only under `doctor NAME --fetch` (it resolves
 a secret, which can prompt) — a plain `doctor` degrades it to a resolve-only
 provider check and never fetches.

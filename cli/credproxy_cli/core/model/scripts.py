@@ -17,8 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .errors import InjectorError
-from .paths import layered_dirs
+from ..errors import InjectorError
+from ..paths import layered_dirs
 
 
 @dataclass(frozen=True)

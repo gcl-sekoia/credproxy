@@ -5,17 +5,17 @@ A binding connects:
   name . injector . provider . secret-id . placeholder . hostname scope
 
 It lives as a `[[binding]]` table in the workspace TOML. This module:
-  - parses + validates the `[[binding]]` array (`load_bindings`),
-  - materializes missing `name`/`placeholder` back into the file with a
-    SURGICAL text edit that preserves comments and ordering
-    (`materialize_bindings`),
-  - appends/removes a binding block as a text edit (`append_binding`,
-    `remove_binding`),
+  - parses + validates the `[[binding]]` array (`load_bindings`); `name` is
+    REQUIRED (hand-authored) -- a missing one raises with a prescriptive fix,
+  - appends a binding block / deletes a whole named block as a text edit
+    (`append_binding`, `remove_binding`) -- the ONLY mutations, never an edit
+    inside existing content,
   - maps resolved bindings onto the proxy's EXISTING wire shape
     (`wire_config`), so today's unmodified proxy keeps working.
 
-No-hidden-state principle: the TOML file is the single source of truth.
-Generated names/placeholders are written back, not held in memory.
+One-way dataflow: the TOML is the hand-owned intent file (comments sacred); every
+GENERATED value (placeholders) lives in the machine-owned lockfile instead, bound
+by `resolver.resolve_workspace`. The CLI never rewrites inside the user's file.
 """
 from __future__ import annotations
 
@@ -25,10 +25,10 @@ from dataclasses import dataclass, replace
 from typing import Callable
 
 from . import hostmatch
-from .errors import ConfigError, CredproxyError
+from ..errors import ConfigError, CredproxyError
 from .injectors import ENV_NAME_RE, Injector, find_injector
-from .paths import atomic_write_text as _atomic_write_text
-from .providers import fetch_many as provider_fetch_many
+from ..paths import atomic_write_text as _atomic_write_text
+from ..providers import fetch_many as provider_fetch_many
 from .schemes import location_key
 from .workspace import Workspace
 
@@ -235,7 +235,10 @@ def _parse_bindings(raw: dict, source: str) -> list[Binding]:
 
 
 def _auto_name(injector: str, provider: str, taken: set[str]) -> str:
-    """`<injector>-<provider>`, with a numeric suffix on collision."""
+    """`<injector>-<provider>`, with a numeric suffix on collision. Still used by
+    `binding add` (to generate a name at add time) and to SUGGEST a name in the
+    missing-`name` error -- names are hand-authored in the intent TOML now, never
+    written back by a load."""
     base = f"{injector}-{provider}"
     if base not in taken:
         return base
@@ -245,12 +248,29 @@ def _auto_name(injector: str, provider: str, taken: set[str]) -> str:
     return f"{base}-{i}"
 
 
+def _require_binding_names(bindings: list[Binding], source: str) -> None:
+    """Enforce the hand-authored-`name` contract: a `[[binding]]` with no `name`
+    is an error, with a prescriptive fix showing the exact line to add (suggested
+    via the same `<injector>-<provider>` convention `binding add` uses). The
+    load path no longer auto-names + writes back -- the intent TOML is hand-owned
+    and placeholders live in the lockfile."""
+    taken = {b.name for b in bindings if b.name}
+    for i, b in enumerate(bindings):
+        if b.name is None:
+            suggestion = _auto_name(b.injector, b.provider, taken)
+            raise ConfigError(
+                f"{source}: binding[{i}] is missing a required `name` -- add a "
+                f"line like `name = {_toml_str(suggestion)}` to its [[binding]] "
+                f"block (binding names are hand-authored; generated placeholders "
+                f"live in the lockfile)")
+
+
 def validate(bindings: list[Binding], source: str) -> None:
     """Cross-binding validation: unique names; unique (host, wire-location);
     injector/provider must resolve; and the binding's secret slots must match
     the scheme's. Names must already be materialized (non-None) for the
     uniqueness check; callers run this post-materialize."""
-    from .providers import find_provider
+    from ..providers import find_provider
 
     names: set[str] = set()
     # (host, location) -> {"unconditional": name|None, "by_ph": {placeholder: name}}.
@@ -376,16 +396,15 @@ def validate(bindings: list[Binding], source: str) -> None:
 
 
 def load_bindings(ws: Workspace) -> list[Binding]:
-    """Parse + validate the workspace's `[[binding]]` array. Assumes names
-    and placeholders are already materialized (call `materialize_bindings`
-    first, as lifecycle/porcelain do). Raises ConfigError on validation
-    failure."""
+    """Parse + validate the workspace's `[[binding]]` array. Names are REQUIRED
+    (hand-authored); a missing one raises with a prescriptive fix. Placeholders
+    are NOT bound here (that's `resolver.resolve_workspace`, from the lock) -- this
+    is the read-only structural validator doctor / the add-collision check use.
+    Raises ConfigError on validation failure."""
     raw = tomllib.loads(ws.config_path.read_text())
     source = str(ws.config_path)
     bindings = _parse_bindings(raw, source)
-    # Fill auto-names in-memory for validation even if not yet on disk, so
-    # validate's uniqueness check is meaningful when called standalone.
-    bindings = _with_auto_names(bindings)
+    _require_binding_names(bindings, source)
     validate(bindings, source)
     return bindings
 
@@ -407,9 +426,9 @@ def _with_auto_names(bindings: list[Binding]) -> list[Binding]:
 
 def _with_auto_placeholders(bindings: list[Binding]) -> list[Binding]:
     """Return bindings with any None placeholder filled (in-memory only) for the
-    substitute family -- the same generation `materialize_bindings` writes to
-    disk, but without a file to write back to (the stateless push path). Sign
-    schemes hold no placeholder and are left untouched."""
+    substitute family -- the same generation the resolver records in the lock, but
+    without any lock to record into (the STATELESS push path). Sign schemes hold
+    no placeholder and are left untouched."""
     out: list[Binding] = []
     for b in bindings:
         if b.placeholder is None:
@@ -423,12 +442,15 @@ def _with_auto_placeholders(bindings: list[Binding]) -> list[Binding]:
 
 def bindings_from_raw(raw: dict, source: str,
                       *, fill_placeholders: bool = False) -> list[Binding]:
-    """Parse + validate `[[binding]]` from an already-parsed TOML dict, filling
-    auto-names (and, with `fill_placeholders`, generating in-memory placeholders)
-    -- the workspace-free sibling of `load_bindings`, for the stateless push path.
-    Shares `_parse_bindings`/`validate`, so a stateless config is held to the same
-    rules a workspace one is (G3)."""
-    bindings = _with_auto_names(_parse_bindings(raw, source))
+    """Parse + validate `[[binding]]` from an already-parsed TOML dict -- the
+    workspace-free sibling of `load_bindings`, for the STATELESS push path (no
+    lockfile, no state). Names are REQUIRED (the `--config` file is hand-authored,
+    same as a workspace TOML). With `fill_placeholders`, placeholders are
+    generated IN-MEMORY (never persisted -- there is no lock to persist to). Shares
+    `_parse_bindings`/`validate`, so a stateless config is held to the same rules
+    a workspace one is (G3)."""
+    bindings = _parse_bindings(raw, source)
+    _require_binding_names(bindings, source)
     if fill_placeholders:
         bindings = _with_auto_placeholders(bindings)
     validate(bindings, source)
@@ -439,6 +461,12 @@ def bindings_from_raw(raw: dict, source: str,
 
 # A `[[binding]]` table header line (a trailing comment is allowed).
 _BLOCK_HEADER_RE = re.compile(r"^\s*\[\[\s*binding\s*\]\]\s*(#.*)?$")
+# A `[binding.xxx]` child sub-table (e.g. a hand-written `[binding.params]`):
+# valid TOML the loader accepts, and it BELONGS to the preceding `[[binding]]`
+# element, so the block machinery must fold it into that element's span (not end
+# the block at it) -- else `remove_binding` orphans it and corrupts the file.
+# Mirrors rules.py's `_RULE_CHILD_RE`.
+_BINDING_CHILD_RE = re.compile(r"^\s*\[\s*binding\.[^\[\]\n]*\]\s*(#.*)?$")
 # Any genuine top-level table / array-of-tables header (ends the current block).
 # Matches a fully-bracketed header line (+ optional comment) -- NOT a line that
 # merely starts with '[', such as a multi-line array value's continuation
@@ -563,81 +591,6 @@ def _toml_key(key: str) -> str:
     return key if _BARE_KEY_RE.match(key) else _toml_str(key)
 
 
-def _insert_line_in_block(text: str, block_index: int, line: str,
-                          header_re: re.Pattern = _BLOCK_HEADER_RE,
-                          child_re: re.Pattern | None = None) -> str:
-    """Insert `line` (a scalar key, no trailing newline) into the block-index'th
-    `[[binding]]` block, preserving everything else verbatim. When `child_re` is
-    given, the line lands BEFORE the first child sub-table (`[binding.x]`) in the
-    block -- a scalar key after a sub-table header would belong to that sub-table,
-    not the array element."""
-    lines = text.splitlines(keepends=True)
-    spans = _block_spans(text, header_re, child_re)
-    start, end = spans[block_index]
-    at = end
-    if child_re is not None:
-        for k in range(start + 1, end):
-            if child_re.match(lines[k]):
-                at = k
-                break
-    # Ensure the line before insertion ends with a newline.
-    if at > 0 and not lines[at - 1].endswith("\n"):
-        lines[at - 1] = lines[at - 1] + "\n"
-    lines.insert(at, line + "\n")
-    return "".join(lines)
-
-
-def materialize_bindings(ws: Workspace, notify: Notify = _noop) -> list[Binding]:
-    """Ensure every binding has a static `name` and `placeholder` on disk.
-
-    For each binding missing one, generate it (auto-name rule / the injector's
-    placeholder pattern) and write the line back into THAT binding's block via
-    a surgical text edit -- no whole-file re-serialization, so comments and
-    ordering survive. Each materialization is announced via `notify`.
-
-    Returns the parsed + validated bindings (with names/placeholders filled).
-    Idempotent: a fully-materialized file is left byte-for-byte unchanged.
-    """
-    text = ws.config_path.read_text()
-    raw = tomllib.loads(text)
-    source = str(ws.config_path)
-    bindings = _parse_bindings(raw, source)
-
-    # Decide names first (auto-name needs the full taken-set).
-    taken = {b.name for b in bindings if b.name}
-    resolved: list[Binding] = []
-    for b in bindings:
-        name = b.name
-        if name is None:
-            name = _auto_name(b.injector, b.provider, taken)
-            taken.add(name)
-        resolved.append(replace(b, name=name))
-
-    changed = False
-    # Re-index spans after each edit since line numbers shift.
-    for idx, (orig, res) in enumerate(zip(bindings, resolved)):
-        if orig.name is None:
-            text = _insert_line_in_block(text, idx, f'name = {_toml_str(res.name)}')
-            notify(f"materialized name '{res.name}' for binding [{idx}]")
-            changed = True
-        if orig.placeholder is None:
-            injector = find_injector(res.injector)
-            # Only the substitute family holds an inert placeholder; sign
-            # schemes (sigv4, ...) compute auth material and have none.
-            if injector.spec.uses_placeholder:
-                ph = injector.placeholder.generate()
-                text = _insert_line_in_block(text, idx, f'placeholder = {_toml_str(ph)}')
-                resolved[idx] = replace(res, placeholder=ph)
-                notify(f"materialized placeholder for binding '{res.name}'")
-                changed = True
-
-    if changed:
-        _atomic_write_text(ws.config_path, text)
-
-    validate(resolved, source)
-    return resolved
-
-
 # ---- imperative edits -------------------------------------------------------
 
 
@@ -691,26 +644,42 @@ def remove_binding(ws: Workspace, name: str) -> None:
     surgical text edit. Raises ConfigError if no such binding exists."""
     text = ws.config_path.read_text()
     raw = tomllib.loads(text)
-    bindings = _with_auto_names(_parse_bindings(raw, str(ws.config_path)))
-    target = next((i for i, b in enumerate(bindings) if b.name == name), None)
-    if target is None:
+    bindings = _parse_bindings(raw, str(ws.config_path))
+    matches = [i for i, b in enumerate(bindings) if b.name == name]
+    if not matches:
         raise ConfigError(f"binding '{name}' not found in {ws.config_path}")
+    if len(matches) > 1:
+        raise ConfigError(
+            f"binding '{name}' is defined more than once in {ws.config_path}; "
+            f"resolve the duplicate names before removing it")
+    target = matches[0]
 
     lines = text.splitlines(keepends=True)
-    spans = _block_spans(text)
+    spans = _block_spans(text, child_re=_BINDING_CHILD_RE)
+    # `_block_spans` indexes only `[[binding]]` block form; the inline-array form
+    # (`binding = [ { ... } ]`) parses to entries but yields ZERO spans, so the
+    # span<->entry indexing below would be off (or raise IndexError). Refuse with a
+    # prescriptive fix rather than editing the wrong block / crashing.
+    if len(spans) != len(bindings):
+        raise ConfigError(
+            f"'{name}' isn't a removable `[[binding]]` block in {ws.config_path} "
+            f"-- rewrite it as a `[[binding]]` table to remove it")
     start, end = spans[target]
-    # If this block was preset-stamped, fold away the `# credproxy:preset ...`
-    # provenance marker line the stamp wrote directly above it -- else removing
-    # the block would orphan the marker, which #58 doctor keeps reading as an
-    # applied pack forever ("stamped binding missing?"). Then drop one preceding
-    # blank separator, so repeated add/remove doesn't accumulate blank lines.
-    from . import preset_stamp
-    if start > 0 and preset_stamp.is_marker_line(lines[start - 1]):
-        start -= 1
+    # Drop one preceding blank separator, so repeated add/remove doesn't
+    # accumulate blank lines.
     if start > 0 and lines[start - 1].strip() == "":
         start -= 1
     del lines[start:end]
     _atomic_write_text(ws.config_path, "".join(lines))
+
+    # Drop the removed binding's lock-managed placeholder identity, so a later
+    # add of a same-named binding mints a FRESH placeholder rather than inheriting
+    # the deleted one (placeholder identity is keyed by binding name).
+    from . import lock as lock_mod
+    lock = lock_mod.load_lock(ws)
+    if name in lock.get("placeholders", {}):
+        del lock["placeholders"][name]
+        lock_mod.save_lock(ws, lock)
 
 
 # ---- test (dry-run secret fetch) --------------------------------------------
@@ -907,7 +876,8 @@ def wire_config(
     for b, injector in prepared:
         if injector.spec.uses_placeholder and b.placeholder is None:
             raise ConfigError(
-                f"binding '{b.name}' has no placeholder; materialize it first"
+                f"binding '{b.name}' has no placeholder; resolve the workspace "
+                f"first (its placeholder identity is bound from the lockfile)"
             )
 
     resolved = resolve_secrets(bindings, fetch_many)

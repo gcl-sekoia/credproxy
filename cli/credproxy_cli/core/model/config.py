@@ -37,8 +37,8 @@ import os
 import re
 from pathlib import Path
 
-from .errors import ConfigError
-from .paths import atomic_write_text, overlay_dirs, resolve_singleton
+from ..errors import ConfigError
+from ..paths import atomic_write_text, overlay_dirs, resolve_singleton
 from .workspace import Workspace
 
 import tomllib
@@ -49,7 +49,7 @@ _VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 # Every top-level key a workspace TOML may carry: the container-side settings
 # load_config parses, `auto_stop` (host-side session behavior, read fresh by
-# lifecycle._maybe_auto_stop), and the two array-of-tables handled by their own
+# sessions._maybe_auto_stop), and the two array-of-tables handled by their own
 # modules (`binding` -> core/bindings.py, `rule` -> core/rules.py). load_config
 # rejects anything else so a typo (`mount` for `mounts`, `setup_cmd`, `user_id`)
 # is a hard error, not a silent no-op -- the TOML is the single source of truth,
@@ -57,7 +57,7 @@ _VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 KNOWN_KEYS = frozenset({
     "image", "home", "directory", "mounts", "env", "setup", "user", "workdir",
     "enter_prelude", "shell", "exec_flags", "run_flags", "map_host_user",
-    "user_uid", "auto_stop", "binding", "rule", "attach",
+    "user_uid", "auto_stop", "binding", "rule", "attach", "preset",
 })
 
 # The `attach` selector keys. Exactly one must be present. `compose_project` is
@@ -103,11 +103,11 @@ def _parse_attach(raw_attach, source: str) -> dict:
         return {"discover": f"com.docker.compose.project={val},"
                             f"com.docker.compose.service=proxy"}
     if key == "discover":
-        from .push import parse_discover
+        from .attach import parse_discover
         parse_discover(val)   # validates the k=v,k=v shape (raises ConfigError)
         return {"discover": val}
     if key == "admin_url":
-        from .push import normalize_admin_url, require_loopback
+        from .attach import normalize_admin_url, require_loopback
         url = normalize_admin_url(val)
         require_loopback(url)
         return {"admin_url": url}
@@ -158,7 +158,7 @@ def _tier_roots() -> dict[str, Path]:
     `user` (the XDG config dir) and `builtin`. The reserved literals win over a
     same-named overlay basename. This is the set a `TIER:REL` qualified overlay
     source resolves against (see `_overlay_source`)."""
-    from .paths import BUILTIN_DIR, config_dir
+    from ..paths import BUILTIN_DIR, config_dir
     roots: dict[str, Path] = {}
     for label, base in overlay_dirs():
         # labels are `overlay:<basename>` (deduped `overlay:<basename>#2`); the
@@ -432,14 +432,14 @@ def load_config_from_text(text: str, source: str, *,
     all-or-nothing preset expansion (which validates the composed text before any
     file exists).
 
-    `check_bind_exists` (default True) is the preset re-load knob: the normal
-    load path (`start`/`load_config`) existence-checks every host-bind SOURCE, but
-    the preset expand/refresh VALIDATION re-loads (`_expand_preset_into_text`,
-    `preset_refresh._classify`) pass False so an option-fed bind source that need
-    not exist until runtime (a socket dir the agent creates, `~/.ssh/...-agent`)
-    doesn't fail those internal re-validations. The real existence check still
-    runs at `start`, where CLAUDE.md says it belongs -- this only defers it for
-    the in-memory composition passes, never for a config loaded to actually run."""
+    `check_bind_exists` (default True) is the resolver knob: the normal load path
+    (`start`/`load_config`) existence-checks every host-bind SOURCE, but the
+    resolver (`resolver.resolve_workspace`, `validate_text`) passes False by
+    default so an option-fed bind source that need not exist until runtime (a
+    socket dir the agent creates, `~/.ssh/...-agent`) doesn't fail the
+    side-effect-free resolution `binding list`/`inspect` run. The real existence
+    check still runs at `start` (the resolver is called there with True), where
+    CLAUDE.md says it belongs -- this only defers it for the read-only passes."""
     try:
         raw = tomllib.loads(text)
     except Exception as e:
@@ -448,17 +448,11 @@ def load_config_from_text(text: str, source: str, *,
     if not isinstance(raw, dict):
         raise ConfigError(f"{source}: top level must be a table")
 
-    # `[[preset]]` is a TEMPLATE-only key: it is consumed and expanded at `create`
-    # time and never survives into a workspace's `<name>.toml`. Reject it here --
-    # specifically, ahead of the generic unknown-key path -- so "preset references
-    # live only in templates" is a load-enforced invariant (both managed and
-    # attached configs).
-    if "preset" in raw:
-        raise ConfigError(
-            f"{source}: `[[preset]]` (and its `[preset.options]` sub-table) is a "
-            f"template-only construct -- it expands at create time and must not "
-            f"appear in a workspace config; on an existing workspace use "
-            f"`credproxy workspace NAME preset add ...`")
+    # `[[preset]]` is a durable REFERENCE (config-v2): the CLI's resolver expands
+    # it at resolve time and snapshots the expansion in the lock. `load_config`
+    # (the container-half loader) IGNORES it here -- the resolver is the one seam
+    # that reads preset refs (`presets.parse_preset_refs`). It is a known key
+    # (`KNOWN_KEYS`), so it does not trip the unknown-key path below.
 
     # Reject unknown top-level keys (a typo silently no-ops otherwise). Mirror the
     # `_parse_mount` "unknown key(s)" precedent, with a cheap did-you-mean.
@@ -613,7 +607,7 @@ def load_config_from_text(text: str, source: str, *,
     # `enter` session exits). Strict bool -- `auto_stop = "false"` is a truthy
     # STRING that would silently ENABLE auto-stop, the exact trap this rejects.
     # NOT part of the spec hash (host-side only, never touches the container).
-    # lifecycle._maybe_auto_stop re-reads it fresh (mid-session edits are
+    # sessions._maybe_auto_stop re-reads it fresh (mid-session edits are
     # intentional) but with the same `is True` strictness.
     auto_stop = raw.get("auto_stop", False)
     if not isinstance(auto_stop, bool):
@@ -790,8 +784,8 @@ def inline_array_span(text: str, key: str) -> tuple[int, int] | None:
 
     The bracket scan skips string contents and `#` comments and balances nested
     `[]`, so a bracket inside a value or a multi-line array doesn't fool it. The
-    single string/comment/bracket-aware scanner shared by `mount add`
-    (`add_volume_mount`) and preset stamping (`preset_stamp._stamp_array`)."""
+    single string/comment/bracket-aware scanner used by `mount add`
+    (`add_volume_mount`)."""
     m = re.search(rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=[ \t]*", text)
     if not m:
         return None

@@ -16,11 +16,11 @@ import subprocess
 import tomllib
 from dataclasses import dataclass
 
-from . import hostmatch
-from .errors import CredproxyError
+from ..model import hostmatch
+from ..errors import CredproxyError
 from .imageenv import ImageEnv
-from .paths import IMAGE_TAG, SRC_DIGEST_LABEL, image_label_digest, overlay_dirs, proxy_src_digest
-from .workspace import Workspace, for_name, list_names
+from ..paths import IMAGE_TAG, SRC_DIGEST_LABEL, image_label_digest, overlay_dirs, proxy_src_digest
+from ..model.workspace import Workspace, for_name, list_names
 
 
 @dataclass
@@ -52,7 +52,7 @@ def run(ws_name: str | None = None, *, fetch: bool = False) -> list[Check]:
     # managed externally -- so a `doctor NAME` for one skips the proxy-image env
     # check (docker is still checked; discovery may need it). The scan-all path
     # keeps the image check (some workspace may be managed).
-    from .config import quick_attach
+    from ..model.config import quick_attach
     skip_image = bool(ws_name) and len(targets) == 1 and quick_attach(targets[0])
     checks = _env_checks(skip_image=skip_image)
     for ws in targets:
@@ -133,7 +133,7 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
         return [_fail(f"ws:{ws.name}", f"workspace '{ws.name}' has no config file",
                       f"credproxy workspace create {ws.name}")]
     out: list[Check] = []
-    from .config import load_config, quick_attach
+    from ..model.config import load_config, quick_attach
     attached = quick_attach(ws)
     try:
         cfg = load_config(ws)
@@ -162,7 +162,46 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
     out += _script_compile_checks(ws)
     out += _rule_checks(ws)
     out += _preset_requires_checks(ws, fetch=fetch, fetched_refs=fetched_refs)
+    out += _proxy_config_sync_check(ws)
     return out
+
+
+def _proxy_config_sync_check(ws: Workspace) -> list[Check]:
+    """When the proxy is running/reachable, compare the generation it reports
+    (GET /admin/config) against the lock's `applied.config_generation` -- the
+    last generation credproxy recorded pushing. A mismatch means the proxy holds
+    a config credproxy didn't push (it restarted and lost its tmpfs, or a stateless
+    push came from elsewhere): a re-push (`apply`) heals it.
+
+    Skip-with-note (ok=True) when the proxy is stopped/unreachable -- doctor stays
+    green offline; a stopped proxy is nothing to reconcile. Rides the same admin
+    URL resolution `push`/`apply` use, so it covers attached workspaces too."""
+    from . import containers
+    from .proxy_http import get_config
+    from ..model.workspace import read_token
+
+    cid = f"ws:{ws.name}:proxy:config-sync"
+    try:
+        admin_url = containers.resolve_admin_url(ws)
+        token = read_token(ws)
+    except CredproxyError:
+        # Proxy not running / unreachable / token missing -> nothing to compare.
+        return [Check(cid, True,
+                      f"[{ws.name}] proxy not reachable -- config-sync check skipped")]
+    live = get_config(admin_url, token)
+    if live is None:
+        return [Check(cid, True,
+                      f"[{ws.name}] proxy did not answer -- config-sync check skipped")]
+    applied_gen = containers._load_applied(ws).get("config_generation")
+    live_gen = live.get("generation")
+    if live_gen == applied_gen:
+        return [_ok(cid,
+                    f"[{ws.name}] proxy config generation matches ({live_gen})")]
+    return [_fail(
+        cid,
+        f"[{ws.name}] proxy config generation {live_gen} != last pushed "
+        f"{applied_gen} -- the proxy holds a config credproxy didn't push",
+        f"credproxy workspace {ws.name} apply")]
 
 
 def _runc_keep_id_check(ws: Workspace, cfg: dict) -> list[Check]:
@@ -179,9 +218,9 @@ def _runc_keep_id_check(ws: Workspace, cfg: dict) -> list[Check]:
     on rootless podman + credproxy-owned keep-id; we add the runtime==runc check.
     Both read the SAME cached runtime probe doctor's env checks already ran, so
     no extra docker round-trip."""
-    from . import lifecycle
+    from . import containers
     from .runtime import oci_runtime
-    if not lifecycle.emits_keep_id(cfg) or oci_runtime() != "runc":
+    if not containers.emits_keep_id(cfg) or oci_runtime() != "runc":
         return []
     return [_fail(
         f"ws:{ws.name}:runc-sysfs",
@@ -200,12 +239,12 @@ def _script_compile_checks(ws: Workspace) -> list[Check]:
     it doesn't import, emit a single skip-with-note pointing at `script check`
     rather than failing (doctor must degrade gracefully)."""
     from . import scriptcheck
-    from .bindings import load_bindings
-    from .injectors import find_injector
-    from .scripts import find_script
+    from ..model.injectors import find_injector
+    from ..model.resolver import resolve_workspace
+    from ..model.scripts import find_script
 
     try:
-        bindings = load_bindings(ws)
+        bindings = resolve_workspace(ws).bindings
     except (CredproxyError, tomllib.TOMLDecodeError, OSError):
         return []  # the :bindings check already reported the parse/validate failure
 
@@ -279,10 +318,13 @@ def _binding_checks(ws: Workspace, *, fetch: bool) -> tuple[list[Check], dict]:
 
     # Layer 2: the authoritative parse+validate. Reuse its result for --fetch so a
     # parse failure can't yield a different exit code with vs. without --fetch.
-    from .bindings import load_bindings, test_bindings
+    # Goes through `resolve_workspace` (config-v2), so preset-EXPANDED bindings are
+    # validated + fetched as ordinary bindings -- no special-casing.
+    from ..model.bindings import test_bindings
+    from ..model.resolver import resolve_workspace
     bs = None
     try:
-        bs = load_bindings(ws)
+        bs = resolve_workspace(ws).bindings
         out.append(_ok(f"ws:{ws.name}:bindings",
                        f"[{ws.name}] {len(bs)} binding(s) pass static checks"))
     except (CredproxyError, tomllib.TOMLDecodeError, OSError) as e:
@@ -311,8 +353,8 @@ def _probe_bindings_raw(ws: Workspace, bindings: list, out: list[Check]) -> None
     the human name, which may be absent or duplicated) plus a host index, so no
     two failures ever share an id -- a `--json` consumer keying by id can't
     silently drop one. The human `name` still rides in the message."""
-    from .injectors import find_injector
-    from .providers import find_provider
+    from ..model.injectors import find_injector
+    from ..providers import find_provider
     for i, b in enumerate(bindings):
         bid = f"ws:{ws.name}:binding[{i}]"
         if not isinstance(b, dict):
@@ -342,38 +384,41 @@ def _probe_bindings_raw(ws: Workspace, bindings: list, out: list[Check]) -> None
 
 def _preset_requires_checks(ws: Workspace, *, fetch: bool,
                             fetched_refs: dict | None = None) -> list[Check]:
-    """Re-run each stamped preset's declarative `[[requires]]` host-prereq checks
-    (#58) -- the authoritative side (`preset add`/`create` are advisory).
+    """Re-run each referenced preset's declarative `[[requires]]` host-prereq
+    checks (#58) -- the authoritative side (`preset add`/`create` are advisory).
 
-    Discovery is via the provenance markers the stamp left behind (a diagnostics
-    read; the loader never reads comments): scan the config text for pack names,
-    then for each still-resolvable pack re-run its checks. A marker naming a pack
-    that no longer resolves in the registry is a skip-with-note (`ok=True`) -- the
-    stamped config still works; the pack just isn't around to describe its
-    prerequisites.
+    Discovery is via the workspace's `[[preset]]` references + the lock (config-v2),
+    not provenance comments. For each still-resolvable pack, re-run its checks; a
+    reference naming a pack that no longer resolves in the registry is a
+    skip-with-note (`ok=True`). A pack whose lock snapshot's `definition_rev` no
+    longer matches the current definition surfaces a passing note (run
+    `preset refresh`).
 
-    The `provider` kind checks the provider CHOSEN at stamp time, recovered from
-    the pack's stamped bindings (`<pack>-<suffix>` carry ordinary provider/secret
-    fields) -- not a pack default, so no side-channel state is needed. A
-    `fetch=true` check runs only under `doctor NAME --fetch` (the `fetch` gate);
-    without it, it degrades to a resolve-only provider check -- so a nameless
-    `doctor` scan-all never invokes a provider."""
-    from . import prereqs
-    from .preset_stamp import applied_preset_names
-    from .presets import load_presets
+    The `provider` kind checks the provider CHOSEN at reference time, recovered from
+    the pack's lock snapshot (or the ref's own provider). A `fetch=true` check runs
+    only under `doctor NAME --fetch`; without it it degrades to a resolve-only
+    provider check -- so a nameless `doctor` scan-all never invokes a provider."""
+    from ..model import prereqs
+    from ..model.lock import load_lock
+    from ..model.presets import (
+        load_presets, parse_preset_refs, resolve_preset_credential,
+        resolve_requires_for_check,
+    )
 
+    source = str(ws.config_path)
     try:
-        text = ws.config_path.read_text()
-    except OSError:
+        raw = tomllib.loads(ws.config_path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
         return []
-    names = applied_preset_names(text)
-    if not names:
+    try:
+        refs = parse_preset_refs(raw, source)
+    except CredproxyError:
+        return []   # the :bindings check already reported the malformed reference
+    if not refs:
         return []
 
     # `load_presets()` raises `ConfigError` on the FIRST unparseable registry
-    # `.toml` -- a WIP preset unrelated to this workspace would otherwise abort
-    # the whole doctor sweep, violating report-all-not-raise. Report it as a
-    # failing check and stop the preset layer here (every other check still ran).
+    # `.toml` -- report it as a failing check rather than aborting the sweep.
     try:
         presets = load_presets()
     except CredproxyError as e:
@@ -381,121 +426,65 @@ def _preset_requires_checks(ws: Workspace, *, fetch: bool,
                       f"[{ws.name}] preset registry failed to load: {e}",
                       "fix or remove the malformed preset file in the registry")]
 
-    # Map each stamped binding name -> (provider, secret), so a pack's provider
-    # check can recover the credential actually chosen at stamp time. Best-effort:
-    # an invalid config (already flagged by :bindings) just yields no mapping, so
-    # provider checks report "could not determine provider".
-    from .bindings import load_bindings
-    binding_cred: dict[str, tuple[str | None, object]] = {}
-    try:
-        for b in load_bindings(ws):
-            binding_cred[b.name] = (b.provider, b.secret)
-    except (CredproxyError, tomllib.TOMLDecodeError, OSError):
-        pass
+    lock_presets = load_lock(ws).get("presets", {})
 
     out: list[Check] = []
-    for pack in names:
+    for ref in refs:
+        pack = ref.name
         spec = presets.get(pack)
         if spec is None:
             out.append(Check(
                 f"ws:{ws.name}:preset:{pack}", True,
-                f"[{ws.name}] preset '{pack}' is stamped but no longer resolves "
+                f"[{ws.name}] preset '{pack}' is referenced but no longer resolves "
                 f"in the registry -- prerequisite checks skipped",
-                "the stamped config still works; reinstall the pack to re-check "
-                "its prerequisites"))
+                "the reference still works from the lock snapshot; reinstall the "
+                "pack to re-check its prerequisites"))
             continue
+
+        entry = lock_presets.get(pack) if isinstance(lock_presets, dict) else None
+        if isinstance(entry, dict) and entry.get("definition_rev") != spec.rev:
+            out.append(_ok(
+                f"ws:{ws.name}:preset:{pack}:changed",
+                f"[{ws.name}] preset '{pack}' definition changed since the lock "
+                f"snapshot -- run `credproxy workspace {ws.name} preset refresh`"))
+
         if not spec.requires:
             continue
-        provider, secret = _pack_credential(spec, binding_cred)
-        # A pack WITH bindings but no recoverable provider means its stamped
-        # binding is gone (removed/renamed) -- the provider check will fail; its
-        # remedy must point at the orphaned marker, not the pack's own prereq
-        # hint (which is for the prerequisite, not a missing binding; finding 2a).
-        missing_binding = provider is None and bool(spec.parts)
-        # Requires with a `path = { option = "id" }` marker (#59): substitute the
-        # option's value read back from the stamped mounts (or its default). An
-        # option feeding ONLY the requires path (no stamped mount, no default) is
-        # unrecoverable -> degrade that check to a skip-with-note (never crash).
-        # A stale stamped option value (e.g. an enum choice later dropped from the
-        # pack's `choices`) makes `coerce_option_value` raise -- catch it and emit
-        # a FAILING check for just this pack so the rest of the sweep still runs
-        # (report-all, the #58 contract; S2).
-        try:
-            resolved_requires, skipped_opt = _resolve_pack_requires(spec, text)
-        except (CredproxyError, tomllib.TOMLDecodeError) as e:
+
+        provider, secret = _ref_credential(spec, ref, entry)
+        # Options feeding a requires path live in the intent file (`[preset.options]`)
+        # or default -- always recoverable, so no skip-with-note is needed for them.
+        resolved_requires, skipped = resolve_requires_for_check(spec, ref.options)
+        for j, rq in enumerate(skipped):
             out.append(Check(
-                f"ws:{ws.name}:preset:{pack}:requires-opt", False,
-                f"[{ws.name}] preset '{pack}' requires: a stamped option value can't "
-                f"be resolved ({e})",
-                "re-add the pack with a valid --opt value (`preset add "
-                f"{pack} --opt ...`), or fix the pack's `[[option]]` definition"))
-            continue
-        # An option feeds a MOUNT source (recoverable via read-back) vs. feeds
-        # ONLY the requires path (nothing stamped to read back). The message splits
-        # on this: a requires-only option is unrecoverable BY DESIGN, but an option
-        # that DOES feed a mount whose stamp is gone/re-targeted is a repairable
-        # drift, not an inherent limitation (N3).
-        mount_fed = {m.source_option for m in spec.mounts if m.source_option}
-        for j, rq in enumerate(skipped_opt):
-            if rq.path_option in mount_fed:
-                msg = (f"[{ws.name}] preset '{pack}' requires ({rq.kind}): path is "
-                       f"supplied by option '{rq.path_option}', but its stamped "
-                       f"mount is missing or re-targeted -- can't recover its "
-                       f"value, check skipped")
-                hint = (f"restore the option-fed mount, or re-add the pack "
-                        f"(`preset add {pack} --opt {rq.path_option}=...`), so the "
-                        f"value is recoverable at doctor time")
-            else:
-                msg = (f"[{ws.name}] preset '{pack}' requires ({rq.kind}): path is "
-                       f"supplied by option '{rq.path_option}', which is used only "
-                       f"here (nowhere stamped) -- can't recover its value, check "
-                       f"skipped")
-                hint = ("give the option a default, or also use it in a stamped "
-                        "mount, so its value is recoverable at doctor time")
-            out.append(Check(
-                f"ws:{ws.name}:preset:{pack}:requires-opt[{j}]", True, msg, hint))
+                f"ws:{ws.name}:preset:{pack}:requires-opt[{j}]", True,
+                f"[{ws.name}] preset '{pack}' requires ({rq.kind}): path option "
+                f"'{rq.path_option}' has no value or default -- check skipped",
+                f"supply it in the `[preset.options]` of the `[[preset]]` block "
+                f"(or give the option a default)"))
         results = prereqs.evaluate(resolved_requires, provider=provider,
                                    secret=_secret_ref(secret), do_fetch=fetch,
                                    fetched_refs=fetched_refs)
         for i, r in enumerate(results):
             cid = f"ws:{ws.name}:preset:{pack}:requires[{i}]"
             msg = f"[{ws.name}] preset '{pack}' requires ({r.kind}): {r.detail}"
-            if r.ok:
-                out.append(_ok(cid, msg))
-                continue
-            hint = r.hint
-            if r.kind == "provider" and missing_binding:
-                hint = (f"the stamped binding for pack '{pack}' is missing "
-                        f"(removed or renamed); re-add the pack or remove its "
-                        f"stale `# credproxy:preset` marker")
-            out.append(Check(cid, False, msg, hint))
+            out.append(_ok(cid, msg) if r.ok else Check(cid, False, msg, r.hint))
     return out
 
 
-def _resolve_pack_requires(spec, text: str):
-    """Resolve a pack's `[[requires]]` for the doctor re-run, substituting any
-    `path = { option = "id" }` marker with the option's value read back from the
-    workspace's stamped mounts (#59). Returns `(resolved, skipped)` -- see
-    `presets.resolve_requires_for_check`."""
-    from . import preset_refresh
-    from .presets import resolve_requires_for_check
-    option_values = {}
-    if spec.options:
-        option_values = preset_refresh._read_back_options(
-            preset_refresh._locate(text, spec.name), spec)
-    return resolve_requires_for_check(spec, option_values)
+def _ref_credential(spec, ref, entry) -> tuple[str | None, object]:
+    """The (provider, secret) a preset reference resolves to: the lock snapshot's
+    first binding (authoritative -- what was recorded at reference time), else the
+    ref's own provider/secret with pack defaults applied. (None, None) for a pack
+    with no bindings."""
+    from ..model.presets import resolve_preset_credential
+    if isinstance(entry, dict):
+        for b in entry.get("expansion", {}).get("bindings", []):
+            return b.get("provider"), b.get("secret")
+    provider, secret, _missing = resolve_preset_credential(
+        spec, ref.provider, ref.secret)
+    return provider, secret
 
-
-def _pack_credential(spec, binding_cred: dict) -> tuple[str | None, object]:
-    """Recover the (provider, secret) a pack's bindings were stamped with, by
-    matching its expected `<pack>-<suffix>` names against the loaded bindings.
-    All parts of a pack share one provider/secret, so the first match wins.
-    Returns (None, None) for a pack with no bindings or none found."""
-    for part in spec.parts:
-        cred = binding_cred.get(f"{spec.name}-{part.suffix}")
-        if cred is not None:
-            return cred
-    return None, None
 
 
 def _secret_ref(secret) -> str | None:
@@ -511,10 +500,10 @@ def _secret_ref(secret) -> str | None:
 
 def _rule_checks(ws: Workspace) -> list[Check]:
     """The credential-free `[[rule]]` layer runs its own parse+validate at `start`
-    (`materialize_rules -> rules.validate`: bad path glob, unknown script, duplicate
-    names, action-field errors). Mirror the layer-2 bindings check so a broken rule
+    (`load_rules -> rules.validate`: missing/duplicate names, bad path glob, unknown
+    script, action-field errors). Mirror the layer-2 bindings check so a broken rule
     is caught by doctor too, not one PR later at `start`."""
-    from .rules import load_rules
+    from ..model.rules import load_rules
     try:
         rs = load_rules(ws)
         return [_ok(f"ws:{ws.name}:rules", f"[{ws.name}] {len(rs)} rule(s) valid")]

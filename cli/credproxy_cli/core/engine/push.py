@@ -1,5 +1,5 @@
 """The config-push engine: the ONE resolve+POST path shared by `start`/`apply`
-(via proxy_http.push_config), the `push` verb (managed + attached workspaces),
+(via push_config), the `push` verb (managed + attached workspaces),
 and the stateless `credproxy push --admin/--config/--token` escape hatch.
 
 Responsibilities, all target-agnostic:
@@ -27,55 +27,26 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable
-from urllib.parse import urlsplit
+from typing import Callable, TYPE_CHECKING
 
 from . import docker
-from .errors import ConfigError, ProxyError
-from .paths import state_dir
+from ..model.attach import (
+    normalize_admin_url,
+    parse_discover,
+    require_loopback,
+)
+from ..errors import ConfigError, ProxyError
+from ..paths import state_dir
+from ..model.wire import build_wire
+
+if TYPE_CHECKING:
+    from ..model.workspace import Workspace
 
 Notify = Callable[[str], None]
 
 
 def _noop(_msg: str) -> None:
     pass
-
-
-# ---- loopback invariant (I8) -------------------------------------------------
-
-
-def require_loopback(url: str) -> None:
-    """Refuse any admin URL whose host is not loopback. The push wire carries
-    RESOLVED secret values over plain HTTP (no TLS on the admin API), so it is
-    only safe when the proxy is reachable on 127.0.0.0/8 (or `localhost`) --
-    i.e. the same host, via a published ephemeral port or the shared netns. This
-    is the ONE enforcement point for both `attach.admin_url` (checked at config
-    load) and `credproxy push --admin` (checked at dispatch)."""
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https"):
-        raise ConfigError(
-            f"admin URL {url!r} must be an http(s) URL")
-    host = parts.hostname
-    if host is None:
-        raise ConfigError(f"admin URL {url!r} has no host")
-    if host == "localhost":
-        return
-    try:
-        import ipaddress
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
-    if ip is None or not ip.is_loopback:
-        raise ConfigError(
-            f"admin URL {url!r} is not loopback: the push wire carries resolved "
-            f"secret values over plain HTTP, so it is only safe to a proxy on "
-            f"127.0.0.0/8 or localhost (the same host, via its published port or "
-            f"the shared netns)")
-
-
-def normalize_admin_url(url: str) -> str:
-    """Strip a trailing slash so `f'{admin_url}/admin/config'` is well-formed."""
-    return url.rstrip("/")
 
 
 # ---- attached-target discovery ----------------------------------------------
@@ -114,7 +85,7 @@ def _discover_container(spec: str, notify: Notify) -> str:
     """`discover = "k=v,k=v"` -> the single container matching every label
     (`docker ps --filter label=k=v` ANDs the filters). No match / >1 match is an
     error (ambiguity is never silently resolved)."""
-    pairs = _parse_discover(spec)
+    pairs = parse_discover(spec)
     args = ["ps", "--format", "{{.Names}}"]
     for key, val in pairs:
         args += ["--filter", f"label={key}={val}"]
@@ -130,63 +101,66 @@ def _discover_container(spec: str, notify: Notify) -> str:
     return names[0]
 
 
-def parse_discover(spec: str) -> list[tuple[str, str]]:
-    """Public: parse + validate a `discover` spec into (key, value) pairs.
-    Comma-separated `key=value`, both non-empty. Raises ConfigError."""
-    return _parse_discover(spec)
-
-
-def _parse_discover(spec: str) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    for part in spec.split(","):
-        key, sep, val = part.partition("=")
-        key, val = key.strip(), val.strip()
-        if not sep or not key or not val:
-            raise ConfigError(
-                f"attach discover {spec!r} must be comma-separated key=value "
-                f"pairs (both non-empty), got segment {part!r}")
-        pairs.append((key, val))
-    if not pairs:
-        raise ConfigError(f"attach discover {spec!r} is empty")
-    return pairs
-
-
-# ---- the wire body (the single assembly point, G3) --------------------------
-
-
-def build_wire(bindings, rules, fingerprint: str | None = None) -> dict:
-    """Assemble the FULL proxy wire body from resolved bindings + rules: this is
-    the ONE place `{bindings, rules, fingerprint}` is shaped, so a managed,
-    attached, and stateless push all POST byte-identical bodies for the same
-    inputs. `wire_config` resolves each binding's secret via its provider."""
-    from .bindings import wire_config
-    from .rules import rule_wire_entries
-
-    wire = wire_config(bindings)
-    wire["rules"] = rule_wire_entries(rules)
-    if fingerprint is not None:
-        wire["fingerprint"] = fingerprint
-    return wire
-
-
 def push_to_target(admin_url: str, token: str, bindings, rules,
                    fingerprint: str | None = None,
                    notify: Notify = _noop) -> tuple:
     """Resolve secrets + POST the wire body to `<admin_url>/admin/config`, bearer
     token. The shared engine every push path funnels through. Returns
-    `(bindings, rules)` so the caller can record applied-state. Raises ProxyError
-    on connect/401/non-200. The URL must already be loopback-validated."""
+    `(bindings, rules, generation)` so the caller can record applied-state --
+    `generation` is the monotonic counter the proxy returns for this accepted
+    push (`{"ok": true, "generation": N}`), or None if the response omitted it.
+    Raises ProxyError on connect/401/non-200. The URL must already be
+    loopback-validated."""
     wire = build_wire(bindings, rules, fingerprint)
     body = json.dumps(wire).encode()
     status, payload = _http_post_json(f"{admin_url}/admin/config", body, token)
     if status == 200:
-        return bindings, rules
+        gen = payload.get("generation") if isinstance(payload, dict) else None
+        return bindings, rules, gen
     if status == 401:
         raise ProxyError(
             f"proxy at {admin_url} rejected the token (HTTP 401)")
     raise ProxyError(
         f"config push to {admin_url} failed: HTTP {status}: "
         f"{payload.get('error', payload)}")
+
+
+def push_config(ws: "Workspace", http_port: int, notify: Notify = _noop,
+                bindings=None, rules=None, fingerprint=None):
+    """Resolve bindings + rules (placeholders bound from the lock), fetch each
+    secret from its provider, and POST the resulting wire config (bindings + rules
+    + a metadata `fingerprint`) to the managed proxy's /admin/config on
+    127.0.0.1:<http_port>.
+
+    `bindings`/`rules`/`fingerprint` may be supplied by the caller (the start
+    path computes them to decide whether a push is even needed); otherwise they
+    are resolved/computed here. Resolution reads (and, on a miss, mints) generated
+    placeholders in the lockfile -- a dirty lock is persisted here (this is a
+    mutating command).
+
+    A thin wrapper over the shared push engine (`push_to_target`), so
+    `start`/`apply` (this function) and the `push`/stateless verbs POST a
+    byte-identical wire body for the same inputs. Returns
+    `(bindings, rules, generation)` so the caller can record applied state
+    (including the `config_generation` the proxy returned)."""
+    from ..model.lock import save_lock
+    from ..model.resolver import resolve_workspace
+    from ..model.rules import combined_fingerprint
+    from ..model.workspace import read_token
+
+    if bindings is None or rules is None:
+        resolved = resolve_workspace(ws)
+        if resolved.lock_dirty:
+            save_lock(ws, resolved.lock)
+        if bindings is None:
+            bindings = resolved.bindings
+        if rules is None:
+            rules = resolved.rules
+    if fingerprint is None:
+        fingerprint = combined_fingerprint(bindings, rules)
+    return push_to_target(
+        f"http://127.0.0.1:{http_port}", read_token(ws),
+        bindings, rules, fingerprint, notify=notify)
 
 
 def rule_test(admin_url: str, token: str, method: str, url: str) -> dict:
@@ -273,11 +247,20 @@ except ImportError:  # pragma: no cover - non-POSIX
 
 @contextmanager
 def workspace_push_lock(ws):
-    """Blocking flock on `<state>/push.lock`, held around a workspace's
-    resolve+POST. A second concurrent `push` of the same workspace WAITS for the
-    holder then re-pushes (config may have changed) -- never skips."""
-    ws.ensure_state_dir()
-    yield from _flock(ws.state_dir / "push.lock")
+    """Held around a workspace's resolve+POST so a second concurrent `push` of the
+    same workspace WAITS for the holder then re-pushes (config may have changed)
+    -- never skips.
+
+    This IS the per-workspace lifecycle flock (`ws.lock()` on
+    `<state>/lifecycle.lock`), NOT a separate `push.lock` (#65 consolidated the
+    two): the same lock already serializes `start`/`apply`/`recreate`, all of
+    which resolve + push + write the lock's `applied` section, so sharing it means
+    a concurrent `start` and `push` can no longer race those lock.json writes. It
+    is REENTRANT within a process (via `ws.lock()`'s depth counter) so nesting
+    can't self-deadlock, and still flock-serializes across separate processes.
+    The stateless push keeps its own `target_push_lock` (no workspace state)."""
+    with ws.lock():
+        yield
 
 
 @contextmanager
@@ -318,8 +301,12 @@ def load_stateless_config(path: str) -> tuple[list, list]:
     """
     import tomllib
 
-    from .bindings import bindings_from_raw
-    from .rules import named_rules_from_raw, validate as validate_rules
+    from ..model.bindings import bindings_from_raw
+    from ..model.rules import (
+        _parse_rules,
+        _require_rule_names,
+        validate as validate_rules,
+    )
 
     p = Path(path)
     if not p.exists():
@@ -338,6 +325,7 @@ def load_stateless_config(path: str) -> tuple[list, list]:
             f"(not a container spec); remove: {', '.join(extra)}")
 
     bindings = bindings_from_raw(raw, path, fill_placeholders=True)
-    rules = named_rules_from_raw(raw, path)
+    rules = _parse_rules(raw, path)
+    _require_rule_names(rules, path)
     validate_rules(rules, path)
     return bindings, rules

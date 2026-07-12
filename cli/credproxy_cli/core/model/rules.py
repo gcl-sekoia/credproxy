@@ -5,10 +5,11 @@ request/response on an intercepted host -- block, stub, rewrite headers, or run 
 sandboxed Starlark script -- and holds NO secret, provider, or placeholder. It
 lives as a `[[rule]]` table in the workspace TOML.
 
-This module mirrors core/bindings.py: parse + validate the `[[rule]]` array,
-materialize a missing `name` back into the file (surgical text edit, reusing the
-array-depth-aware block machinery in bindings.py), append/remove a rule block,
-and map rules onto the proxy wire shape (`{"rules": [...]}`). Validation mirrors
+This module mirrors core/bindings.py: parse + validate the `[[rule]]` array
+(`name` REQUIRED, hand-authored -- a missing one raises with a prescriptive fix),
+append a rule block / delete a whole named block (surgical text edit, reusing the
+array-depth-aware block machinery in bindings.py), and map rules onto the proxy
+wire shape (`{"rules": [...]}`). Validation mirrors
 proxy/config.py so a bad rule fails at `rule add`, not only at push. The matcher
 (`match_rules`) is the CLI half of the wire-parity contract with proxy/rules.py
 (host globs via hostmatch, path globs via pathmatch), and powers `rule test`.
@@ -24,11 +25,10 @@ from . import hostmatch, pathmatch
 from .bindings import (
     _atomic_write_text,
     _block_spans,
-    _insert_line_in_block,
     _toml_key,
     _toml_str,
 )
-from .errors import ConfigError, CredproxyError
+from ..errors import ConfigError, CredproxyError
 from .workspace import Workspace
 
 import tomllib
@@ -289,7 +289,10 @@ def _sanitize(token: str) -> str:
 
 
 def _auto_name(rule: Rule, taken: set[str]) -> str:
-    """`<action>-<first-host>`, with a numeric suffix on collision."""
+    """`<action>-<first-host>`, with a numeric suffix on collision. Still used by
+    `rule add` (name generation at add time) and to SUGGEST a name in the
+    missing-`name` error -- rule names are hand-authored in the intent TOML now,
+    never written back by a load."""
     base = f"{rule.action}-{_sanitize(rule.hosts[0])}"
     if base not in taken:
         return base
@@ -297,6 +300,20 @@ def _auto_name(rule: Rule, taken: set[str]) -> str:
     while f"{base}-{i}" in taken:
         i += 1
     return f"{base}-{i}"
+
+
+def _require_rule_names(rules: list[Rule], source: str) -> None:
+    """Enforce the hand-authored-`name` contract for rules (mirrors bindings): a
+    `[[rule]]` with no `name` is an error, with a prescriptive fix suggesting a
+    name via the same `<action>-<host>` convention `rule add` uses."""
+    taken = {r.name for r in rules if r.name}
+    for i, r in enumerate(rules):
+        if r.name is None:
+            suggestion = _auto_name(r, taken)
+            raise ConfigError(
+                f"{source}: rule[{i}] is missing a required `name` -- add a line "
+                f"like `name = {_toml_str(suggestion)}` to its [[rule]] block "
+                f"(rule names are hand-authored now)")
 
 
 def _with_auto_names(rules: list[Rule]) -> list[Rule]:
@@ -352,58 +369,18 @@ def validate(rules: list[Rule], source: str) -> None:
                 raise ConfigError(f"{source}: rule '{r.name}': {e}")
 
 
-def named_rules_from_raw(raw: dict, source: str) -> list[Rule]:
-    """Parse the `[[rule]]` array and fill auto-names, WITHOUT cross-rule
-    validation -- the one public parse-and-name entry point (don't reach into
-    `_parse_rules`/`_with_auto_names`). Used by inspect/apply, which compute drift
-    and must tolerate a config that `validate` would reject (e.g. a duplicate
-    name); the push path (`load_rules`) is where validation fails."""
-    return _with_auto_names(_parse_rules(raw, source))
-
-
 def load_rules(ws: Workspace) -> list[Rule]:
-    """Parse + validate the workspace's `[[rule]]` array (auto-names filled
-    in-memory). Raises ConfigError on failure."""
+    """Parse + validate the workspace's `[[rule]]` array. Names are REQUIRED
+    (hand-authored); a missing one raises with a prescriptive fix. Raises
+    ConfigError on failure."""
     source = str(ws.config_path)
-    rules = named_rules_from_raw(tomllib.loads(ws.config_path.read_text()), source)
+    rules = _parse_rules(tomllib.loads(ws.config_path.read_text()), source)
+    _require_rule_names(rules, source)
     validate(rules, source)
     return rules
 
 
-# ---- materialization + imperative edits -------------------------------------
-
-
-def materialize_rules(ws: Workspace, notify: Notify = _noop) -> list[Rule]:
-    """Ensure every rule has a static `name` on disk (rules have no placeholder),
-    writing a generated name back into that rule's block via a surgical edit.
-    Idempotent; returns the parsed + validated rules with names filled."""
-    text = ws.config_path.read_text()
-    raw = tomllib.loads(text)
-    source = str(ws.config_path)
-    rules = _parse_rules(raw, source)
-
-    taken = {r.name for r in rules if r.name}
-    resolved: list[Rule] = []
-    for r in rules:
-        name = r.name
-        if name is None:
-            name = _auto_name(r, taken)
-            taken.add(name)
-        resolved.append(replace(r, name=name))
-
-    changed = False
-    for idx, (orig, res) in enumerate(zip(rules, resolved)):
-        if orig.name is None:
-            text = _insert_line_in_block(text, idx, f'name = {_toml_str(res.name)}',
-                                         header_re=_RULE_HEADER_RE,
-                                         child_re=_RULE_CHILD_RE)
-            notify(f"materialized name '{res.name}' for rule [{idx}]")
-            changed = True
-
-    if changed:
-        _atomic_write_text(ws.config_path, text)
-    validate(resolved, source)
-    return resolved
+# ---- imperative edits -------------------------------------------------------
 
 
 def _toml_value(v) -> str:
@@ -494,19 +471,26 @@ def remove_rule(ws: Workspace, name: str) -> None:
     """Remove the named rule's `[[rule]]` block via a surgical text edit."""
     text = ws.config_path.read_text()
     raw = tomllib.loads(text)
-    rules = _with_auto_names(_parse_rules(raw, str(ws.config_path)))
-    target = next((i for i, r in enumerate(rules) if r.name == name), None)
-    if target is None:
+    rules = _parse_rules(raw, str(ws.config_path))
+    matches = [i for i, r in enumerate(rules) if r.name == name]
+    if not matches:
         raise ConfigError(f"rule '{name}' not found in {ws.config_path}")
+    if len(matches) > 1:
+        raise ConfigError(
+            f"rule '{name}' is defined more than once in {ws.config_path}; "
+            f"resolve the duplicate names before removing it")
+    target = matches[0]
     lines = text.splitlines(keepends=True)
     spans = _block_spans(text, _RULE_HEADER_RE, _RULE_CHILD_RE)
+    # The inline-array form (`rule = [ { ... } ]`) parses to entries but yields
+    # ZERO block spans, so the span<->entry indexing below would be off (or raise
+    # IndexError). Refuse with a prescriptive fix rather than crash / mis-edit.
+    if len(spans) != len(rules):
+        raise ConfigError(
+            f"'{name}' isn't a removable `[[rule]]` block in {ws.config_path} "
+            f"-- rewrite it as a `[[rule]]` table to remove it")
     start, end = spans[target]
-    # Fold away a preset provenance marker directly above the block (a stamped
-    # rule), then one preceding blank separator -- symmetric with
-    # `remove_binding`, so removing a stamped rule leaves no orphan marker.
-    from . import preset_stamp
-    if start > 0 and preset_stamp.is_marker_line(lines[start - 1]):
-        start -= 1
+    # Drop one preceding blank separator -- symmetric with `remove_binding`.
     if start > 0 and lines[start - 1].strip() == "":
         start -= 1
     del lines[start:end]

@@ -8,12 +8,12 @@ implemented here, so cloning a fork's overlay can't run its code at check time.
 The single sanctioned host-executable seam stays the provider protocol, reached
 only through the existing `bindings.test_binding` path for the `provider` kind.
 
-Checks are advisory at stamp time (`preset add`/`create` report failures but
-still stamp -- the config is durable, host state is fixable afterward) and
-authoritative at `doctor` time. `doctor` re-runs them, discovering which packs a
-workspace uses via the provenance markers (`preset_stamp.applied_preset_names`).
+Checks are advisory at reference time (`preset add`/`create` report failures but
+still land the reference -- the config is durable, host state is fixable
+afterward) and authoritative at `doctor` time. `doctor` re-runs them, discovering
+which packs a workspace uses from its `[[preset]]` references + the lock snapshot.
 
-The `provider` kind checks the provider actually CHOSEN at stamp time (not a
+The `provider` kind checks the provider actually CHOSEN at reference time (not a
 pack default), resolved by the caller from the stamped bindings; `fetch = true`
 additionally test-fetches the secret. That fetch is gated by `do_fetch` -- run
 at stamp time (interactive, like `binding test`) and under `doctor NAME
@@ -25,7 +25,7 @@ import os
 import shutil
 from dataclasses import dataclass
 
-from .errors import CredproxyError
+from ..errors import CredproxyError
 from .presets import _Require
 
 
@@ -121,7 +121,7 @@ def _check_provider(rq: _Require, provider: str | None, secret: str | None,
     marker-appropriate remedy (finding 2a), so the pack's own `hint` (which is for
     the prerequisite, not a missing binding) is deliberately NOT carried here."""
     from .bindings import Binding, test_binding
-    from .providers import find_provider
+    from ..providers import find_provider
 
     if not provider:
         return RequireResult(

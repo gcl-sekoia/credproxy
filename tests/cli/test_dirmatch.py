@@ -20,7 +20,7 @@ def _mkws(workspaces_dir, name: str, directory: str | None) -> None:
 
 
 def test_exact_match(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.dirmatch import resolve_cwd
+    from credproxy_cli.core.model.dirmatch import resolve_cwd
 
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -31,7 +31,7 @@ def test_exact_match(xdg, workspaces_dir, tmp_path):
 
 def test_walk_up_from_subdir(xdg, workspaces_dir, tmp_path):
     """cwd below the declared directory still resolves (walk-up)."""
-    from credproxy_cli.core.dirmatch import resolve_cwd
+    from credproxy_cli.core.model.dirmatch import resolve_cwd
 
     proj = tmp_path / "proj"
     sub = proj / "a" / "b"
@@ -42,7 +42,7 @@ def test_walk_up_from_subdir(xdg, workspaces_dir, tmp_path):
 
 
 def test_no_match_returns_none(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.dirmatch import resolve_cwd
+    from credproxy_cli.core.model.dirmatch import resolve_cwd
 
     (tmp_path / "proj").mkdir()
     (tmp_path / "elsewhere").mkdir()
@@ -51,7 +51,7 @@ def test_no_match_returns_none(xdg, workspaces_dir, tmp_path):
 
 
 def test_workspace_without_directory_ignored(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.dirmatch import resolve_cwd
+    from credproxy_cli.core.model.dirmatch import resolve_cwd
 
     _mkws(workspaces_dir, "plain", None)  # no directory field
     assert resolve_cwd(tmp_path) is None
@@ -61,7 +61,7 @@ def test_workspace_without_directory_ignored(xdg, workspaces_dir, tmp_path):
 
 
 def test_nested_longest_prefix_wins(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.dirmatch import resolve_cwd
+    from credproxy_cli.core.model.dirmatch import resolve_cwd
 
     outer = tmp_path / "src"
     inner = outer / "foo"
@@ -81,7 +81,7 @@ def test_nested_longest_prefix_wins(xdg, workspaces_dir, tmp_path):
 
 
 def test_same_directory_two_workspaces_is_ambiguous(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.dirmatch import resolve_cwd
+    from credproxy_cli.core.model.dirmatch import resolve_cwd
     from credproxy_cli.core.errors import WorkspaceError
 
     proj = tmp_path / "proj"
@@ -96,7 +96,7 @@ def test_same_directory_two_workspaces_is_ambiguous(xdg, workspaces_dir, tmp_pat
 
 
 def test_root_directory_ignored(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.dirmatch import resolve_cwd
+    from credproxy_cli.core.model.dirmatch import resolve_cwd
 
     _mkws(workspaces_dir, "toobroad", "/")
     assert resolve_cwd(tmp_path) is None
@@ -104,7 +104,7 @@ def test_root_directory_ignored(xdg, workspaces_dir, tmp_path):
 
 def test_home_directory_ignored(xdg, workspaces_dir, tmp_path, monkeypatch):
     from pathlib import Path
-    from credproxy_cli.core.dirmatch import resolve_cwd
+    from credproxy_cli.core.model.dirmatch import resolve_cwd
 
     fake_home = tmp_path / "home"
     (fake_home / "proj").mkdir(parents=True)
@@ -119,7 +119,7 @@ def test_home_directory_ignored(xdg, workspaces_dir, tmp_path, monkeypatch):
 
 
 def test_invalid_peer_config_does_not_break_resolution(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.dirmatch import resolve_cwd
+    from credproxy_cli.core.model.dirmatch import resolve_cwd
 
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -130,7 +130,7 @@ def test_invalid_peer_config_does_not_break_resolution(xdg, workspaces_dir, tmp_
 
 
 def test_nonexistent_directory_does_not_crash(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.dirmatch import resolve_cwd
+    from credproxy_cli.core.model.dirmatch import resolve_cwd
 
     _mkws(workspaces_dir, "ghost", "/no/such/path/anywhere")
     # resolving from an unrelated cwd just returns None, no exception.
@@ -141,7 +141,7 @@ def test_nonexistent_directory_does_not_crash(xdg, workspaces_dir, tmp_path):
 
 
 def test_find_claimer_returns_owner(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.dirmatch import find_claimer
+    from credproxy_cli.core.model.dirmatch import find_claimer
 
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -151,7 +151,7 @@ def test_find_claimer_returns_owner(xdg, workspaces_dir, tmp_path):
 
 
 def test_find_claimer_excludes_self(xdg, workspaces_dir, tmp_path):
-    from credproxy_cli.core.dirmatch import find_claimer
+    from credproxy_cli.core.model.dirmatch import find_claimer
 
     proj = tmp_path / "proj"
     proj.mkdir()

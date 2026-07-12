@@ -19,6 +19,13 @@ Discovery (first match wins, user shadows overlays shadow builtin):
   3. builtin   cli/credproxy_cli/builtin/providers/<name>
 Each location is either an executable file, or a directory holding an
 executable `run`.
+
+Placement note: this module lives at `core/` root (NOT under `model/`) even
+though it is config-plane-ish: it shells host executables (`subprocess`) and is
+imported by BOTH planes (model/bindings, model/prereqs on one side; engine/doctor
+and porcelain on the other), while importing only the shared leaves `errors` +
+`paths`. It is a genuinely shared leaf, so keeping it at root keeps `subprocess`
+out of `model/` cleanly (the model-plane architecture test forbids it there).
 """
 from __future__ import annotations
 

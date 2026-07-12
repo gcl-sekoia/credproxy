@@ -7,7 +7,7 @@ contract), but a health-gated Compose sidecar is common enough to scaffold.
 Every port and mount-target path comes from the proxy image's ENV contract
 (`ImageEnv`, read via `docker inspect`) -- the same single source of truth the
 managed lifecycle uses -- so a bumped image can't leave a stale literal here. The
-service mirrors what `lifecycle.create_proxy` passes: NET_ADMIN, a mode-1777
+service mirrors what `containers.create_proxy` passes: NET_ADMIN, a mode-1777
 tmpfs for the pushed config, the read-only token bind, and an ephemeral loopback
 admin port. The healthcheck probes `/ready` (creds-ready), NOT `/health`
 (capture-ready), so a Compose `service_healthy` gate opens only once credentials
@@ -46,7 +46,7 @@ def emit_compose(meta: ImageEnv, image_tag: str, token_source: str,
     note = f"      {token_note}\n" if token_note else ""
     # The service-level `tmpfs` short form maps `path:options` straight to moby's
     # HostConfig.Tmpfs, parsed identically to `docker run --tmpfs` -- so this is
-    # byte-for-byte the option string the managed path passes (lifecycle), which
+    # byte-for-byte the option string the managed path passes (containers), which
     # sidesteps the long-form `tmpfs.mode` octal-vs-decimal ambiguity.
     tmpfs_opt = f"{meta.tmpfs}:size=64k,mode=1777"
     return f"""\

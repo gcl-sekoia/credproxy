@@ -15,7 +15,7 @@ def _write_injector(name: str, body: str):
 
 
 def test_builtin_oauth2_reseal_injector(xdg):
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     inj = find_injector("oauth2-reseal")
     assert inj.scheme == "oauth2-reseal"
@@ -27,8 +27,8 @@ def test_builtin_oauth2_reseal_injector(xdg):
 
 
 def test_builtin_oauth_reseal_scripted_injector(xdg):
-    from credproxy_cli.core.injectors import find_injector
-    from credproxy_cli.core.scripts import find_script
+    from credproxy_cli.core.model.injectors import find_injector
+    from credproxy_cli.core.model.scripts import find_script
 
     inj = find_injector("oauth-reseal")
     assert inj.scheme == "script" and inj.script == "oauth-reseal"
@@ -38,7 +38,7 @@ def test_builtin_oauth_reseal_scripted_injector(xdg):
 
 
 def test_reseal_wire_includes_api_hosts_list(xdg, workspaces_dir):
-    from credproxy_cli.core.bindings import Binding, wire_config
+    from credproxy_cli.core.model.bindings import Binding, wire_config
 
     b = Binding(name="oauth", injector="oauth2-reseal", provider="env", secret="CS",
                 hosts=("login.example.com",), placeholder="credproxy_xxxxxxxxxxxx",
@@ -58,7 +58,7 @@ def test_list_param_rejects_non_strings(xdg):
         api_hosts = [1, 2]
     """)
     from credproxy_cli.core.errors import InjectorError
-    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.model.injectors import find_injector
 
     with pytest.raises(InjectorError, match="string or array of strings"):
         find_injector("badlist")

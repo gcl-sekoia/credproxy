@@ -28,7 +28,7 @@ def _write_preset(name: str, toml: str):
 
 def _make_ws(name: str, content: str = 'image = "python:3.12-slim"\n'):
     from credproxy_cli.core.paths import workspaces_config_dir
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.workspace import Workspace
     wd = workspaces_config_dir()
     wd.mkdir(parents=True, exist_ok=True)
     (wd / f"{name}.toml").write_text(textwrap.dedent(content))
@@ -60,7 +60,7 @@ _BINDING_PRESET = """
 
 
 def test_parse_all_kinds(xdg):
-    from credproxy_cli.core.presets import get_preset
+    from credproxy_cli.core.model.presets import get_preset
     _write_preset("allkinds", """
         [[part]]
         suffix = "api"
@@ -101,7 +101,7 @@ def test_parse_all_kinds(xdg):
 
 def test_parse_rejects_unknown_kind(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("badkind", """
         [[rule]]
         suffix = "r"
@@ -120,7 +120,7 @@ def test_parse_rejects_unknown_kind(xdg):
                                         ("env", "var")])
 def test_parse_missing_payload_field(xdg, kind, field):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("nofield", f"""
         [[rule]]
         suffix = "r"
@@ -136,7 +136,7 @@ def test_parse_missing_payload_field(xdg, kind, field):
 
 def test_parse_fetch_on_nonprovider_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("badfetch", """
         [[rule]]
         suffix = "r"
@@ -156,7 +156,7 @@ def test_parse_provider_check_on_pure_container_rejected(xdg):
     """A provider check needs [[part]] bindings -- there's nothing to fetch on a
     pure-rule / pure-container pack, so it's a definition error."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("purerule", """
         [[rule]]
         suffix = "r"
@@ -172,7 +172,7 @@ def test_parse_provider_check_on_pure_container_rejected(xdg):
 
 def test_parse_unknown_key_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("extrakey", """
         [[rule]]
         suffix = "r"
@@ -191,7 +191,7 @@ def test_parse_unknown_key_rejected(xdg):
 def test_parse_requires_only_pack_rejected(xdg):
     """A pack that is ONLY [[requires]] has nothing to stamp -- rejected as empty."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("reqonly", """
         [[requires]]
         kind = "command"
@@ -205,12 +205,12 @@ def test_parse_requires_only_pack_rejected(xdg):
 
 
 def _req(kind, **kw):
-    from credproxy_cli.core.presets import _Require
+    from credproxy_cli.core.model.presets import _Require
     return _Require(kind=kind, **kw)
 
 
 def test_check_path(xdg, tmp_path):
-    from credproxy_cli.core import prereqs
+    from credproxy_cli.core.model import prereqs
     present = tmp_path / "exists"
     present.mkdir()
     [ok] = prereqs.evaluate([_req("path", path=str(present))],
@@ -222,7 +222,7 @@ def test_check_path(xdg, tmp_path):
 
 
 def test_check_command(xdg, tmp_path, monkeypatch):
-    from credproxy_cli.core import prereqs
+    from credproxy_cli.core.model import prereqs
     # A fake binary on a manipulated PATH is found; a bogus name is not.
     fake = tmp_path / "myfakecmd"
     fake.write_text("#!/bin/sh\n")
@@ -237,7 +237,7 @@ def test_check_command(xdg, tmp_path, monkeypatch):
 
 
 def test_check_env(xdg, monkeypatch):
-    from credproxy_cli.core import prereqs
+    from credproxy_cli.core.model import prereqs
     monkeypatch.setenv("PREREQ_SET", "v")
     monkeypatch.delenv("PREREQ_UNSET", raising=False)
     [ok] = prereqs.evaluate([_req("env", var="PREREQ_SET")],
@@ -248,7 +248,7 @@ def test_check_env(xdg, monkeypatch):
 
 
 def test_check_provider_resolve_and_fetch(xdg, monkeypatch):
-    from credproxy_cli.core import prereqs
+    from credproxy_cli.core.model import prereqs
     monkeypatch.setenv("PREREQ_TOK", "secretvalue")
     # resolve-only (fetch=False): provider resolves.
     [r] = prereqs.evaluate([_req("provider", fetch=False)],
@@ -268,7 +268,7 @@ def test_check_provider_resolve_and_fetch(xdg, monkeypatch):
 def test_check_provider_fetch_gated_by_do_fetch(xdg, monkeypatch):
     """A fetch=true check with do_fetch=False degrades to resolve-only -- no
     provider fetch, so an unfetchable secret still passes."""
-    from credproxy_cli.core import prereqs
+    from credproxy_cli.core.model import prereqs
     monkeypatch.delenv("PREREQ_MISSING", raising=False)
     [r] = prereqs.evaluate([_req("provider", fetch=True)],
                            provider="env", secret="PREREQ_MISSING", do_fetch=False)
@@ -276,7 +276,7 @@ def test_check_provider_fetch_gated_by_do_fetch(xdg, monkeypatch):
 
 
 def test_check_provider_unknown_fails(xdg):
-    from credproxy_cli.core import prereqs
+    from credproxy_cli.core.model import prereqs
     [r] = prereqs.evaluate([_req("provider", fetch=False)],
                            provider="nonexistent-zzz", secret="X", do_fetch=True)
     assert not r.ok
@@ -293,9 +293,9 @@ def test_preset_add_reports_failed_requires_but_exits_0(xdg, tmp_path):
     blob = out + err
     assert code == 0, blob                       # advisory: still exit 0
     assert "unmet prerequisite" in blob and "create the socket dir" in blob
-    # The stamp DID land (durable config).
-    from credproxy_cli.core.bindings import load_bindings
-    assert {b.name for b in load_bindings(ws)} == {"gitsign-api"}
+    # The reference DID land (durable config), expanding to the binding.
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    assert {b.name for b in resolve_workspace(ws).bindings} == {"gitsign-api"}
 
 
 def test_preset_add_json_requires_array(xdg, tmp_path):
@@ -354,10 +354,10 @@ def _add_gitsign(ws_name: str, tmp_path):
 
 def test_doctor_reports_stamped_requires(xdg, tmp_path):
     """acceptance #1: doctor shows the failing path check (with its hint) until
-    the dir exists; discovered via the provenance marker."""
+    the dir exists; discovered via the `[[preset]]` reference + lock snapshot."""
     _write_preset("gitsign", _BINDING_PRESET.format(path=str(tmp_path / "absent")))
     _add_gitsign("w", tmp_path)
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     checks = {c.id: c for c in doctor.run("w")}
     cid = "ws:w:preset:gitsign:requires[0]"
     assert cid in checks
@@ -373,7 +373,7 @@ def test_doctor_reports_stamped_requires(xdg, tmp_path):
 def test_doctor_check_id_and_message(xdg, tmp_path):
     _write_preset("gitsign", _BINDING_PRESET.format(path=str(tmp_path / "absent")))
     _add_gitsign("w", tmp_path)
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     c = {c.id: c for c in doctor.run("w")}["ws:w:preset:gitsign:requires[0]"]
     assert "[w] preset 'gitsign' requires (path)" in c.message
 
@@ -384,7 +384,7 @@ def test_doctor_unresolvable_pack_skip_note(xdg, tmp_path):
                               _BINDING_PRESET.format(path=str(tmp_path / "x")))
     ws = _add_gitsign("w", tmp_path)
     path_file.unlink()  # pack gone from the registry, but its marker stays
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     checks = {c.id: c for c in doctor.run("w")}
     note = checks["ws:w:preset:gitsign"]
     assert note.ok and "no longer resolves" in note.message
@@ -418,7 +418,7 @@ def test_doctor_fetch_gating(xdg, monkeypatch, tmp_path):
                            "--provider", "env", "--secret", "UNSET_TOK"])
     assert code == 0, out + err
 
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     cid = "ws:w:preset:gh:requires[0]"
     # No --fetch: resolve-only, so the unfetchable secret still passes.
     plain = {c.id: c for c in doctor.run("w")}[cid]
@@ -434,7 +434,7 @@ def test_doctor_fetch_gating(xdg, monkeypatch, tmp_path):
 def test_doctor_no_requires_no_checks(xdg):
     """A workspace with no stamped presets emits no preset-requires checks."""
     _make_ws("plain")
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     ids = {c.id for c in doctor.run("plain")}
     assert not any(":preset:" in cid for cid in ids)
 
@@ -446,7 +446,7 @@ def test_requires_command_is_looked_up_not_run(xdg, tmp_path):
     """Negative RCE proof (finding 8): a `command` requires is looked up on PATH,
     NEVER executed. A shell-injection-shaped command yields command-not-found and
     creates no side effect."""
-    from credproxy_cli.core import prereqs
+    from credproxy_cli.core.model import prereqs
     sentinel = tmp_path / "credproxy_pwned"
     payload = f"sh -c 'touch {sentinel}'"
     [r] = prereqs.evaluate([_req("command", command=payload)],
@@ -460,7 +460,7 @@ def test_parse_rejects_relative_path(xdg):
     (nondeterministic across doctor runs) -- rejected at definition time. An
     absolute or `~`/`$VAR`-rooted path is accepted."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.presets import load_presets
+    from credproxy_cli.core.model.presets import load_presets
     _write_preset("relpath", """
         [[rule]]
         suffix = "r"
@@ -478,7 +478,7 @@ def test_parse_rejects_relative_path(xdg):
 def test_parse_accepts_rooted_paths(xdg):
     """`~`/`$VAR`-rooted and absolute paths are accepted (finding 7) -- even a
     `$VAR`-rooted one whose var is currently unset (it resolves at check time)."""
-    from credproxy_cli.core.presets import get_preset
+    from credproxy_cli.core.model.presets import get_preset
     _write_preset("rooted", """
         [[rule]]
         suffix = "r"
@@ -509,66 +509,12 @@ def test_doctor_malformed_registry_preset_reports_not_aborts(xdg, tmp_path):
     _add_gitsign("w", tmp_path)
     # A WIP/broken preset unrelated to the workspace.
     _write_preset("broken", "this is = not = valid = toml [[[\n")
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     checks = {c.id: c for c in doctor.run("w")}
     assert "ws:w:presets:load" in checks and not checks["ws:w:presets:load"].ok
     # The rest of the sweep still ran (report-all, not raise).
     assert checks["ws:w:config"].ok
     assert "ws:w:bindings" in checks
-
-
-def test_binding_remove_cleans_preset_marker(xdg, tmp_path):
-    """Finding 2b: removing a preset-stamped binding also removes its provenance
-    marker, so no orphan marker lingers and doctor emits no stale preset checks."""
-    _write_preset("gitsign", _BINDING_PRESET.format(path=str(tmp_path / "x")))
-    ws = _add_gitsign("w", tmp_path)
-    from credproxy_cli.core.preset_stamp import applied_preset_names
-    assert applied_preset_names(ws.config_path.read_text()) == ["gitsign"]
-
-    code, out, err = _run(["workspace", "w", "binding", "remove", "gitsign-api"])
-    assert code == 0, out + err
-    text = ws.config_path.read_text()
-    assert "credproxy:preset" not in text
-    assert applied_preset_names(text) == []
-
-    from credproxy_cli.core import doctor
-    ids = {c.id for c in doctor.run("w")}
-    assert not any(":preset:" in cid for cid in ids)
-
-
-def test_doctor_orphan_marker_reports_marker_remedy_not_pack_hint(xdg, tmp_path):
-    """Finding 2a: when a pack's stamped binding was renamed/removed but its marker
-    lingers, the provider requires check's remedy points at the orphaned marker --
-    NOT the pack's own prerequisite hint."""
-    _write_preset("gh", """
-        [placeholder]
-        prefix = "ghp_"
-        length = 40
-        charset = "alnumeric"
-
-        [[part]]
-        suffix = "api"
-        injector = "bearer"
-        hosts = ["api.github.com"]
-
-        [[requires]]
-        kind = "provider"
-        hint = "gh auth login"
-    """)
-    ws = _make_ws("w")
-    assert _run(["workspace", "w", "preset", "add", "gh",
-                 "--provider", "env", "--secret", "TOK"])[0] == 0
-    # Orphan the marker: rename the stamped binding so `gh-api` no longer exists.
-    text = ws.config_path.read_text()
-    renamed = text.replace('"gh-api"', '"gh-renamed"')
-    assert renamed != text                         # the rename actually happened
-    ws.config_path.write_text(renamed)
-
-    from credproxy_cli.core import doctor
-    c = {c.id: c for c in doctor.run("w")}["ws:w:preset:gh:requires[0]"]
-    assert not c.ok
-    assert "stamped binding" in (c.hint or "") and "missing" in (c.hint or "")
-    assert "gh auth login" not in (c.hint or "")
 
 
 def test_doctor_provider_check_uses_stamped_provider_not_default(xdg):
@@ -593,7 +539,7 @@ def test_doctor_provider_check_uses_stamped_provider_not_default(xdg):
     ws = _make_ws("w")
     assert _run(["workspace", "w", "preset", "add", "gh",
                  "--provider", "env", "--secret", "TOK"])[0] == 0
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     c = {c.id: c for c in doctor.run("w")}["ws:w:preset:gh:requires[0]"]
     assert c.ok                                    # 'env' resolves; default would not
     assert "'env'" in c.message and "bogus-default-zzz" not in c.message
@@ -646,29 +592,10 @@ def test_doctor_fetch_dedupes_provider_invocation(xdg, tmp_path):
                  "--provider", "countprov", "--secret", "TOK"])[0] == 0
     counter.write_text("")                         # reset the add-time invocations
 
-    from credproxy_cli.core import doctor
+    from credproxy_cli.core.engine import doctor
     checks = {c.id: c for c in doctor.run("w", fetch=True)}
     req = checks["ws:w:preset:gh:requires[0]"]
     assert req.ok and "covered by this workspace's binding check" in req.message
     # Exactly ONE provider exec for the whole --fetch run (binding fetch), not two.
     assert counter.read_text().count("x") == 1
 
-
-def test_applied_preset_names_ignores_marker_in_multiline_string(xdg):
-    """Finding 3: a marker-SHAPED line inside a multiline string value is not a
-    real stamp (no full 12-hex rev/sha) and must not be discovered as a pack. A
-    genuine full-shape marker is still found."""
-    from credproxy_cli.core.preset_stamp import applied_preset_names
-    phantom = textwrap.dedent('''\
-        image = "x"
-        [[setup]]
-        run = """
-        # credproxy:preset name=github rev=deploy sha=main
-        echo hi
-        """
-        order = 1
-    ''')
-    assert applied_preset_names(phantom) == []
-    real = ("# credproxy:preset name=github rev=abcdef012345 sha=012345abcdef\n"
-            "[[binding]]\n")
-    assert applied_preset_names(real) == ["github"]

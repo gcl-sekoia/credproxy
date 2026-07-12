@@ -101,17 +101,17 @@ def test_loose_resolves_default_announced(xdg, workspaces_dir, monkeypatch):
     """Loose mode resolves the default workspace and announces it on stderr."""
     # Create workspace and set as default
     (workspaces_dir / "myws.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("myws"))
 
     # Stub docker so `start` doesn't actually run containers
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.start_workspace",
+        "credproxy_cli.core.engine.startup.start_workspace",
         lambda ws, notify=None: notify("stub") if notify else None,
     )
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cli.lifecycle.start_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.startup.start_workspace",
         lambda ws, notify=None: None,
     )
 
@@ -146,8 +146,8 @@ def test_loose_resolves_by_cwd_announced(xdg, workspaces_dir, tmp_path, monkeypa
 
 def test_loose_cwd_beats_default(xdg, workspaces_dir, tmp_path, monkeypatch):
     """cwd resolution takes precedence over the default pointer."""
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
 
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -163,8 +163,8 @@ def test_loose_cwd_beats_default(xdg, workspaces_dir, tmp_path, monkeypatch):
 
 def test_loose_falls_back_to_default_outside_any_dir(xdg, workspaces_dir, tmp_path, monkeypatch):
     """With no cwd match, resolution falls back to the default pointer."""
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
 
     (workspaces_dir / "deflt.toml").write_text('image = "x"\n')
     set_default(Workspace("deflt"))
@@ -190,8 +190,8 @@ def test_strict_ignores_cwd(xdg, workspaces_dir, tmp_path, monkeypatch):
 
 def test_create_here_associates_cwd(xdg, workspaces_dir, tmp_path, monkeypatch):
     import os
-    from credproxy_cli.core.config import quick_directory
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import quick_directory
+    from credproxy_cli.core.model.workspace import Workspace
 
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -204,8 +204,8 @@ def test_create_here_associates_cwd(xdg, workspaces_dir, tmp_path, monkeypatch):
 
 def test_create_dir_associates_path(xdg, workspaces_dir, tmp_path):
     import os
-    from credproxy_cli.core.config import quick_directory
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import quick_directory
+    from credproxy_cli.core.model.workspace import Workspace
 
     target = tmp_path / "code"
     target.mkdir()
@@ -286,8 +286,8 @@ def test_create_loose_nameless_no_dir_errors(xdg, workspaces_dir):
 
 def test_bind_dir_defaults_to_cwd(xdg, workspaces_dir, tmp_path, monkeypatch):
     import os
-    from credproxy_cli.core.config import quick_directory
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import quick_directory
+    from credproxy_cli.core.model.workspace import Workspace
 
     (workspaces_dir / "w.toml").write_text('image = "x"\n')
     proj = tmp_path / "proj"
@@ -301,8 +301,8 @@ def test_bind_dir_defaults_to_cwd(xdg, workspaces_dir, tmp_path, monkeypatch):
 
 def test_bind_dir_explicit_path_replaces(xdg, workspaces_dir, tmp_path):
     import os
-    from credproxy_cli.core.config import quick_directory
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import quick_directory
+    from credproxy_cli.core.model.workspace import Workspace
 
     (workspaces_dir / "w.toml").write_text('image = "x"\ndirectory = "/old/path"\n')
     target = tmp_path / "new"
@@ -316,9 +316,9 @@ def test_bind_dir_explicit_path_replaces(xdg, workspaces_dir, tmp_path):
 
 def test_bind_dir_loose_default_workspace(xdg, workspaces_dir, tmp_path, monkeypatch):
     import os
-    from credproxy_cli.core.config import quick_directory
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.config import quick_directory
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
 
     (workspaces_dir / "w.toml").write_text('image = "x"\n')
     set_default(Workspace("w"))
@@ -434,12 +434,12 @@ def test_list_marks_default(xdg, workspaces_dir, monkeypatch):
     for name in ("alpha", "bravo"):
         (workspaces_dir / f"{name}.toml").write_text('image = "x"\n')
 
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("alpha"))
 
-    # docker is lazily imported inside list_workspaces; patch the module attr.
-    import credproxy_cli.core.docker as _docker_mod
+    # list_workspaces (engine.containers) queries the docker module; patch its attr.
+    import credproxy_cli.core.engine.docker as _docker_mod
     monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
 
     ec, out, _ = _run_loose(["list"])
@@ -463,10 +463,10 @@ def test_list_strict_is_plain_inventory(xdg, workspaces_dir, tmp_path, monkeypat
     proj.mkdir()
     (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
     (workspaces_dir / "bravo.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("proj"))
-    import credproxy_cli.core.docker as _docker_mod
+    import credproxy_cli.core.engine.docker as _docker_mod
     monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
     monkeypatch.chdir(proj)
 
@@ -483,7 +483,7 @@ def test_list_shows_directory_and_cwd_marker(xdg, workspaces_dir, tmp_path, monk
     proj.mkdir()
     (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
     (workspaces_dir / "plain.toml").write_text('image = "x"\n')
-    import credproxy_cli.core.docker as _docker_mod
+    import credproxy_cli.core.engine.docker as _docker_mod
     monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
     monkeypatch.chdir(proj)
 
@@ -501,7 +501,7 @@ def test_list_json_includes_directory_and_here(xdg, workspaces_dir, tmp_path, mo
     proj = tmp_path / "proj"
     proj.mkdir()
     (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
-    import credproxy_cli.core.docker as _docker_mod
+    import credproxy_cli.core.engine.docker as _docker_mod
     monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
     monkeypatch.chdir(proj)
 
@@ -516,8 +516,8 @@ def test_current_is_loose_only(xdg, workspaces_dir):
     """`current` reports the loose default/cwd resolution -- the strict surface
     disclaims implicit targeting (like the loose-only writer, `use`)."""
     (workspaces_dir / "alpha.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("alpha"))
 
     ec, _, err = _run(["current"])  # strict
@@ -532,8 +532,8 @@ def test_current_loose_cwd_shadows_default(xdg, workspaces_dir, tmp_path, monkey
     proj.mkdir()
     (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
     (workspaces_dir / "backend.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("backend"))
     monkeypatch.chdir(proj)
 
@@ -548,8 +548,8 @@ def test_current_loose_no_cwd_is_default(xdg, workspaces_dir, tmp_path, monkeypa
     """With no cwd match, loose `current` falls to the default pointer and says
     so on stderr."""
     (workspaces_dir / "backend.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("backend"))
     monkeypatch.chdir(tmp_path)
 
@@ -566,8 +566,8 @@ def test_current_json_carries_workspace_source_default(xdg, workspaces_dir, tmp_
     proj.mkdir()
     (workspaces_dir / "proj.toml").write_text(f'image = "x"\ndirectory = "{proj}"\n')
     (workspaces_dir / "backend.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("backend"))
     monkeypatch.chdir(proj)
 
@@ -595,8 +595,8 @@ def test_info_default_workspace_is_loose_only(xdg, workspaces_dir):
     """The default pointer is a loose concept: strict `info` omits it, loose
     `info` shows it (consistent with `list`/`current`)."""
     (workspaces_dir / "backend.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("backend"))
 
     _, strict_out, _ = _run(["info"])
@@ -699,7 +699,7 @@ def test_json_create(xdg, workspaces_dir):
 
 def test_json_list(xdg, workspaces_dir, monkeypatch):
     (workspaces_dir / "j1.toml").write_text('image = "x"\n')
-    import credproxy_cli.core.docker as _docker_mod
+    import credproxy_cli.core.engine.docker as _docker_mod
     monkeypatch.setattr(_docker_mod, "container_status", lambda name: None)
     ec, out, _ = _run(["--json", "list"])
     assert ec == 0
@@ -758,7 +758,7 @@ def test_doctor_fetch_without_name_refused(xdg):
 def test_doctor_scan_all_without_fetch_is_allowed(xdg, workspaces_dir, monkeypatch):
     """A bare read-only `doctor` (no NAME, no --fetch) is fine -- it must NOT hit
     the requires-NAME guard (that's --fetch-only)."""
-    import credproxy_cli.core.doctor as doctor_mod
+    import credproxy_cli.core.engine.doctor as doctor_mod
     monkeypatch.setattr(doctor_mod, "run", lambda name=None, *, fetch=False: [])
     ec, out, err = _run(["doctor"])
     assert ec == 0  # no checks -> no failures; guard did not fire
@@ -772,7 +772,7 @@ def test_delete_explicit_no_prompt(xdg, workspaces_dir, monkeypatch):
     (workspaces_dir / "target.toml").write_text('image = "x"\n')
 
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.delete_workspace",
+        "credproxy_cli.core.engine.containers.delete_workspace",
         lambda ws, keep_volumes=False: None,
     )
 
@@ -784,12 +784,12 @@ def test_delete_explicit_no_prompt(xdg, workspaces_dir, monkeypatch):
 def test_delete_implicit_non_tty_fails(xdg, workspaces_dir, monkeypatch):
     """Implicit delete without --yes and no TTY fails closed."""
     (workspaces_dir / "target.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("target"))
 
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.delete_workspace",
+        "credproxy_cli.core.engine.containers.delete_workspace",
         lambda ws, keep_volumes=False: None,
     )
 
@@ -802,12 +802,12 @@ def test_delete_implicit_non_tty_fails(xdg, workspaces_dir, monkeypatch):
 def test_delete_implicit_yes_bypasses_gate(xdg, workspaces_dir, monkeypatch):
     """--yes bypasses the implicit destructive gate."""
     (workspaces_dir / "target.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("target"))
 
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.delete_workspace",
+        "credproxy_cli.core.engine.containers.delete_workspace",
         lambda ws, keep_volumes=False: None,
     )
 
@@ -818,12 +818,12 @@ def test_delete_implicit_yes_bypasses_gate(xdg, workspaces_dir, monkeypatch):
 def test_delete_implicit_tty_yes_answer(xdg, workspaces_dir, monkeypatch):
     """When stdin is a TTY and user answers 'y', delete proceeds."""
     (workspaces_dir / "target.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("target"))
 
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.delete_workspace",
+        "credproxy_cli.core.engine.containers.delete_workspace",
         lambda ws, keep_volumes=False: None,
     )
 
@@ -834,12 +834,12 @@ def test_delete_implicit_tty_yes_answer(xdg, workspaces_dir, monkeypatch):
 def test_delete_implicit_tty_no_answer_aborts(xdg, workspaces_dir, monkeypatch):
     """When stdin is a TTY and user answers 'n', delete aborts."""
     (workspaces_dir / "target.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("target"))
 
     monkeypatch.setattr(
-        "credproxy_cli.core.lifecycle.delete_workspace",
+        "credproxy_cli.core.engine.containers.delete_workspace",
         lambda ws, keep_volumes=False: None,
     )
 
@@ -864,8 +864,8 @@ secret = "X"
 hosts = ["api.github.com"]
 placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 """)
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("ws"))
 
     ec, out, err = _run_loose(["binding", "remove", "myb"])
@@ -886,12 +886,139 @@ secret = "X"
 hosts = ["api.github.com"]
 placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 """)
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("ws"))
 
     ec, out, err = _run_loose(["--yes", "binding", "remove", "myb"])
     assert ec == 0
+
+
+# ---- binding add / lock persistence (#62) ------------------------------------
+
+
+def _read_lock(name: str) -> dict:
+    import json
+    from credproxy_cli.core.model.workspace import Workspace
+    p = Workspace(name).lock_json_path
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+def test_binding_add_broken_container_half_leaves_toml_unchanged(xdg, workspaces_dir):
+    """A pre-existing container-half error (here: missing `image`) makes the
+    post-append resolve_workspace raise -- the hand-owned TOML must be restored,
+    never left with an orphaned half-written `[[binding]]` block (#62 fix 3)."""
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text("# no image line -- container half is broken\n")
+    before = cfg.read_text()
+
+    ec, out, err = _run(["workspace", "w", "binding", "add",
+                         "--injector", "bearer", "--provider", "env",
+                         "--secret", "TOK", "--host", "api.example.com"])
+    assert ec != 0
+    assert "pre-existing" in err or "image" in err
+    assert cfg.read_text() == before                 # byte-identical, no orphan
+    assert "[[binding]]" not in cfg.read_text()
+
+
+def test_binding_add_writes_lock_placeholder_absent_from_toml(xdg, workspaces_dir):
+    """`binding add` mints the lock-managed placeholder into lock.json (keyed by
+    binding name) and does NOT write it into the TOML block (#62 fix 7)."""
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text('image = "x"\n')
+
+    ec, out, err = _run(["workspace", "w", "binding", "add",
+                         "--injector", "bearer", "--provider", "env",
+                         "--secret", "TOK", "--host", "api.example.com"])
+    assert ec == 0, err
+    lock = _read_lock("w")
+    assert "bearer-env" in lock.get("placeholders", {})
+    ph = lock["placeholders"]["bearer-env"]
+    assert ph                                        # a real generated placeholder
+    assert "placeholder" not in cfg.read_text()      # never in the hand-owned TOML
+    assert ph not in cfg.read_text()
+
+
+def test_binding_list_does_not_touch_lock(xdg, workspaces_dir):
+    """`binding list` is read-only: resolving placeholders in memory must NOT
+    create or modify lock.json (#62 fix 7)."""
+    from credproxy_cli.core.model.workspace import Workspace
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text("""\
+image = "x"
+
+[[binding]]
+name     = "b"
+injector = "bearer"
+provider = "env"
+secret   = "TOK"
+hosts    = ["api.example.com"]
+""")
+    lock_path = Workspace("w").lock_json_path
+    assert not lock_path.exists()
+    ec, out, err = _run(["workspace", "w", "binding", "list"])
+    assert ec == 0, err
+    assert not lock_path.exists()                    # list minted nothing to disk
+
+
+def test_inspect_does_not_touch_lock(xdg, workspaces_dir, monkeypatch):
+    """`inspect` reads through resolve_workspace WITHOUT persisting the lock (#62
+    fix 7). Docker status is mocked so the managed-workspace path runs offline."""
+    from credproxy_cli.core.model.workspace import Workspace
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.containers.docker.container_status",
+        lambda name: "missing")
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text("""\
+image = "x"
+
+[[binding]]
+name     = "b"
+injector = "bearer"
+provider = "env"
+secret   = "TOK"
+hosts    = ["api.example.com"]
+""")
+    lock_path = Workspace("w").lock_json_path
+    assert not lock_path.exists()
+    ec, out, err = _run(["workspace", "w", "inspect"])
+    assert ec == 0, err
+    assert not lock_path.exists()                    # inspect persisted nothing
+
+
+def test_inspect_renders_volume_mount_without_keyerror(xdg, workspaces_dir, monkeypatch):
+    """`inspect` on a workspace with a managed-volume mount must not KeyError:
+    a volume mount carries `name` (not `source`), so the mounts render falls back
+    to `name`. Pre-existing crash surfaced during the #68 split; volume/`home`
+    mounts hit it on a common read path."""
+    monkeypatch.setattr(
+        "credproxy_cli.core.engine.containers.docker.container_status",
+        lambda name: "missing")
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text('image = "x"\n\n[[mounts]]\nvolume = "data"\ntarget = "/data"\n')
+    ec, out, err = _run(["workspace", "w", "inspect"])
+    assert ec == 0, err
+    assert "data:/data" in out                       # the volume mount rendered
+
+
+def test_binding_remove_drops_lock_placeholder(xdg, workspaces_dir):
+    """`binding remove` drops the removed binding's lock placeholder entry, so a
+    later same-named add mints a FRESH one (#62 fix 7)."""
+    cfg = workspaces_dir / "w.toml"
+    cfg.write_text('image = "x"\n')
+    # Add two bearer bindings so the lock holds two placeholder entries.
+    for host in ("a.example.com", "b.example.com"):
+        ec, out, err = _run(["workspace", "w", "binding", "add",
+                             "--injector", "bearer", "--provider", "env",
+                             "--secret", "TOK", "--host", host])
+        assert ec == 0, err
+    lock = _read_lock("w")
+    assert set(lock["placeholders"]) == {"bearer-env", "bearer-env-2"}
+
+    ec, out, err = _run(["workspace", "w", "binding", "remove", "bearer-env"])
+    assert ec == 0, err
+    lock = _read_lock("w")
+    assert set(lock["placeholders"]) == {"bearer-env-2"}   # removed entry dropped
 
 
 # ---- strict: no alias verbs --------------------------------------------------
@@ -928,7 +1055,7 @@ def test_no_args_exits_zero(xdg):
 def test_loose_create_seeds_default_when_unset(xdg, workspaces_dir):
     """In loose mode, creating a workspace with no default set makes it the
     default (announced), so `credp enter` works immediately."""
-    from credproxy_cli.core.pointer import read_default
+    from credproxy_cli.core.model.pointer import read_default
     assert read_default() is None
 
     ec, out, err = _run_loose(["create", "alpha"])
@@ -940,7 +1067,7 @@ def test_loose_create_seeds_default_when_unset(xdg, workspaces_dir):
 def test_loose_create_does_not_override_existing_default(xdg, workspaces_dir):
     """The seed only fills a vacuum -- a second create never changes an
     already-selected default."""
-    from credproxy_cli.core.pointer import read_default
+    from credproxy_cli.core.model.pointer import read_default
 
     _run_loose(["create", "alpha"])            # alpha becomes default
     ec, out, err = _run_loose(["create", "beta"])
@@ -952,7 +1079,7 @@ def test_loose_create_does_not_override_existing_default(xdg, workspaces_dir):
 def test_strict_create_never_sets_default(xdg, workspaces_dir):
     """Strict `create` has no default-workspace behavior -- the pointer stays
     unset."""
-    from credproxy_cli.core.pointer import read_default
+    from credproxy_cli.core.model.pointer import read_default
 
     ec, out, err = _run(["workspace", "create", "alpha"])
     assert ec == 0
@@ -962,7 +1089,7 @@ def test_strict_create_never_sets_default(xdg, workspaces_dir):
 def test_loose_create_reseeds_after_default_cleared(xdg, workspaces_dir):
     """Deleting the default clears the pointer; the next loose create re-seeds
     it (the vacuum is real again)."""
-    from credproxy_cli.core.pointer import read_default, clear_default
+    from credproxy_cli.core.model.pointer import read_default, clear_default
 
     _run_loose(["create", "alpha"])
     clear_default()                            # simulate delete-of-default
@@ -1038,17 +1165,17 @@ def test_loose_help_via_help_flag(xdg):
 
 
 def _stub_recreate(monkeypatch):
-    """Replace lifecycle.recreate_workspace with a recorder of
+    """Replace startup.recreate_workspace with a recorder of
     (include_proxy, reset_volumes). Also neutralize the proxy-image gate
     (`ensure_proxy_image`, which would otherwise hit docker): these tests cover
     recreate's argument plumbing, not the image check (that has its own suite)."""
     calls: list = []
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cli.lifecycle.recreate_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.startup.recreate_workspace",
         lambda ws, notify=None, include_proxy=False, reset_volumes=None:
             calls.append((include_proxy, reset_volumes or [])),
     )
-    monkeypatch.setattr("credproxy_cli.porcelain.cli.ensure_proxy_image",
+    monkeypatch.setattr("credproxy_cli.porcelain.cmd_lifecycle.ensure_proxy_image",
                         lambda ctx: None)
     return calls
 
@@ -1086,8 +1213,8 @@ def test_recreate_all_is_alias_for_proxy(xdg, workspaces_dir, monkeypatch):
 def test_recreate_loose_alias_resolves_default(xdg, workspaces_dir, monkeypatch):
     """`credp recreate` (no name) resolves the default workspace."""
     (workspaces_dir / "rc.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("rc"))
     calls = _stub_recreate(monkeypatch)
     ec, out, err = _run_loose(["recreate"])
@@ -1112,8 +1239,8 @@ def test_recreate_reset_volume_implicit_non_tty_fails(xdg, workspaces_dir, monke
     """Gated like delete: --reset-volume home on an implicit default, no TTY/--yes,
     fails closed and never calls through."""
     (workspaces_dir / "rc.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("rc"))
     calls = _stub_recreate(monkeypatch)
     ec, out, err = _run_loose(["recreate", "--reset-volume", "home"])
@@ -1125,8 +1252,8 @@ def test_recreate_reset_volume_implicit_non_tty_fails(xdg, workspaces_dir, monke
 def test_recreate_reset_volume_implicit_yes_bypasses(xdg, workspaces_dir, monkeypatch):
     """--yes bypasses the gate; --reset-volume home then proceeds."""
     (workspaces_dir / "rc.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("rc"))
     calls = _stub_recreate(monkeypatch)
     ec, out, err = _run_loose(["--yes", "recreate", "--reset-volume", "home"])
@@ -1137,8 +1264,8 @@ def test_recreate_reset_volume_implicit_yes_bypasses(xdg, workspaces_dir, monkey
 def test_recreate_reset_volume_implicit_tty_no_aborts(xdg, workspaces_dir, monkeypatch):
     """TTY, answer 'n' -> aborts, no call through."""
     (workspaces_dir / "rc.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("rc"))
     calls = _stub_recreate(monkeypatch)
     ec, out, err = _run_loose(["recreate", "--reset-volume", "home"],
@@ -1152,8 +1279,8 @@ def test_recreate_plain_implicit_not_gated(xdg, workspaces_dir, monkeypatch):
     """Plain recreate (no --reset-volume home) keeps all state, so it is NOT gated even
     on an implicit default with no TTY."""
     (workspaces_dir / "rc.toml").write_text('image = "x"\n')
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("rc"))
     calls = _stub_recreate(monkeypatch)
     ec, out, err = _run_loose(["recreate"])
@@ -1260,15 +1387,16 @@ def test_mount_add_json_shape(xdg, workspaces_dir):
 def _stub_preserve_docker(monkeypatch, *, running=True, sessions=1):
     """Stub the runtime probes do_mount_add consults for the --preserve gate, and
     no-op the actual add so no real docker runs."""
-    from credproxy_cli.core import docker as _d
-    from credproxy_cli.core import lifecycle as _l
+    from credproxy_cli.core.engine import docker as _d
+    from credproxy_cli.core.engine import sessions as _sessions
+    from credproxy_cli.core.engine import startup as _startup
     monkeypatch.setattr(_d, "container_status",
                         lambda c: "running" if running else None)
-    monkeypatch.setattr(_l, "_count_live_sessions", lambda ws, **kw: sessions)
+    monkeypatch.setattr(_sessions, "_count_live_sessions", lambda ws, **kw: sessions)
     called = {}
     def _add(ws, **kw):
         called.update(kw)
-    monkeypatch.setattr(_l, "add_managed_volume", _add)
+    monkeypatch.setattr(_startup, "add_managed_volume", _add)
     return called
 
 
@@ -1295,8 +1423,8 @@ def test_mount_add_preserve_yes_bypasses(xdg, workspaces_dir, monkeypatch):
 def test_mount_add_preserve_loose_no_tty_fails_closed(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     _stub_preserve_docker(monkeypatch, running=True, sessions=1)
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("ws"))
     ec, out, err = _run_loose(["mount", "add", "--volume", "cache",
                                "--target", "/c", "--preserve"])
@@ -1307,8 +1435,8 @@ def test_mount_add_preserve_loose_no_tty_fails_closed(xdg, workspaces_dir, monke
 def test_mount_add_preserve_loose_prompt_accepts(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     called = _stub_preserve_docker(monkeypatch, running=True, sessions=1)
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("ws"))
     ec, out, err = _run_loose(["mount", "add", "--volume", "cache", "--target",
                                "/c", "--preserve"],
@@ -1332,8 +1460,8 @@ def test_mount_add_alias_resolves_default(xdg, workspaces_dir):
     subcommand `add` is not mistaken for a workspace name."""
     import tomllib
     _mkws(workspaces_dir)
-    from credproxy_cli.core.pointer import set_default
-    from credproxy_cli.core.workspace import Workspace
+    from credproxy_cli.core.model.pointer import set_default
+    from credproxy_cli.core.model.workspace import Workspace
     set_default(Workspace("ws"))
     ec, out, err = _run_loose(["mount", "add", "--volume", "cache", "--target", "/c"])
     assert ec == 0, err
@@ -1383,7 +1511,7 @@ def test_logs_structured_records_are_forgery_resistant():
     escaped VALUE on ONE physical line -- it parses as kind=rule-error, never as a
     second audit line."""
     import json
-    from credproxy_cli.porcelain.cli import _parse_credproxy_line
+    from credproxy_cli.porcelain.cmd_lifecycle import _parse_credproxy_line
     # genuine audit record
     assert _parse_credproxy_line(
         'credproxy {"ts":"t","kind":"audit","event":"inject","binding":"gh"}\n') \
@@ -1405,7 +1533,7 @@ def test_logs_structured_records_are_forgery_resistant():
 def test_format_record_handles_every_kind():
     """The `logs` reformatter renders each record kind and never crashes on a
     missing key or an unknown/future kind."""
-    from credproxy_cli.porcelain.cli import _format_record
+    from credproxy_cli.porcelain.cmd_lifecycle import _format_record
     assert "inject" in _format_record(
         {"ts": "t", "kind": "audit", "event": "inject", "binding": "gh",
          "host": "h", "outcome": "injected"})
@@ -1422,7 +1550,7 @@ def test_format_record_handles_every_kind():
 
 def test_format_record_script_failure_shows_location():
     """A sanitized script-failure record renders its safe source:line (#33 rung 3)."""
-    from credproxy_cli.porcelain.cli import _format_record
+    from credproxy_cli.porcelain.cmd_lifecycle import _format_record
     line = _format_record(
         {"ts": "t", "kind": "script", "scheme": "ovh", "hook": "on_request",
          "reason": "StarlarkError", "source": "ovh.star", "line": 23,
@@ -1473,7 +1601,7 @@ def test_exec_empty_command_fails(xdg, workspaces_dir):
 def test_exec_propagates_exit_code(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cli.lifecycle.exec_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.sessions.exec_workspace",
         lambda ws, cmd, notify=None, *, mode="shim", user_override=None, push=False: 7)
     ec, out, err = _run(["workspace", "ws", "exec", "--", "false"])
     assert ec == 7
@@ -1485,7 +1613,7 @@ def test_exec_default_mode_is_shim(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     seen = {}
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cli.lifecycle.exec_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.sessions.exec_workspace",
         lambda ws, cmd, notify=None, *, mode="shim", user_override=None, push=False:
             seen.update(mode=mode, user=user_override) or 0)
     _run(["workspace", "ws", "exec", "--", "curl", "x"])
@@ -1496,7 +1624,7 @@ def test_exec_raw_and_login_flags_select_mode(xdg, workspaces_dir, monkeypatch):
     _mkws(workspaces_dir)
     seen = {}
     monkeypatch.setattr(
-        "credproxy_cli.porcelain.cli.lifecycle.exec_workspace",
+        "credproxy_cli.porcelain.cmd_lifecycle.sessions.exec_workspace",
         lambda ws, cmd, notify=None, *, mode="shim", user_override=None, push=False:
             seen.update(mode=mode, user=user_override) or 0)
     _run(["workspace", "ws", "exec", "--raw", "--user", "root", "--", "id"])

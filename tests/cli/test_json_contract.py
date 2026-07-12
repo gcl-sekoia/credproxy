@@ -28,8 +28,8 @@ def test_json_create_argparse_error_is_json(xdg):
 def test_json_confirm_prompt_goes_to_stderr_not_stdout(xdg, workspaces_dir):
     """The destructive-confirm prompt must not land on stdout (it would corrupt
     the JSON stream); aborting yields a JSON error object, prompt on stderr."""
-    from credproxy_cli.core import pointer
-    from credproxy_cli.core.workspace import for_name
+    from credproxy_cli.core.model import pointer
+    from credproxy_cli.core.model.workspace import for_name
 
     assert _run(["workspace", "create", "w"])[0] == 0
     pointer.set_default(for_name("w"))               # make `delete` implicit

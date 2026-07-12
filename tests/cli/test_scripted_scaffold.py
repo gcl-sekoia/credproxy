@@ -48,8 +48,8 @@ def test_scaffold_script_roundtrip(family, slot, marker, xdg):
     assert "Primitive API" in script.read_text() and "req_set_header" in script.read_text()
 
     # The emitted injector parses + resolves its script (no reverse-engineering).
-    from credproxy_cli.core.injectors import find_injector
-    from credproxy_cli.core.scripts import find_script
+    from credproxy_cli.core.model.injectors import find_injector
+    from credproxy_cli.core.model.scripts import find_script
     inj = find_injector("sig")
     assert inj.scheme == "script" and inj.script == "sig"
     assert inj.spec.family == family and inj.spec.slots == (slot,)

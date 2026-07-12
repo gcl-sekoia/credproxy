@@ -58,9 +58,9 @@ path   = "/repos/**"
 ```
 
 - **Identity is the workspace name, as everywhere.** The token
-  (`state/workspaces/<name>/auth.token`), state dir, applied-bindings/-rules
-  drift files, the `directory` cwd resolver, and the loose default pointer are
-  all the existing machinery, untouched.
+  (`state/workspaces/<name>/auth.token`), state dir, the lock's `applied`
+  bindings/rules drift metadata, the `directory` cwd resolver, and the loose
+  default pointer are all the existing machinery, untouched.
 - `attach` is **mutually exclusive** with every container-lifecycle key
   (`image`, `home`, `mounts`, `env`, `setup`, `user`, `user_uid`,
   `map_host_user`, `run_flags`, `shell`, `workdir`, `enter_prelude`,
@@ -145,6 +145,24 @@ Two properties of that counter are load-bearing and deliberate:
 waits on `/health` and *then* pushes, so a creds-gated `/health` would deadlock
 standalone `start` the same way waiting on `/ready` before pushing would (I1).
 
+**`GET /admin/config` (bearer-gated) reports what the proxy is running.** The same
+route that accepts a `POST` push answers a `GET` with a superset used two ways:
+`{"loaded", "fingerprint"}` (read from the tmpfs config file) power the `enter`
+fast path — the host skips a redundant re-push when the proxy already holds the
+intended config's fingerprint — and `{"generation", "bindings", "rules"}` (built
+from the **loaded** config objects, not a tmpfs re-read) report what the proxy is
+*actually* running, so `inspect`/`apply`/`doctor` can drift the resolved intent
+against reality (see [Drift against reality](../reference/configuration.md#drift-against-reality)).
+The **generation** is the reality discriminator the verdict keys on; the
+binding/rule projection is **sanitized** and used for **display only** —
+deliberately tighter than `/setup`: `{name, hosts, scheme, placeholder, env}` per
+binding and `{name, hosts, action, visible}` per rule, **never** a secret value, a
+`params` value, or a header/body value (so it is lossy — a changed secret ref or
+rule detail is invisible in it, which is why the verdict reads the content-complete
+offline drift, not this projection). Since this route is loopback + bearer-gated and the projection carries no
+secret, an attached workspace's `inspect`/`apply`/`doctor` reads it over the same
+resolved `attach` admin URL that `push` posts to.
+
 ## Commands
 
 All these live on the **strict** surface (the scriptable contract); the loose
@@ -165,17 +183,18 @@ attached one. `start`/`apply` call this same engine internally.
 - **`--wait`** polls **`/health`** (never `/ready` — I1) until capture-ready,
   then pushes; `--timeout` (default 120s) bounds it, and the poll interval is
   ~0.5s (a provider may prompt/unlock, so the default is generous).
-- **Lock** — a blocking `flock` on `<state>/push.lock` is held around the
-  resolve+POST. A second concurrent `push` of the same workspace **waits for the
-  holder, then re-pushes** (the config may have changed underneath) — collapse
-  never means skip. Foreground by default; the *caller* backgrounds it with `&`
-  if its orchestration needs to (I5).
+- **Lock** — a blocking `flock` on the per-workspace `<state>/lifecycle.lock`
+  (the same reentrant lock that serializes `start`/`apply`/`recreate`) is held
+  around the resolve+POST. A second concurrent `push` of the same workspace
+  **waits for the holder, then re-pushes** (the config may have changed
+  underneath) — collapse never means skip. Foreground by default; the *caller*
+  backgrounds it with `&` if its orchestration needs to (I5).
 - **Managed proxy stopped** — `push` on a managed workspace whose proxy is not
   running is a clean error pointing at `start` (it does not auto-start; that is
   `start`'s job — G4).
 
-The pushed drift files (`applied-bindings.json` / `applied-rules.json`) update
-on an attached push exactly as on a managed one, so `inspect` drift works
+The pushed drift metadata (the lock's `applied.bindings` / `applied.rules`)
+updates on an attached push exactly as on a managed one, so `inspect` drift works
 identically (G5).
 
 ### `credproxy push --admin URL --config FILE --token FILE [--wait] [--timeout SECS]`
