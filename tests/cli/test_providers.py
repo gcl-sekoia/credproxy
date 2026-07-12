@@ -306,6 +306,10 @@ def test_builtin_bw_provider_batches_and_extracts(xdg, monkeypatch, tmp_path):
     ]
     fake_bin, calls = _fake_bw(tmp_path, items)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    # No session and no local vault on disk -> the pure fast path is unavailable,
+    # so this exercises the `bw` CLI fallback (the fake bw), not a real vault.
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    monkeypatch.setenv("BITWARDENCLI_APPDATA_DIR", str(tmp_path / "no-vault"))
 
     from credproxy_cli.core.providers import fetch_many
     vals = fetch_many("bw", ["github", "github#username",
@@ -318,6 +322,9 @@ def test_builtin_bw_provider_batches_and_extracts(xdg, monkeypatch, tmp_path):
     }
     # The whole batch -> a single vault read, however many refs were requested.
     assert calls.read_text().splitlines().count("list items") == 1
+    # ...and NO `bw status` round-trip: the read is optimistic (one process that
+    # lets `bw` itself prompt when the vault is locked), not status+unlock+list.
+    assert "status" not in calls.read_text()
 
 
 def test_builtin_bw_provider_missing_item_exit2(xdg, monkeypatch, tmp_path):
@@ -325,11 +332,34 @@ def test_builtin_bw_provider_missing_item_exit2(xdg, monkeypatch, tmp_path):
     fake_bin, _ = _fake_bw(tmp_path, [{"id": "id-gh", "name": "github",
                                        "login": {"password": "x"}, "fields": []}])
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("BW_SESSION", raising=False)  # -> the CLI fallback path
+    monkeypatch.setenv("BITWARDENCLI_APPDATA_DIR", str(tmp_path / "no-vault"))
 
     from credproxy_cli.core.errors import ProviderError
     from credproxy_cli.core.providers import fetch
     with pytest.raises(ProviderError, match="not found"):
         fetch("bw", "ghost")
+
+
+def test_builtin_bw_provider_argon2_no_session_falls_back_to_cli(xdg, monkeypatch, tmp_path):
+    """An argon2 vault with no session can't be derived by the pure reader, so
+    the provider must fall back to the `bw` CLI (single prompt there) rather than
+    fail -- the fast path never regresses which secrets resolve."""
+    appdata = tmp_path / "bwdata"
+    appdata.mkdir()
+    (appdata / "data.json").write_text(json.dumps({
+        "global_account_activeAccountId": "u1",
+        "user_u1_kdfConfig_kdfConfig": {"kdfType": 1, "iterations": 3},  # argon2
+    }))
+    fake_bin, calls = _fake_bw(tmp_path, [{"id": "id-gh", "name": "github",
+        "login": {"password": "ghp_tok", "uris": []}, "fields": []}])
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    monkeypatch.setenv("BITWARDENCLI_APPDATA_DIR", str(appdata))
+
+    from credproxy_cli.core.providers import fetch
+    assert fetch("bw", "github") == "ghp_tok"  # resolved via the CLI fallback
+    assert calls.read_text().splitlines().count("list items") == 1
 
 
 # ---- builtin gh-cli provider (fake `gh` on PATH, no real CLI needed) ----------
