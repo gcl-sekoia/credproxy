@@ -159,7 +159,7 @@ def _resolve_preset_credential_interactive(
     a validate-at-prompt loop). Strict / loose-no-TTY don't prompt -- `on_missing`
     (a callable taking the `missing` list) fires instead, rendering the caller's
     own structured/human error. Returns `(provider, secret)`."""
-    from ..core.model.presets import resolve_preset_credential
+    from ..core.model.presets import preset_slot_set, resolve_preset_credential
     from . import prompt as prompt_mod
 
     provider, secret, missing = resolve_preset_credential(
@@ -171,7 +171,11 @@ def _resolve_preset_credential_interactive(
             # equal to default_provider makes default_secret eligible).
             provider, secret, missing = resolve_preset_credential(
                 spec, provider, secret_arg)
-        if "secret" in missing:
+        # The single-string secret prompt only makes sense for the single-slot
+        # `value` sugar. A multi-slot / named-slot pack (#71) can't be prompted a
+        # single value, so it falls closed to explicit `--secret SLOT=REF` flags
+        # (multi-slot prompting is punted) -- leave it in `missing`.
+        if "secret" in missing and preset_slot_set(spec) == ("value",):
             hint_default = (spec.default_secret
                             if provider == spec.default_provider else None)
             secret = prompt_mod.ask_secret(provider, hint_default)
@@ -188,7 +192,7 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     proxy never sees a "preset"; the resolver expands the reference. A pure-rule /
     pure-container preset needs no provider/secret."""
     from ..core.model.presets import (
-        apply_option_values, get_preset, parse_preset_refs,
+        apply_option_values, get_preset, parse_preset_refs, preset_slot_set,
     )
     from ..core.providers import find_provider
 
@@ -200,15 +204,22 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     provider = secret = None
     if spec.needs_credential:
-        secret_arg = _parse_secret_args(a.secret)
-        if secret_arg is not None and not isinstance(secret_arg, str):
-            fail("`preset add` needs a single --secret REF")
+        # The pack's shared secret slot set (#71): parts all couple one credential,
+        # so their injectors must agree on slots. Parse `--secret` with it, so a
+        # single `--secret SLOT=REF` for a named/multi slot is recognized (not
+        # swallowed as a bare `value` ref).
+        slots = preset_slot_set(spec)
+        secret_arg = _parse_secret_args(a.secret, slots)
 
         def _missing(missing):
             if "provider" in missing:
                 fail("preset '%s' has bindings but no default provider -- pass "
                      "--provider" % a.preset)
-            fail("`preset add` needs --secret (its meaning depends on --provider)")
+            if slots == ("value",):
+                fail("`preset add` needs --secret (its meaning depends on "
+                     "--provider)")
+            fail("`preset add` needs `--secret SLOT=REF` for each slot: "
+                 f"{', '.join(slots)}")
 
         provider, secret = _resolve_preset_credential_interactive(
             ctx, spec, a.provider, secret_arg, on_missing=_missing)
@@ -291,9 +302,16 @@ def do_preset_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     # Host-prerequisite checks (#58): advisory here -- the reference already landed
     # (durable config), so a failing check reports + hints but never fails the add.
+    # The `provider` check only needs ONE ref to prove the provider serves the
+    # credential, so normalize a multi-slot `{slot: ref}` secret (#71) to its first
+    # ref -- matching `doctor`'s `_secret_ref`, and keeping the value hashable for
+    # prereqs' `(provider, secret)` dedup key.
     from ..core.model import prereqs
+    probe_secret = secret if isinstance(secret, str) or secret is None \
+        else next(iter(secret.values()), None)
     requires = [prereqs.summary(r) for r in prereqs.evaluate(
-        literal_spec.requires, provider=provider, secret=secret, do_fetch=True)]
+        literal_spec.requires, provider=provider, secret=probe_secret,
+        do_fetch=True)]
     render.OUT.preset_applied(
         ws.name, a.preset, announce["bindings"], announce["rules"],
         newly, mounts=announce["mounts"], env=announce["env"],

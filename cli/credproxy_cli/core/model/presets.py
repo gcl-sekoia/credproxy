@@ -42,12 +42,19 @@ class _Part:
     injector: str           # injector / scheme to use
     hosts: tuple[str, ...]
     env: str | None
+    # (element index, option id) for each `hosts` element that is a
+    # `{ option = "id" }` marker (#72). `hosts` holds a benign dummy at those
+    # positions until `_substitute_host_options` fills the resolved literal.
+    host_options: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True)
 class _PresetRule:
     suffix: str             # appended to the preset's base name (like _Part)
     rule: "core_rules.Rule"  # a validated Rule with name=None (filled at build)
+    # Host option markers (#72), as on `_Part` -- (element index, option id) for
+    # each `{ option = "id" }` element of the rule's `hosts`.
+    host_options: tuple[tuple[int, str], ...] = ()
 
 
 # The prerequisite check kinds a pack may DECLARE. Each is implemented by core
@@ -284,33 +291,45 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
                               f"[[part]] bindings (rules carry no placeholder)")
         placeholder = None
 
+    # Options are parsed FIRST -- the part/rule/mount/require parsers validate that
+    # every `{ option = "id" }` marker names a defined option (and is
+    # type-appropriate), so `[[part]]`/`[[rule]]` host markers (#72) need the
+    # option set in hand before they parse.
+    options = [_parse_preset_option(o, i, src) for i, o in enumerate(options_raw)]
+    _reject_dup_join_keys([o.id for o in options], "option", "id", src)
+    option_by_id = {o.id: o for o in options}
+
     parts = []
     for i, pr in enumerate(parts_raw):
         where = f"{src} part[{i}]"
         if not isinstance(pr, dict):
             raise ConfigError(f"{where}: must be a table")
         suffix, injector = pr.get("suffix"), pr.get("injector")
-        hosts = pr.get("hosts")
+        raw_hosts = pr.get("hosts")
         if not isinstance(suffix, str) or not suffix:
             raise ConfigError(f"{where}: 'suffix' must be a non-empty string")
         if not isinstance(injector, str) or not injector:
             raise ConfigError(f"{where}: 'injector' must be a non-empty string")
-        if not isinstance(hosts, list) or not hosts \
-                or not all(isinstance(h, str) and h for h in hosts):
-            raise ConfigError(f"{where}: 'hosts' must be a non-empty array of strings")
+        # A host element may be a `{ option = "id" }` marker (#72). Only route
+        # through the marker parser when a dict is present, so a string-only array
+        # keeps its exact existing validation/message.
+        if isinstance(raw_hosts, list) and any(isinstance(h, dict) for h in raw_hosts):
+            hosts, host_opts = _parse_host_markers(raw_hosts, option_by_id, where)
+        else:
+            host_opts = ()
+            if not isinstance(raw_hosts, list) or not raw_hosts \
+                    or not all(isinstance(h, str) and h for h in raw_hosts):
+                raise ConfigError(
+                    f"{where}: 'hosts' must be a non-empty array of strings")
+            hosts = tuple(raw_hosts)
         env = pr.get("env")
         if env is not None and (not isinstance(env, str) or not env):
             raise ConfigError(f"{where}: 'env' must be a non-empty string or absent")
         parts.append(_Part(suffix=suffix, injector=injector,
-                           hosts=tuple(hosts), env=env))
+                           hosts=hosts, env=env, host_options=host_opts))
 
-    # Options are parsed FIRST -- the mount/require parsers validate that every
-    # `{ option = "id" }` marker names a defined option (and is type-appropriate).
-    options = [_parse_preset_option(o, i, src) for i, o in enumerate(options_raw)]
-    _reject_dup_join_keys([o.id for o in options], "option", "id", src)
-    option_by_id = {o.id: o for o in options}
-
-    rules = [_parse_preset_rule(r, i, src) for i, r in enumerate(rules_raw)]
+    rules = [_parse_preset_rule(r, i, src, option_by_id)
+             for i, r in enumerate(rules_raw)]
     mounts = [_parse_preset_mount(m, i, src, tier, option_by_id)
               for i, m in enumerate(mounts_raw)]
     env = _parse_preset_env(env_raw, src)
@@ -435,13 +454,52 @@ def _parse_preset_option(o, i: int, src: str) -> _Option:
 
 def _require_stringlike_option(opt: _Option, where: str) -> None:
     """A `{ option = "id" }` marker sits only in a STRING-valued host field (a mount
-    `bind`/`volume` source, a `[[requires]]` path). A `bool` option supplies no
-    sensible whole value there, so referencing one is a definition error (string /
-    enum options are fine -- both resolve to a string literal)."""
+    `bind`/`volume` source, a `[[requires]]` path, a `[[part]]`/`[[rule]]` host).
+    A `bool` option supplies no sensible whole value there, so referencing one is a
+    definition error (string / enum options are fine -- both resolve to a string
+    literal)."""
     if opt.type == "bool":
         raise ConfigError(
             f"{where}: option '{opt.id}' is a 'bool' option, which can't supply a "
             f"host path / source string; use a 'string' or 'enum' option there")
+
+
+# A benign literal host substituted for a `{ option = "id" }` host marker so the
+# shared host shape/hostmatch validation still runs at definition parse; the real
+# value lands at expansion (`_substitute_host_options`). A plain literal (no `*`),
+# so it passes hostmatch, and it must never survive to expansion.
+_HOST_OPTION_DUMMY = "credproxy-option-host.invalid"
+
+
+def _parse_host_markers(hosts_raw, options: dict, where: str):
+    """Validate a preset `[[part]]`/`[[rule]]` `hosts` array that may mix literal
+    strings and whole-element `{ option = "id" }` markers (#72). Returns
+    `(hosts, host_options)`: `hosts` is the literal tuple with `_HOST_OPTION_DUMMY`
+    at each marker position (so the shared shape/hostmatch validation still runs at
+    parse), and `host_options` maps each marker's element index to its option id
+    (substituted at expansion). A marker must name a defined string/enum option; a
+    literal must be a non-empty string."""
+    if not isinstance(hosts_raw, list) or not hosts_raw:
+        raise ConfigError(f"{where}: 'hosts' must be a non-empty array")
+    out: list[str] = []
+    host_opts: list[tuple[int, str]] = []
+    for i, h in enumerate(hosts_raw):
+        oid = _option_marker(h, f"{where} hosts[{i}]")
+        if oid is not None:
+            if oid not in options:
+                raise ConfigError(
+                    f"{where} hosts[{i}]: option marker references undefined "
+                    f"option {oid!r}")
+            _require_stringlike_option(options[oid], f"{where} hosts[{i}]")
+            host_opts.append((i, oid))
+            out.append(_HOST_OPTION_DUMMY)
+        elif isinstance(h, str) and h:
+            out.append(h)
+        else:
+            raise ConfigError(
+                f"{where} hosts[{i}]: must be a non-empty string or an option "
+                f"marker `{{ option = \"id\" }}`")
+    return tuple(out), tuple(host_opts)
 
 
 def _parse_preset_require(r, i: int, src: str, *, has_parts: bool,
@@ -649,13 +707,18 @@ def _parse_preset_setup(s, i: int, src: str) -> dict:
     return core_config._parse_setup_table(s, where, require_order=True)
 
 
-def _parse_preset_rule(entry, i: int, src: str) -> _PresetRule:
+def _parse_preset_rule(entry, i: int, src: str, options: dict) -> _PresetRule:
     """One preset `[[rule]]` -> a _PresetRule. Like `[[part]]`, it carries a
     `suffix` (expanding to `name = <preset>-<suffix>`), NOT a literal `name`;
     the rest is a standard rule table validated through the SAME
     `core.rules._parse_rule_entry` the load path and `rule add` use -- so a bad
     preset rule fails at preset load with the same errors (and inherits the
-    CLI<->proxy validator mirror + #36's `[rule.params]` validation)."""
+    CLI<->proxy validator mirror + #36's `[rule.params]` validation).
+
+    A `hosts` element may be a `{ option = "id" }` marker (#72): those elements are
+    replaced with a benign dummy before `_parse_rule_entry` (so its shape
+    validation still runs), the option refs recorded on the `_PresetRule`, and the
+    real value substituted at expansion (`_substitute_host_options`)."""
     # `where` is the location fragment; `src` is passed separately as the message
     # source (both to _parse_rule_entry and our own raises), so it must NOT be
     # baked into `where` too -- else _parse_rule_entry's `f"{source}: {where}..."`
@@ -670,11 +733,17 @@ def _parse_preset_rule(entry, i: int, src: str) -> _PresetRule:
         raise ConfigError(f"{src}: {where} a preset rule uses 'suffix' (-> "
                           f"name '<preset>-<suffix>'), not a literal 'name'")
     fields = {k: v for k, v in entry.items() if k != "suffix"}
+    host_opts: tuple[tuple[int, str], ...] = ()
+    raw_hosts = fields.get("hosts")
+    if isinstance(raw_hosts, list) and any(isinstance(h, dict) for h in raw_hosts):
+        dummied, host_opts = _parse_host_markers(
+            raw_hosts, options, f"{src}: {where}")
+        fields = {**fields, "hosts": list(dummied)}
     try:
         rule = core_rules._parse_rule_entry(fields, src, where)
     except CredproxyError as e:
         raise ConfigError(str(e)) from e
-    return _PresetRule(suffix=suffix, rule=rule)
+    return _PresetRule(suffix=suffix, rule=rule, host_options=host_opts)
 
 
 def load_presets() -> dict[str, PresetSpec]:
@@ -725,6 +794,16 @@ def get_preset(name: str) -> PresetSpec:
     return spec
 
 
+def _hosts_display(hosts: tuple[str, ...],
+                   host_options: tuple[tuple[int, str], ...]) -> list[str]:
+    """Render a part/rule `hosts` array for `preset list`: an option-marker element
+    (which holds `_HOST_OPTION_DUMMY` on the unresolved spec) renders as
+    `{option=id}`, like a mount source does (#72); literals pass through."""
+    opt_at = dict(host_options)
+    return [f"{{option={opt_at[i]}}}" if i in opt_at else h
+            for i, h in enumerate(hosts)]
+
+
 def describe_presets() -> list[dict]:
     """Structured description of every known preset, for `preset list`: the
     bindings AND rules it expands to, so an operator sees the full stamp before
@@ -741,7 +820,7 @@ def describe_presets() -> list[dict]:
                 {
                     "name": f"{spec.name}-{part.suffix}",
                     "injector": part.injector,
-                    "hosts": list(part.hosts),
+                    "hosts": _hosts_display(part.hosts, part.host_options),
                     "env": part.env,
                 }
                 for part in spec.parts
@@ -749,7 +828,7 @@ def describe_presets() -> list[dict]:
             "rules": [
                 {
                     "name": f"{spec.name}-{pr.suffix}",
-                    "hosts": list(pr.rule.hosts),
+                    "hosts": _hosts_display(pr.rule.hosts, pr.host_options),
                     "action": pr.rule.action,
                     "script": pr.rule.script,
                     "visible": pr.rule.effective_visible,
@@ -780,12 +859,14 @@ def describe_presets() -> list[dict]:
 
 
 def _unreferenced_option_ids(spec: PresetSpec) -> list[str]:
-    """Option ids no `{ option = "id" }` marker references (mount source or
-    requires path). An unreferenced option is a likely pack-author mistake (its
-    value is resolved but substituted nowhere) -- surfaced as a `preset list` note
-    (N6). Declaration order preserved."""
+    """Option ids no `{ option = "id" }` marker references (mount source, requires
+    path, or `[[part]]`/`[[rule]]` host #72). An unreferenced option is a likely
+    pack-author mistake (its value is resolved but substituted nowhere) -- surfaced
+    as a `preset list` note (N6). Declaration order preserved."""
     referenced = {m.source_option for m in spec.mounts if m.source_option}
     referenced |= {rq.path_option for rq in spec.requires if rq.path_option}
+    referenced |= {oid for p in spec.parts for _, oid in p.host_options}
+    referenced |= {oid for pr in spec.rules for _, oid in pr.host_options}
     return [o.id for o in spec.options if o.id not in referenced]
 
 
@@ -828,21 +909,23 @@ class TemplatePreset:
     `workspace.attach.template.toml`, consumed and expanded at `create` time (it
     never survives into the stamped `<name>.toml` -- the loader rejects `preset`
     in a workspace config). Mirrors the `preset add` inputs: the pack `name`, an
-    optional `provider`, an optional single `secret` ref, and an optional
-    `[preset.options]` sub-table (`{id = value}`) supplying pack option values
-    (#59) -- the explicit-value channel `--opt id=value` is for at create time."""
+    optional `provider`, a `secret` (a bare ref, or a `{slot = ref}` table for a
+    multi-slot injector, #71), and an optional `[preset.options]` sub-table
+    (`{id = value}`) supplying pack option values (#59) -- the explicit-value
+    channel `--opt id=value` is for at create time."""
     name: str
     provider: str | None
-    secret: str | None
+    secret: str | dict | None
     options: dict = field(default_factory=dict)  # {id: value}, from `[preset.options]`
 
 
 def parse_template_presets(raw: dict, source: str) -> list[TemplatePreset]:
     """Extract + validate the `[[preset]]` entries from a rendered template's
     parsed TOML. `source` labels error messages. Returns [] when there are none.
-    Fields: `name` (required non-empty string), `provider` / `secret` (optional
-    non-empty strings, `secret` a single ref like `preset add`'s one `--secret`).
-    Unknown keys are rejected."""
+    Fields: `name` (required non-empty string), `provider` (optional non-empty
+    string), `secret` (optional -- a bare ref or a `{slot = ref}` table, exactly
+    like a `[[preset]]` reference / `preset add`'s `--secret`). Unknown keys are
+    rejected."""
     entries_raw = raw.get("preset")
     if entries_raw is None:
         return []
@@ -865,9 +948,7 @@ def parse_template_presets(raw: dict, source: str) -> list[TemplatePreset]:
         provider = e.get("provider")
         if provider is not None and (not isinstance(provider, str) or not provider):
             raise ConfigError(f"{where} 'provider' must be a non-empty string")
-        secret = e.get("secret")
-        if secret is not None and (not isinstance(secret, str) or not secret):
-            raise ConfigError(f"{where} 'secret' must be a non-empty string")
+        secret = _parse_ref_secret(e.get("secret"), where)
         opts = e.get("options")
         if opts is not None and not isinstance(opts, dict):
             raise ConfigError(
@@ -879,8 +960,8 @@ def parse_template_presets(raw: dict, source: str) -> list[TemplatePreset]:
 
 
 def resolve_preset_credential(
-    spec: PresetSpec, provider: str | None, secret: str | None,
-) -> tuple[str | None, str | None, list[str]]:
+    spec: PresetSpec, provider: str | None, secret: str | dict | None,
+) -> tuple[str | None, str | dict | None, list[str]]:
     """Apply a preset's provider/secret DEFAULTS -- the single source of truth
     shared by `preset add` and template-declared `[[preset]]` expansion (#57), so
     the two never diverge on how a pack's `default_provider`/`default_secret` fill
@@ -1021,6 +1102,63 @@ def _substitute_mount_options(spec: PresetSpec, values: dict,
     return replace(spec, mounts=tuple(new_mounts))
 
 
+def _apply_host_markers(spec: PresetSpec, resolve_one) -> tuple:
+    """Substitute `[[part]]`/`[[rule]]` host markers (#72) via `resolve_one(oid) ->
+    literal`, returning `(new_parts, new_rules)` with the dummy positions filled and
+    `host_options` cleared. Shared by `_substitute_host_options` (expansion, with
+    defaults + context-flavored errors) and `apply_option_values` (literal spec,
+    from an already-resolved value map). The substituted host is validated
+    downstream by `validate_bindings`/`validate_rules` (the same hostmatch path any
+    binding/rule host takes), so junk fails the whole expansion atomically."""
+
+    def _sub(host_tuple, host_options):
+        hosts = list(host_tuple)
+        for idx, oid in host_options:
+            val = resolve_one(oid)
+            # An empty host value would die at read-back with a generic,
+            # option-blind "hosts required" error; reject it here, naming the
+            # option that supplied it.
+            if not val:
+                raise ConfigError(
+                    f"preset '{spec.name}': option '{oid}' supplies an empty host")
+            hosts[idx] = val
+        # A marker may resolve to a value equal to a literal in the same array (or
+        # to another marker's value); dedupe order-preserving so the expanded
+        # binding/rule doesn't self-collide (a binding writing one host twice is
+        # meaningless, and the downstream collision check would report a confusing
+        # "'X' and 'X' both write ..." against a single entry).
+        seen: set = set()
+        return tuple(h for h in hosts if not (h in seen or seen.add(h)))
+
+    new_parts: list[_Part] = []
+    for p in spec.parts:
+        if not p.host_options:
+            new_parts.append(p)
+            continue
+        new_parts.append(replace(
+            p, hosts=_sub(p.hosts, p.host_options), host_options=()))
+    new_rules: list[_PresetRule] = []
+    for pr in spec.rules:
+        if not pr.host_options:
+            new_rules.append(pr)
+            continue
+        new_rules.append(replace(
+            pr, rule=replace(pr.rule, hosts=_sub(pr.rule.hosts, pr.host_options)),
+            host_options=()))
+    return tuple(new_parts), tuple(new_rules)
+
+
+def _substitute_host_options(spec: PresetSpec, values: dict,
+                             context: str = "add") -> PresetSpec:
+    """Substitute resolved option values into `[[part]]`/`[[rule]]` host markers
+    (#72), returning a spec whose part/rule hosts are literal. Mirrors
+    `_substitute_mount_options` (per-option resolution with a context-flavored
+    unresolved-option remedy)."""
+    parts, rules = _apply_host_markers(
+        spec, lambda oid: _resolve_one_option(spec, oid, values, context))
+    return replace(spec, parts=parts, rules=rules)
+
+
 def _resolve_one_option(spec: PresetSpec, oid: str, values: dict,
                         context: str = "add"):
     """The final value for option `oid`: `values[oid]` (coerced) else its declared
@@ -1050,10 +1188,11 @@ def apply_option_values(spec: PresetSpec, values: dict) -> PresetSpec:
     `config._parse_mount`, a requires path against the absolute/`~`/`$`-root rule).
     `values` must resolve every option (defaults folded via `_finalize_option_values`).
 
-    This is the FULL substitution (mounts AND requires), used by `preset add` /
-    `create` to build the literal spec whose `requires` feed the #58 prereq run.
-    (`build_preset` uses the mount-only `_substitute_mount_options`, since the
-    expansion never carries requires.)"""
+    This is the FULL substitution (mounts, requires, AND `[[part]]`/`[[rule]]`
+    hosts #72), used by `preset add` / `create` to build the literal spec whose
+    `requires` feed the #58 prereq run. (`build_preset` uses the expansion-only
+    `_substitute_mount_options` + `_substitute_host_options`, since the expansion
+    never carries requires.)"""
     from . import config as core_config
 
     resolved = _finalize_option_values(spec, values)
@@ -1079,8 +1218,12 @@ def apply_option_values(spec: PresetSpec, values: dict) -> PresetSpec:
         _validate_require_path(literal, spec.name, rq.path_option)
         new_requires.append(replace(rq, path=literal, path_option=None))
 
+    # Part/rule host markers -> literal (#72). Nothing reads these off the literal
+    # spec today, but clearing them keeps the "no markers left" invariant honest.
+    new_parts, new_rules = _apply_host_markers(spec, lambda oid: resolved[oid])
+
     return replace(spec, mounts=tuple(new_mounts), requires=tuple(new_requires),
-                   options=())
+                   parts=new_parts, rules=new_rules, options=())
 
 
 def resolve_requires_for_check(spec: PresetSpec, option_values: dict):
@@ -1144,27 +1287,90 @@ class PresetExpansion:
         return bool(self.mounts or self.env or self.setup)
 
 
+def preset_slot_set(spec: PresetSpec) -> tuple[str, ...]:
+    """The single secret slot set every part of a binding-carrying pack shares
+    (#71). All parts couple ONE credential -- the same `secret` ref(s) thread into
+    each part's binding unchanged -- so their injectors MUST declare the identical
+    slot set. Resolves each part's injector and returns that shared set (in the
+    first part's declaration order), raising a ConfigError naming the divergent
+    parts if they differ. Returns () for a pack with no parts.
+
+    An unresolvable part injector raises here too -- strictly earlier and clearer
+    than the same failure downstream in `load_bindings`.
+
+    Note: this validates ALL declared parts, at `build_preset` time -- BEFORE a
+    ref's `disable`/`override` narrows the expansion. So a pack whose parts declare
+    divergent slots is inexpressible even by disabling the odd part (a
+    single-credential pack with divergent slots is a definition smell -- split it
+    into two packs). The authoritative per-binding slot check on the actual
+    enabled/overridden set still runs downstream in `load_bindings`."""
+    from .injectors import find_injector
+    slot_by_part: dict[str, tuple[str, ...]] = {}
+    for part in spec.parts:
+        try:
+            inj = find_injector(part.injector)
+        except CredproxyError as e:
+            raise ConfigError(
+                f"preset '{spec.name}' part '{part.suffix}': {e}") from e
+        slot_by_part[part.suffix] = tuple(inj.spec.slots)
+    distinct = {frozenset(sl) for sl in slot_by_part.values()}
+    if len(distinct) > 1:
+        detail = "; ".join(f"'{s}' -> {{{', '.join(sl)}}}"
+                           for s, sl in slot_by_part.items())
+        raise ConfigError(
+            f"preset '{spec.name}': all parts share one credential, so their "
+            f"injectors must declare the same secret slots, but they differ: "
+            f"{detail}")
+    # Return the first part's ordering (all sets are equal); () if no parts.
+    return next(iter(slot_by_part.values()), ())
+
+
+def _secret_slot_set(secret) -> set[str]:
+    """The slot set a resolved `secret` supplies: a bare ref is the single-slot
+    `value` sugar; a table's keys are its slots (mirrors `bindings.secret_refs`)."""
+    if isinstance(secret, str):
+        return {"value"}
+    return set(secret or {})
+
+
 def build_preset(preset: str, provider: str | None = None,
-                 secret: str | None = None,
+                 secret: str | dict | None = None,
                  options: dict | None = None,
                  context: str = "add",
                  placeholder: str | None = None) -> PresetExpansion:
     """Expand `preset` into a `PresetExpansion`. All bindings share one
     placeholder (freshly generated, or `placeholder` when the caller reuses one
-    from the lock) and resolve the same single-slot `secret` ref via `provider`
-    (both None for a pack with no bindings). Each rule's `name` is filled to
-    `<preset>-<suffix>`. Mounts/env/setup carry through verbatim. Raises
-    CredproxyError on an unknown preset.
+    from the lock) and resolve the same `secret` -- a bare ref (single-slot) or a
+    `{slot: ref}` table (multi-slot, #71) -- via `provider` (both None for a pack
+    with no bindings). Each rule's `name` is filled to `<preset>-<suffix>`.
+    Mounts/env/setup carry through verbatim. Raises CredproxyError on an unknown
+    preset, and a ConfigError when the parts' injectors declare divergent slot
+    sets or the supplied `secret` doesn't match that shared set.
 
     `options` (#59) maps resolved option ids to values; when the pack declares
-    `[[option]]`s they are substituted into the host-half markers (mount source)
-    BEFORE expansion, so the expansion is entirely literal. A missing value falls
-    back to the option's default; an option with neither raises (porcelain resolves
-    + reports the structured missing error before reaching here). `context`
-    (`"add"` | `"refresh"`) flavors that unresolved-option remedy."""
+    `[[option]]`s they are substituted into the host-half markers (mount source,
+    plus `[[part]]`/`[[rule]]` hosts, #72) BEFORE expansion, so the expansion is
+    entirely literal. A missing value falls back to the option's default; an option
+    with neither raises (porcelain resolves + reports the structured missing error
+    before reaching here). `context` (`"add"` | `"refresh"`) flavors that
+    unresolved-option remedy."""
     spec = get_preset(preset)
     if spec.options:
         spec = _substitute_mount_options(spec, options or {}, context)
+        spec = _substitute_host_options(spec, options or {}, context)
+    if spec.parts and secret is not None:
+        # All parts share one credential (#71): validate the injectors agree on a
+        # slot set and the supplied secret matches it, BEFORE minting bindings, so
+        # a mismatch fails the whole expansion (atomic add/refresh) with a
+        # preset-framed message rather than a per-binding one downstream.
+        slots = preset_slot_set(spec)
+        provided = _secret_slot_set(secret)
+        if provided != set(slots):
+            raise ConfigError(
+                f"preset '{spec.name}': the secret provides slot(s) "
+                f"{{{', '.join(sorted(provided))}}} but the pack's injector(s) "
+                f"declare {{{', '.join(slots)}}} -- pass `--secret SLOT=REF` for "
+                f"each declared slot")
     if placeholder is None:
         placeholder = spec.placeholder.generate() if spec.placeholder else None
     bindings = tuple(

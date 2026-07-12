@@ -74,6 +74,35 @@ list` shows the expanded bindings like any other; to change them, edit the
 `[[preset]]` block's own inputs (below) — you don't hand-edit the expansion.
 
 
+## Multi-slot credentials
+
+Some injectors take more than one secret. AWS `sigv4` signs with an
+`access_key_id` **and** a `secret_access_key`; OVH's signer takes three. A pack's
+parts all share one credential, so `preset add --secret` mirrors `binding add`
+exactly — repeat `--secret SLOT=REF`, once per slot:
+
+```sh
+credp preset add aws --provider env \
+    --secret access_key_id=AWS_ACCESS_KEY_ID \
+    --secret secret_access_key=AWS_SECRET_ACCESS_KEY
+```
+
+The reference records the slot map as a table:
+
+```toml
+[[preset]]
+name     = "aws"
+provider = "env"
+secret   = { access_key_id = "AWS_ACCESS_KEY_ID", secret_access_key = "AWS_SECRET_ACCESS_KEY" }
+```
+
+Because every part of a pack shares that one credential, **every part's injector
+must declare the same slots**. A `--secret` slot set that doesn't match the
+injectors' — or a pack whose parts disagree on their slots — fails the whole
+`preset add` before anything is written. Multi-slot packs have no `--secret`
+default and aren't prompted (on the loose surface): always pass the explicit
+`--secret SLOT=REF` flags.
+
 ## Presets can carry rules too
 
 A preset is a whole **service setup pack**, not just credentials. It may also
@@ -213,10 +242,26 @@ path = { option = "sock_dir" }             # reuse the same value here
 ```
 
 An option supplies the **entire** value of a host-half field — a mount
-`bind`/`volume` source or a `[[requires]]` `path` — never a token inside a string
-(there is no `{opt.x}`-in-string, no conditionals, no interpolation). The
-container half (a mount `target`, `[env]` values, `[[setup]]` steps) is the pack
-author's fixed namespace, so an option marker there is rejected.
+`bind`/`volume` source, a `[[requires]]` `path`, or a `[[part]]`/`[[rule]]` `hosts`
+element — never a token inside a string (there is no `{opt.x}`-in-string, no
+conditionals, no interpolation). The container half (a mount `target`, `[env]`
+values, `[[setup]]` steps) is the pack author's fixed namespace, so an option
+marker there is rejected.
+
+A `hosts` marker is what makes a **generic self-hosted-service pack** possible:
+the hostname of a GitLab, Artifactory, or Vault instance is the per-org value, so a
+pack points its `[[part]]` (and any `[[rule]]` guardrail) at a `host` option
+instead of forking the pack per org. A `hosts` array can mix literals and markers:
+
+```toml
+[[part]]
+suffix   = "api"
+injector = "bearer"
+hosts    = [{ option = "gitlab_host" }]
+```
+
+The resolved host is validated like any binding/rule host (a bad glob fails the
+add) and joins the intercept set — `preset add` announces it as newly intercepted.
 
 Values resolve at expansion time in one order: an explicit `--opt id=value`
 (repeatable) → a prompt (only on the loose `credp` surface, in a terminal) → the

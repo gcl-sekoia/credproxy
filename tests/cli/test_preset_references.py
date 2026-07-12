@@ -424,3 +424,86 @@ def test_duplicate_reference_rejected(xdg, workspaces_dir):
              'image = "x"\n[[preset]]\nname = "github"\n[[preset]]\nname = "github"\n')
     with pytest.raises(ConfigError, match="duplicate `\\[\\[preset\\]\\]` reference"):
         resolve_workspace(ws)
+
+
+# ---- multi-slot credentials (#71) --------------------------------------------
+
+
+# A sign-family, MULTI-SLOT pack: both parts use sigv4 (slots access_key_id /
+# secret_access_key), so one credential's two refs thread into every part.
+_AWS = """
+    [placeholder]
+    prefix = "aws_"
+    length = 20
+    charset = "hex"
+    [[part]]
+    suffix = "sts"
+    injector = "sigv4"
+    hosts = ["sts.amazonaws.com"]
+    [[part]]
+    suffix = "s3"
+    injector = "sigv4"
+    hosts = ["*.s3.amazonaws.com"]
+"""
+
+
+def test_multislot_reference_expands_with_table_secret(xdg, workspaces_dir):
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    _preset("aws", _AWS)
+    ws = _ws(workspaces_dir, "w", """
+        image = "x"
+        [[preset]]
+        name = "aws"
+        provider = "env"
+        secret = { access_key_id = "AWS_KEY", secret_access_key = "AWS_SECRET" }
+    """)
+    r = resolve_workspace(ws)
+    assert [b.name for b in r.bindings] == ["aws-sts", "aws-s3"]
+    # Every part's binding carries the SAME slot->ref table verbatim.
+    for b in r.bindings:
+        assert b.secret == {"access_key_id": "AWS_KEY",
+                            "secret_access_key": "AWS_SECRET"}
+    # The lock records the table secret as an input (so a change re-expands).
+    assert r.lock["presets"]["aws"]["inputs"]["secret"] == {
+        "access_key_id": "AWS_KEY", "secret_access_key": "AWS_SECRET"}
+
+
+def test_multislot_secret_slot_mismatch_rejected(xdg, workspaces_dir):
+    """A `secret` table whose slots don't equal the injectors' declared set fails
+    the whole expansion (atomic), preset-framed."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    _preset("aws", _AWS)
+    ws = _ws(workspaces_dir, "w", """
+        image = "x"
+        [[preset]]
+        name = "aws"
+        provider = "env"
+        secret = { access_key_id = "AWS_KEY" }
+    """)
+    with pytest.raises(ConfigError, match="the pack's injector.* declare"):
+        resolve_workspace(ws)
+
+
+def test_parts_with_divergent_slot_sets_rejected(xdg, workspaces_dir):
+    """Parts couple one credential, so their injectors must agree on slots; a
+    sigv4 part next to a bearer part is a pack-definition error surfaced at
+    expansion."""
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.model.presets import preset_slot_set, get_preset
+    _preset("mixed", """
+        [placeholder]
+        prefix = "m_"
+        length = 20
+        charset = "hex"
+        [[part]]
+        suffix = "a"
+        injector = "sigv4"
+        hosts = ["a.example.com"]
+        [[part]]
+        suffix = "b"
+        injector = "bearer"
+        hosts = ["b.example.com"]
+    """)
+    with pytest.raises(ConfigError, match="must declare the same secret slots"):
+        preset_slot_set(get_preset("mixed"))
