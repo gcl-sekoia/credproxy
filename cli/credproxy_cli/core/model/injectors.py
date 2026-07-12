@@ -227,10 +227,25 @@ def find_injector(name: str) -> Injector:
         path = base / f"{name}.toml"
         if path.is_file():
             return _parse(path, name, source)
+    from ..suggest import did_you_mean
     where = ", ".join(str(b) for _, b in searched)
     raise InjectorError(
-        f"injector '{name}' not found (looked for {name}.toml in {where})"
+        f"injector '{name}' not found{did_you_mean(name, injector_names())} "
+        f"(looked for {name}.toml in {where})"
     )
+
+
+def injector_names() -> list[str]:
+    """Resolvable injector names -- the registry `.toml` stems across the layered
+    dirs, unioned and sorted. A cheap enumeration (no parse) for did-you-mean and
+    listings; `list_injectors()` is the parsed, shadow-aware view."""
+    names: set[str] = set()
+    for _, base in layered_dirs("injectors"):
+        if base.is_dir():
+            for p in base.iterdir():
+                if p.suffix == ".toml" and p.is_file():
+                    names.add(p.stem)
+    return sorted(names)
 
 
 def list_injectors() -> list[Injector]:

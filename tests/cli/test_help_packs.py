@@ -208,7 +208,7 @@ def test_injector_add_still_requires_provider(ws_factory):
     code, out, err = _run(["workspace", "demo", "binding", "add", "--injector",
                            "bearer", "--secret", "TOK", "--host", "api.example.com"])
     assert code == 1
-    assert "needs --provider" in (out + err)
+    assert "missing: --provider" in (out + err)
 
 
 # ---- scaffolded template hygiene ---------------------------------------------

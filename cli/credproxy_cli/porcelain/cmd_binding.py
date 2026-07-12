@@ -49,15 +49,28 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     from ..core.model.injectors import find_injector
     from ..core.providers import find_provider
 
+    # Report EVERY missing required flag at once (like `doctor`), with a
+    # copy-pasteable skeleton -- not one-at-a-time, where each retry reveals the
+    # next gap (issue #74 F). `--secret` is checked at the arg level here (its
+    # slot shape needs the resolved injector, validated below once it's present).
+    missing = []
     if a.injector is None:
-        fail("`binding add` needs --injector (coordinated multi-binding sets and "
-             "guardrails live in `workspace NAME pack add PACK`)")
-
-    if not a.host:
-        fail("`binding add --injector` needs at least one --host")
-
+        missing.append("--injector")
     if not a.provider:
-        fail("`binding add --injector` needs --provider")
+        missing.append("--provider")
+    if not a.host:
+        missing.append("--host")
+    if not a.secret:
+        missing.append("--secret")
+    if missing:
+        msg = (f"`binding add` missing: {', '.join(missing)}; "
+               f"e.g. {render.cmd(render.EX_BINDING_ADD)}")
+        if a.injector is None:
+            # A wholly-flagless add is often someone reaching for a coordinated
+            # set -- point at packs (which is the minimal-flags path anyway).
+            msg += (f"\n(for a coordinated multi-binding set + guardrails, use a "
+                    f"pack: {render.cmd(render.EX_PACK_ADD)})")
+        fail(msg)
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
@@ -68,9 +81,9 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     # Parse --secret with the injector's declared slots, so a lone
     # `--secret SLOT=REF` for a single named slot (e.g. jwt-bearer's
     # private_key) is recognized rather than swallowed as a bare `value` ref.
+    # (`a.secret` is already guaranteed non-empty by the missing-flag check
+    # above, so this never returns None.)
     secret = _parse_secret_args(a.secret, injector.spec.slots)
-    if secret is None:
-        fail("`binding add` needs --secret")
 
     # Lock the read-validate-write: two concurrent `binding add` must not both
     # read the same file, pick the same auto-name, and last-writer-wins (the
