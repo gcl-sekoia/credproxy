@@ -77,6 +77,13 @@ name = "github-auth"        # provider=gh-cli, secret=github.com (defaults; need
 [[preset]]
 name = "claude-managed-settings"    # this overlay's opinionated pack: strips org-pushed setting gates
 
+# codex (opt-in): run OpenAI's Codex CLI off an injected API key (extras.list ships
+# the CLI). Neutral pack — point provider/secret at your vault, then uncomment:
+# [[preset]]
+# name     = "codex"
+# provider = "bw"
+# secret   = "openai-api-key"
+
 # git-signing (opt-in): sign commits with a key in a forwarded ssh-agent. Create
 # the host socket dir first (bin/credproxy-signing-agent), then uncomment:
 # [[preset]]

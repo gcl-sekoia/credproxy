@@ -9,6 +9,8 @@ gron        gron      flatten JSON to greppable lines (gron|rg; gron -u reverses
 yq          yq        query/edit YAML, JSON, TOML
 
 # Installed for interactive (human) use, not advertised (no note):
-claude      claude
-bat         bat
-pipx:icdiff icdiff
+claude             claude
+# codex CLI — the `codex` pack authenticates it off an injected OpenAI API key:
+npm:@openai/codex  codex
+bat                bat
+pipx:icdiff        icdiff
