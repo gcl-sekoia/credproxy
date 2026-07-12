@@ -64,3 +64,4 @@ order = 50                                            # after the tools/config i
 
 [env]
 MISE_MINIMUM_RELEASE_AGE_EXCLUDES = "claude"   # Claude Code moves fast — keep its CLI latest
+FORCE_HYPERLINK = "1"   # force OSC-8 hyperlinks on (supports-hyperlinks lib) so Claude Code emits clickable links even when TTY detection misses
