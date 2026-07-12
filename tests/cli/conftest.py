@@ -18,6 +18,26 @@ if _CLI_DIR not in sys.path:
     sys.path.insert(0, _CLI_DIR)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_overlays(monkeypatch):
+    """Opt out of overlay discovery by default for every CLI test.
+
+    The CLI suite tests the ENGINE's builtin behavior (builtin templates,
+    registries, scaffolds). Overlay resolution defaults to discovering the
+    subdirs of the repo's `<repo>/overlay/` container when CREDPROXY_OVERLAY_PATH
+    is unset -- and this fork SHIPS populated overlays there, so without this the
+    fork's own overlays would shadow the builtins these tests assert on (e.g.
+    `render_template` returning the 50-example profile). Upstream's `overlay/` is
+    empty, so upstream never hit this; the fixture makes the suite hermetic
+    regardless of a populated overlay/ or an ambient CREDPROXY_OVERLAY_PATH.
+
+    Autouse + set-empty ("" == explicit opt-out, distinct from unset=discovery).
+    Overlay-behavior tests re-set CREDPROXY_OVERLAY_PATH themselves (the `overlay`
+    fixture / in-body monkeypatch), which runs AFTER this autouse fixture and thus
+    wins -- so opting in still works."""
+    monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", "")
+
+
 @pytest.fixture
 def xdg(tmp_path, monkeypatch):
     """Temporary XDG dirs; patched into os.environ so all path helpers
