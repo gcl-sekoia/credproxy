@@ -15,17 +15,17 @@ singleton — the highest-priority overlay's wins). The rest of what it ships ar
 ## What it adds on top of base
 
 - **`workspace.template.toml`** — base's neutral scaffold **plus** opinions, expressed as
-  `[[preset]]` entries: the `claude-code` pack wired to Bitwarden (`provider = "bw"`), the
+  `[[pack]]` entries: the `claude-code` pack wired to Bitwarden (`provider = "bw"`), the
   `claude-managed-settings` pack turned on, base's `cache` pack (opt-in there, activated
   here for faster recreates), the `persist` pack below, and the profile mounts below. It
   carries no `setup`/`[env]` of its own — all of that comes from packs.
-- **`presets/persist.toml`** — a pack this overlay defines: a durable `/persist` volume +
+- **`packs/persist.toml`** — a pack this overlay defines: a durable `/persist` volume +
   its pre-setup chown + the `CLAUDE_CONFIG_DIR`/`HISTFILE` env, so Claude config and shell
   history survive recreates.
-- **`presets/claude-managed-settings.toml`** — a **shadow** of the base policy pack (this
+- **`packs/claude-managed-settings.toml`** — a **shadow** of the base policy pack (this
   overlay sorts first, so it wins): same mechanism, but supplies the real
   org-gate-stripping `settings_patch` the neutral pack leaves as `"{}"`. Since a template
-  can't inject rule params into a preset, the patch lives in this shadow pack.
+  can't inject rule params into a pack, the patch lives in this shadow pack.
 - **`tools.d/extras.list`** — a fuller tool kit (claude, ast-grep, bat, delta, gron, yq,
   eza), union-merged with base toolchain's `base.list` — the *additive-fragment* override
   style.
@@ -45,8 +45,8 @@ singleton — the highest-priority overlay's wins). The rest of what it ships ar
 Four ways to customize without editing the upstream packs: an **additive fragment**
 (`extras.list` into the toolchain union), a **policy file** the mechanism pack merges
 (`claude-settings-defaults.json`), **shadowing a pack to set its policy**
-(`presets/claude-managed-settings.toml` supplying the patch the base pack leaves as
+(`packs/claude-managed-settings.toml` supplying the patch the base pack leaves as
 `"{}"`), and **composing a separate policy-pack overlay** at all. The same shadow trick
 extends anywhere: add a higher-priority overlay that shadows just the piece you want (a
-`presets/<name>.toml`, or your own `workspace.template.toml`) — see
+`packs/<name>.toml`, or your own `workspace.template.toml`) — see
 [`overlay/README.md`](../README.md).

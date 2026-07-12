@@ -9,7 +9,7 @@ profile turns it on with a real patch.
 
 ## What the pack does
 
-`presets/claude-managed-settings.toml` is a pure-rule pack (no credential) + one setup step:
+`packs/claude-managed-settings.toml` is a pure-rule pack (no credential) + one setup step:
 
 - a **hidden `script` rule** on `GET api.anthropic.com/api/claude_code/settings` that runs
   [`scripts/claude-code-settings-rewrite.star`](scripts/claude-code-settings-rewrite.star)
@@ -34,7 +34,7 @@ So an "unrestricted Claude" outcome needs both: the client default (claude-code 
 ## Use it
 
 ```sh
-credproxy workspace NAME preset add claude-managed-settings   # no provider/secret needed
+credproxy workspace NAME pack add claude-managed-settings   # no provider/secret needed
 credproxy workspace NAME start                                # or apply, to push it
 ```
 
@@ -42,7 +42,7 @@ As applied, the rule is a no-op (`settings_patch = "{}"`). To make it do somethi
 edit the stamped `[[rule]]`'s `settings_patch` in the workspace's `<name>.toml`, or — the
 reusable way — **shadow this pack** from a higher-priority overlay with your own patch
 (`null` deletes a key, per merge-patch). The [`50-example`](../50-example/README.md)
-overlay does exactly that (`presets/claude-managed-settings.toml`), stripping the org-pushed
+overlay does exactly that (`packs/claude-managed-settings.toml`), stripping the org-pushed
 permission / sandbox / env-scrub gates.
 
 ## Testing

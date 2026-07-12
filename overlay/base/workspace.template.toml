@@ -1,5 +1,5 @@
 # Workspace config generated from the base profile — a neutral, reusable scaffold
-# composed of the base overlay's generic preset packs, nothing opinionated. Edit
+# composed of the base overlay's generic packs, nothing opinionated. Edit
 # freely. (How the overlays layer — see overlay/base/README.md.)
 
 # Optional: host directory for loose-surface cwd-addressing (`cd here && credp enter`).
@@ -32,40 +32,40 @@ mounts = [
   # activation shell drop-in. Setup steps + env all come from the packs below.)
 ]
 
-# Preset packs — the building blocks this workspace is assembled from. `create`
-# expands each [[preset]] into ordinary config (mounts above; setup steps, [env],
-# and [[binding]]/[[rule]] blocks below, each tagged `# credproxy:preset`) and drops
-# the [[preset]] lines — so a generated <name>.toml shows only the expansion. See
-# `credproxy preset list`.
+# Packs — the building blocks this workspace is assembled from. `create`
+# expands each [[pack]] into ordinary config (mounts above; setup steps, [env],
+# and [[binding]]/[[rule]] blocks below, each tagged `# credproxy:pack`) and drops
+# the [[pack]] lines — so a generated <name>.toml shows only the expansion. See
+# `credproxy pack list`.
 
-[[preset]]
+[[pack]]
 name = "proxy-ca"           # trust the proxy CA (this image doesn't out of the box)
 
-[[preset]]
+[[pack]]
 name = "toolchain"
 
 # cache (opt-in): a /cache volume for regenerable toolchain state (mise installs, uv
 # pythons, XDG cache) so a recreate skips re-installing the toolchain. Readily
 # discardable (`recreate --reset-volume cache`) — the toolchain setup re-runs on that
 # recreate and repopulates it. Uncomment to persist the toolchain across recreates:
-# [[preset]]
+# [[pack]]
 # name = "cache"
 
-[[preset]]
+[[pack]]
 name = "github-auth"        # provider=gh-cli, secret=github.com (defaults; needs a host `gh auth login`)
 
 # Claude Code (opt-in) — one pack wires the whole client: the Anthropic token,
 # onboarding-skip + client-settings merge, a SessionStart orientation hook, and
 # keeping the CLI latest. Needs the `claude` CLI (add it to a tools.d fragment) and
 # a token source (no neutral default vault). Uncomment + point at YOUR secret:
-# [[preset]]
+# [[pack]]
 # name     = "claude-code"
 # provider = "bw"
 # secret   = "claude-code-oauth-token"
 
 # git-signing (opt-in): sign commits with a key in a forwarded ssh-agent. Create
 # the host socket dir first (bin/credproxy-signing-agent), then uncomment:
-# [[preset]]
+# [[pack]]
 # name = "git-signing"
-# [preset.options]
+# [pack.options]
 # sock_dir = "~/.ssh/credproxy-agent"

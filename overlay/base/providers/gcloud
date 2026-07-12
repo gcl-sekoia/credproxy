@@ -8,7 +8,7 @@
 # THAT on the wire with the `bearer` scheme. The refresh token / SA key never
 # enters the workspace; the workspace only ever sees an inert placeholder token.
 #
-# Pairs with the `gcloud` preset (`credp preset add gcloud`), which wires a
+# Pairs with the `gcloud` pack (`credp pack add gcloud`), which wires a
 # `bearer` binding on `*.googleapis.com` and sets CLOUDSDK_AUTH_ACCESS_TOKEN to the
 # placeholder so gcloud sends `Authorization: Bearer <placeholder>` and does NOT
 # try to refresh (no token-endpoint traffic — the only intercepted host is the API

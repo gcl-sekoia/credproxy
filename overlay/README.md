@@ -21,16 +21,16 @@ mkdir overlay/acme-corp        # active immediately, labeled overlay:acme-corp
 **This repo is such a fork** — the three overlays below are its additions. To build on
 them without editing them (staying merge-clean against *this* fork), **layer instead of
 edit**: give your overlay a higher priority (earlier basename) and ship a same-named asset
-to **shadow** just the piece you want — e.g. a `presets/github-auth.toml` of your own to
+to **shadow** just the piece you want — e.g. a `packs/github-auth.toml` of your own to
 override `base`'s, or a personal `workspace.template.toml`.
 
 ## What's here
 
 This fork ships three overlays, layered foundation → policy → profile:
 
-- **[`base`](base/README.md)** — a neutral, reusable **library of preset packs**
+- **[`base`](base/README.md)** — a neutral, reusable **library of packs**
   (`proxy-ca`, `toolchain`, `claude-code`, `github-auth`, `git-signing`), each a
-  self-contained [preset](../docs/guide/06-presets.md) carrying the
+  self-contained [pack](../docs/guide/06-packs.md) carrying the
   bindings/rules/mounts/env/setup/requires/options one concern needs (`claude-code` is an
   umbrella: token + client config + session hook), plus a plain neutral
   `workspace.template.toml`. Nothing opinionated.
@@ -39,11 +39,11 @@ This fork ships three overlays, layered foundation → policy → profile:
   settings on the wire (strips org-pushed gates). Activate it when you want it.
 - **[`50-example`](50-example/README.md)** — an opinionated **profile** that *composes*
   the other two: its `workspace.template.toml` (which shadows `base`'s — the `50-` prefix
-  sorts first) declares the packs as `[[preset]]` entries and adds glue (persist volume,
+  sorts first) declares the packs as `[[pack]]` entries and adds glue (persist volume,
   a fuller tool kit, opinionated Claude client defaults). A fork-me starting point.
 
-Apply any pack à la carte with `credproxy workspace NAME preset add PACK` (see
-`credproxy preset list`); each overlay's README has the details.
+Apply any pack à la carte with `credproxy workspace NAME pack add PACK` (see
+`credproxy pack list`); each overlay's README has the details.
 
 ## Layout — inside your named overlay
 

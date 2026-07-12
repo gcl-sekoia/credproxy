@@ -44,49 +44,49 @@ mounts = [
   # { overlay = "session-context.d/example.sh", target = "/opt/session-context.d/30-example.sh" },
 ]
 
-# Preset packs — the building blocks this workspace is assembled from. `create`
-# expands each [[preset]] into ordinary config (mounts above; setup steps, [env],
-# and [[binding]]/[[rule]] blocks below, each tagged `# credproxy:preset`) and drops
-# the [[preset]] lines — so a generated <name>.toml shows only the expansion. See
-# `credproxy preset list`. (Here: proxy-ca bootstraps the CA, toolchain carries
+# Packs — the building blocks this workspace is assembled from. `create`
+# expands each [[pack]] into ordinary config (mounts above; setup steps, [env],
+# and [[binding]]/[[rule]] blocks below, each tagged `# credproxy:pack`) and drops
+# the [[pack]] lines — so a generated <name>.toml shows only the expansion. See
+# `credproxy pack list`. (Here: proxy-ca bootstraps the CA, toolchain carries
 # LANG/COLORTERM, cache carries the /cache toolchain-state volume, persist carries
 # the /persist volume + CLAUDE_CONFIG_DIR/HISTFILE.)
 
-[[preset]]
+[[pack]]
 name = "proxy-ca"           # trust the proxy CA (this image doesn't out of the box)
 
-[[preset]]
+[[pack]]
 name = "toolchain"
 
-[[preset]]
+[[pack]]
 name = "cache"              # /cache volume: regenerable toolchain state (mise/uv), readily discardable
 
-[[preset]]
+[[pack]]
 name = "persist"            # /persist volume + CLAUDE_CONFIG_DIR/HISTFILE, durable across recreates
 
 # The umbrella Claude Code pack (token + onboarding + client-settings merge + the
 # SessionStart orientation hook + keep-the-CLI-latest). Token from Bitwarden here.
-[[preset]]
+[[pack]]
 name     = "claude-code"
 provider = "bw"
 secret   = "claude-code-oauth-token"
 
-[[preset]]
+[[pack]]
 name = "github-auth"        # provider=gh-cli, secret=github.com (defaults; needs a host `gh auth login`)
 
-[[preset]]
+[[pack]]
 name = "claude-managed-settings"    # this overlay's opinionated pack: strips org-pushed setting gates
 
 # codex (opt-in): run OpenAI's Codex CLI off an injected API key (extras.list ships
 # the CLI). Neutral pack — point provider/secret at your vault, then uncomment:
-# [[preset]]
+# [[pack]]
 # name     = "codex"
 # provider = "bw"
 # secret   = "openai-api-key"
 
 # git-signing (opt-in): sign commits with a key in a forwarded ssh-agent. Create
 # the host socket dir first (bin/credproxy-signing-agent), then uncomment:
-# [[preset]]
+# [[pack]]
 # name = "git-signing"
-# [preset.options]
+# [pack.options]
 # sock_dir = "~/.ssh/credproxy-agent"

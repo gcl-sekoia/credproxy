@@ -1,12 +1,12 @@
 #!/bin/bash
-# git commit signing over a forwarded, dedicated ssh-agent (git-signing preset).
+# git commit signing over a forwarded, dedicated ssh-agent (git-signing pack).
 #
 # Two modes:
 #   --print-key : print `key::<pubkey>` read from the forwarded agent, for git's
 #                 gpg.ssh.defaultKeyCommand (git runs it fresh on every commit).
 #                 Exits 1 when the agent holds no key.
 #   (no args)   : configure git for ssh commit signing (idempotent). Run by the
-#                 git-signing preset's [[setup]] step at container setup, and safe
+#                 git-signing pack's [[setup]] step at container setup, and safe
 #                 to re-run by hand from a live workspace to (re)configure.
 #
 # Signing is DYNAMIC: user.signingkey stays UNSET and the key is derived from the

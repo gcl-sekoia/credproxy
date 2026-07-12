@@ -12,7 +12,7 @@ SETTINGS = "/api/claude_code/settings"
 # generic mechanism with NO policy of its own -- a profile supplies the real merge-patch
 # via the rule's `settings_patch` param (see the profile's [[rule]]). With the empty
 # default the rule still forces a fresh fetch but rewrites nothing, so a bare
-# `preset add` is inert until you set the param.
+# `pack add` is inert until you set the param.
 # (Claude Code rejects the whole document -- falling back to its on-disk cache -- if a
 # KNOWN settings key holds a malformed value; unknown keys are tolerated.)
 DEFAULT_PATCH = {}

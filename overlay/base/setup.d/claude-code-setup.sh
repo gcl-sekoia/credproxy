@@ -6,7 +6,7 @@
 #      config's agents/ dir.
 # Both the defaults and the agents are data (a profile mounts them — edit/shadow
 # to change policy; no logic here); base ships neither, only this mechanism.
-# Idempotent; run by the claude-code preset's [[setup]] step, as the workspace user.
+# Idempotent; run by the claude-code pack's [[setup]] step, as the workspace user.
 set -euo pipefail
 
 DEFAULTS_FILE="${CLAUDE_CODE_DEFAULTS:-/opt/claude-code/settings-defaults.json}"

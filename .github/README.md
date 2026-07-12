@@ -14,7 +14,7 @@ unchanged from upstream.
 Everything lives in [`overlay/`](../overlay/README.md), as three layered overlays:
 
 - **[`base`](../overlay/base/README.md)** — a neutral, reusable library of
-  [preset](../docs/guide/06-presets.md) packs (`proxy-ca`, `toolchain`, `claude-code`,
+  [packs](../docs/guide/06-packs.md) (`proxy-ca`, `toolchain`, `claude-code`,
   `github-auth`, `git-signing`), each carrying the bindings/rules/mounts/env/setup/requires
   it needs (`claude-code` is an umbrella: token + client config + session hook), plus a
   neutral workspace template.
@@ -25,7 +25,7 @@ Everything lives in [`overlay/`](../overlay/README.md), as three layered overlay
   composes the other two (its `workspace.template.toml` is what `credproxy create` stamps)
   and adds glue: a persist volume, a fuller tool kit, opinionated Claude defaults.
 
-Apply any pack à la carte with `credproxy workspace NAME preset add PACK`, or build your
+Apply any pack à la carte with `credproxy workspace NAME pack add PACK`, or build your
 own on top by adding a higher-priority overlay that *shadows* just the pieces you want —
 [`overlay/README.md`](../overlay/README.md) explains the fork/layer model.
 
