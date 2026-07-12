@@ -64,7 +64,7 @@ path   = "/repos/**"
 - `attach` is **mutually exclusive** with every container-lifecycle key
   (`image`, `home`, `mounts`, `env`, `setup`, `user`, `user_uid`,
   `map_host_user`, `run_flags`, `shell`, `workdir`, `enter_prelude`,
-  `exec_flags`, `auto_stop`). `load_config` rejects the mix, naming the offending
+  `exec_flags`, `forward_env`, `auto_stop`). `load_config` rejects the mix, naming the offending
   keys. `directory` and `[[binding]]`/`[[rule]]` stay valid.
 - Exactly **one** selector, validated at load:
 

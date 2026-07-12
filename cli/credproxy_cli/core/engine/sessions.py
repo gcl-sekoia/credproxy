@@ -67,6 +67,73 @@ def _count_live_sessions(ws: Workspace, exclude_pid: int | None = None) -> int:
     return count
 
 
+# Host env vars forwarded through `enter`/`exec` into the workspace when set on
+# the host (as `docker exec -e VAR`, which copies the caller's value and is a
+# no-op when the var is unset). The workspace is an isolated BYO container, so it
+# otherwise inherits NONE of the host's terminal context and tools inside see no
+# color/hyperlink/CI cues. These are presentation/capability hints, not secrets.
+#
+# This built-in set is deliberately ALWAYS-SAFE: every var is inert presentation
+# (color/hyperlink/emulator identity) -- none changes program behaviour or is a
+# per-image footgun, so forwarding the set can't silently break even a minimal
+# image. (Behaviour-flipping signals like CI are intentionally NOT here -- add
+# them per-workspace via `forward_env` if wanted.) The image-specific
+# double-edged vars (TERM -- needs a terminfo entry; LANG/LC_* --
+# need a generated locale) live in the workspace template's `forward_env`
+# instead, right next to the `image` line that decides whether they're safe, so a
+# user on a stripped-down image sees and trims a single line. `forward_env`
+# extends this set; a var explicitly pinned in config `env` is dropped (explicit
+# config wins over the ambient host value). TMUX/STY are excluded on purpose
+# (they assert "inside a multiplexer" but carry a host socket path dead in the
+# container); host-OS/editor-integration vars (WSL_DISTRO_NAME, SSH_*,
+# VSCODE_GIT_ASKPASS_MAIN, ...) are excluded as workspace-inappropriate or
+# host-path-bearing -- add any of them per-workspace via `forward_env` if wanted.
+DEFAULT_FORWARD_ENV = (
+    "COLORTERM", "FORCE_COLOR", "NO_COLOR", "FORCE_HYPERLINK",
+    "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LC_TERMINAL",
+    "KITTY_WINDOW_ID", "ZED_TERM", "VTE_VERSION", "KONSOLE_VERSION",
+    "GNOME_TERMINAL_SERVICE", "XTERM_VERSION", "TERMINATOR_UUID",
+    "TILIX_ID", "WT_SESSION", "ConEmuANSI", "ConEmuPID", "ConEmuTask",
+    "TERMINAL_EMULATOR",
+)
+
+
+def _forward_env_names(cfg: dict) -> list[str]:
+    """The env var NAMES configured to forward, in effect: the built-in
+    DEFAULT_FORWARD_ENV plus the workspace's `forward_env` extension, minus any
+    var explicitly pinned in config `env` (an explicit workspace setting beats the
+    ambient host value). Order-preserved, de-duplicated. This is the *configured*
+    set (what would forward when set on the host); `_forward_env_flags` applies the
+    runtime `os.environ` filter on top. Also the default `config` (effective) view."""
+    pinned = set((cfg.get("env") or {}).keys())
+    names: list[str] = []
+    seen: set[str] = set()
+    for var in (*DEFAULT_FORWARD_ENV, *(cfg.get("forward_env") or [])):
+        if var in pinned or var in seen:
+            continue
+        seen.add(var)
+        names.append(var)
+    return names
+
+
+def _forward_env_flags(cfg: dict) -> list[str]:
+    """The `docker exec -e VAR` flags forwarding host terminal/locale env into the
+    workspace, from `_forward_env_names` filtered to vars actually SET in our own
+    environment (`var in os.environ`).
+
+    That filter is load-bearing across runtimes: `docker exec -e VAR` (no `=value`)
+    copies the value from our env when set, but a bare name whose var is UNSET is
+    sent to the daemon verbatim, where moby treats `-e VAR` (no `=`) as *remove VAR*
+    -- so without this an unset forwarded var would CLOBBER the image-baked value
+    (e.g. a python image's `LANG`) on docker. Podman skips unset bare names, but we
+    filter ourselves so both runtimes get identical forward-if-set behaviour."""
+    flags: list[str] = []
+    for var in _forward_env_names(cfg):
+        if var in os.environ:
+            flags += ["-e", var]
+    return flags
+
+
 def _docker_exec_argv(cfg: dict, container: str, cmd_argv: list[str], *,
                       user_override: str | None, isatty: bool) -> list[str]:
     """The `docker exec` argv shared by `enter` and `exec` (so the two verbs can't
@@ -76,10 +143,11 @@ def _docker_exec_argv(cfg: dict, container: str, cmd_argv: list[str], *,
     Ordering exploits docker's last-wins flag parsing to keep credproxy in
     control of session behaviour while still honouring `user` + the `exec_flags`
     escape hatch: the default `--workdir` (config `workdir`, else `home`), then
-    config `user`, then `exec_flags` (may override -w/-u or add -e), then the
-    per-call `user_override`, then credproxy's session-control flags as EXPLICIT
-    booleans last -- so a stray -d/-t/-i in `exec_flags` can't detach the session
-    or break pidfile tracking, and a -w there still wins."""
+    config `user`, then the forwarded host terminal/locale env (`-e VAR`, see
+    `_forward_env_flags`), then `exec_flags` (may override -w/-u/-e or add more),
+    then the per-call `user_override`, then credproxy's session-control flags as
+    EXPLICIT booleans last -- so a stray -d/-t/-i in `exec_flags` can't detach the
+    session or break pidfile tracking, and a -w/-e there still wins."""
     out = ["docker", "exec"]
     # Land in `workdir` (the workspaceFolder analog), defaulting to `home`, so we
     # drop into the project/home rather than the image's WORKDIR. Emitted before
@@ -89,6 +157,9 @@ def _docker_exec_argv(cfg: dict, container: str, cmd_argv: list[str], *,
         out += ["--workdir", workdir]
     if cfg.get("user") and not user_override:
         out += ["-u", cfg["user"]]
+    # Forward host terminal/locale env before exec_flags so an explicit -e in
+    # exec_flags (or a --workdir/-u there) still wins under docker's last-wins.
+    out += _forward_env_flags(cfg)
     out += cfg.get("exec_flags") or []
     if user_override:
         out += ["-u", user_override]
@@ -158,12 +229,18 @@ def effective_config(cfg: dict) -> dict:
     mounts/env/setup, map_host_user). This additionally resolves the two fields
     whose defaults are computed at enter time, so they don't show as null when
     they actually have an effect: `workdir` -> `home`, and `enter_prelude` ->
-    the default shim snippet. The result reflects what `enter` actually does."""
+    the default shim snippet. The result reflects what `enter` actually does.
+
+    `forward_env` is shown as the full *effective* forward set (built-in
+    DEFAULT_FORWARD_ENV + the declared extras - `env`-pinned), not just the
+    declared extras -- so `config` is the one surface that reveals the built-in
+    default names (`--declared` still shows only what's in the TOML)."""
     out = dict(cfg)
     out["workdir"] = cfg.get("workdir") or cfg.get("home")
     ep = cfg.get("enter_prelude")
     out["enter_prelude"] = DEFAULT_ENTER_PRELUDE if ep is None else ep
     out["shell"] = list(cfg.get("shell") or DEFAULT_ENTER_CMD)
+    out["forward_env"] = _forward_env_names(cfg)
     # user_uid defaults to the host uid (the keep-id target when unset)
     uid = cfg.get("user_uid")
     if uid is None and hasattr(os, "getuid"):

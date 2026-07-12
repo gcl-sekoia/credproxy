@@ -47,6 +47,10 @@ import tomllib
 # safe; must start alnum.
 _VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
+# A `forward_env` entry: a plain POSIX-ish env var name. Excludes `=value`,
+# whitespace, a leading `-`, and `*` (podman's prefix-glob) in one stroke.
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 # Every top-level key a workspace TOML may carry: the container-side settings
 # load_config parses, `auto_stop` (host-side session behavior, read fresh by
 # sessions._maybe_auto_stop), and the two array-of-tables handled by their own
@@ -56,8 +60,9 @@ _VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # so a misspelled key that parses fine and does nothing is a real footgun.
 KNOWN_KEYS = frozenset({
     "image", "home", "directory", "mounts", "env", "setup", "user", "workdir",
-    "enter_prelude", "shell", "exec_flags", "run_flags", "map_host_user",
-    "user_uid", "auto_stop", "binding", "rule", "attach", "preset",
+    "enter_prelude", "shell", "exec_flags", "forward_env", "run_flags",
+    "map_host_user", "user_uid", "auto_stop", "binding", "rule", "attach",
+    "preset",
 })
 
 # The `attach` selector keys. Exactly one must be present. `compose_project` is
@@ -72,7 +77,7 @@ _ATTACH_SELECTORS = ("admin_url", "container", "discover", "compose_project")
 _ATTACH_EXCLUSIVE = frozenset({
     "image", "home", "mounts", "env", "setup", "user", "user_uid",
     "map_host_user", "run_flags", "shell", "workdir", "enter_prelude",
-    "exec_flags", "auto_stop",
+    "exec_flags", "forward_env", "auto_stop",
 })
 
 
@@ -137,8 +142,8 @@ def _attached_config(raw: dict, source: str) -> dict:
         "attach": attach, "directory": directory,
         "image": None, "home": None, "mounts": [], "env": {}, "setup": [],
         "user": None, "workdir": None, "enter_prelude": None, "shell": None,
-        "exec_flags": [], "run_flags": [], "map_host_user": False,
-        "user_uid": None, "auto_stop": False,
+        "exec_flags": [], "forward_env": [], "run_flags": [],
+        "map_host_user": False, "user_uid": None, "auto_stop": False,
     }
 
 
@@ -550,6 +555,26 @@ def load_config_from_text(text: str, source: str, *,
     if not isinstance(exec_flags, list) or not all(isinstance(f, str) for f in exec_flags):
         raise ConfigError(f"{source}: `exec_flags` must be an array of strings")
 
+    # forward_env: EXTRA host env var names forwarded through `enter`/`exec` (as
+    # `docker exec -e VAR`, forward-if-set), on top of the built-in default set
+    # (sessions.DEFAULT_FORWARD_ENV -- terminal/locale capability hints). Names
+    # only, no `VAR=value` (that's what `exec_flags` / config `env` are for), and
+    # a var explicitly pinned in config `env` is never forwarded (explicit config
+    # wins over the ambient host value). Exec-only, like `exec_flags` -> NOT part
+    # of the spec hash.
+    forward_env = raw.get("forward_env") or []
+    if not isinstance(forward_env, list) or not all(isinstance(v, str) for v in forward_env):
+        raise ConfigError(f"{source}: `forward_env` must be an array of strings")
+    for v in forward_env:
+        # A plain env var name only. This rejects `VAR=value` (use `exec_flags`/
+        # `env`), whitespace, a leading `-` (argv confusion), and crucially `*`:
+        # podman treats a trailing `*` as a prefix GLOB (`LC_*` would forward every
+        # host LC_-prefixed var), a footgun given the template seeds LC_ vars.
+        if not _ENV_NAME_RE.match(v):
+            raise ConfigError(
+                f"{source}: `forward_env` entries must be bare env var names "
+                f"(letters/digits/underscore, no `=value` or globs), got {v!r}")
+
     # workdir: directory `enter` starts in (docker exec --workdir), defaulting to
     # `home` at exec time. The workspaceFolder analog -- so `enter` lands in your
     # project (or home) rather than the image's WORKDIR. Exec-only (it's where
@@ -654,6 +679,7 @@ def load_config_from_text(text: str, source: str, *,
         "enter_prelude": enter_prelude,
         "shell": shell,
         "exec_flags": exec_flags,
+        "forward_env": forward_env,
         "run_flags": run_flags,
         "map_host_user": map_host_user,
         "user_uid": user_uid,

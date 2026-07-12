@@ -93,12 +93,19 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
     # with the proxy suite's under one rootdir). Prefer running it ON-HOST when
     # the proxy's runtime deps import there -- it skips the ~container-startup
     # tax that dominates the inner loop -- falling back to the image otherwise.
-    proxy_deps = ("mitmproxy", "aiohttp", "starlark")
+    # pytest_aiohttp is in the tuple deliberately: tests/pytest.ini sets
+    # asyncio_mode=auto, so without the plugin a partial install would take the
+    # on-host path and every async test fails with a baffling "async def not
+    # natively supported" -- treat it as a proxy dep like the rest.
+    proxy_deps = ("mitmproxy", "aiohttp", "starlark", "pytest_aiohttp")
     missing = [m for m in proxy_deps if importlib.util.find_spec(m) is None]
 
     if not force_container and not missing:
         say("running proxy suite on-host (deps present; --container forces the image)...")
-        env = {**os.environ, "PYTHONPATH": str(PROXY_DIR)}
+        # No PYTHONPATH needed: tests/conftest.py puts the proxy dir on sys.path
+        # and supplies the CREDPROXY_* contract itself, so a direct on-host run
+        # works too. (Overlay suites below still need PYTHONPATH -- no conftest.)
+        env = {**os.environ}
         host_cmd = [sys.executable, "-m", "pytest", "-v", str(TESTS_DIR),
                     "--ignore", str(TESTS_DIR / "cli")] + trailing
         # Exec the proxy suite (preserves TTY) ONLY when it is the last thing to
@@ -121,8 +128,8 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
 
     if not force_container:
         say(f"proxy deps not importable on host ({', '.join(missing)}); running the "
-            f"proxy suite in the image. Install them (see proxy/requirements.txt) "
-            f"for the faster on-host path.")
+            f"proxy suite in the image. For the faster on-host path install them "
+            f"with: uv sync --group proxy")
     meta = ImageEnv.load()
 
     # Mounts + CREDPROXY_OVERLAY_PATH rewrite for the whole overlay chain: each
