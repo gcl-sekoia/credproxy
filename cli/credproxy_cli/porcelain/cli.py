@@ -55,9 +55,9 @@ from .cmd_lifecycle import (
     do_recreate, do_resolve, do_start, do_stop,
 )
 from .cmd_mount import do_mount_add, _mount_subparsers
-from .cmd_preset import do_preset_add, do_preset_refresh, do_preset_remove
+from .cmd_pack import do_pack_add, do_pack_refresh, do_pack_remove
 from .cmd_registry import (
-    do_def_list, do_injector_api, do_injector_check, do_preset_list,
+    do_def_list, do_injector_api, do_injector_check, do_pack_list,
     do_provider_show, do_scaffold, do_scaffold_script, do_script_check,
 )
 from .cmd_rule import (
@@ -168,12 +168,12 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     rsub = rule.add_subparsers(dest="rulecmd", required=True)
     _rule_subparsers(rsub)
 
-    preset = sub.add_parser("preset")
-    psub = preset.add_subparsers(dest="presetcmd", required=True)
+    pack = sub.add_parser("pack")
+    psub = pack.add_subparsers(dest="packcmd", required=True)
     pa = psub.add_parser("add")
-    pa.add_argument("preset", metavar="PRESET")
-    # Optional: a binding-bearing preset may carry a default provider/secret; a
-    # pure-rule preset needs neither. Enforced (conditionally) in the handler.
+    pa.add_argument("pack", metavar="PACK")
+    # Optional: a binding-bearing pack may carry a default provider/secret; a
+    # pure-rule pack needs neither. Enforced (conditionally) in the handler.
     pa.add_argument("--provider", default=None)
     pa.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
     # Pack `[[option]]` values, whole-field host-half parameters (#59). Repeatable
@@ -181,12 +181,12 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     # with the structured missing error.
     pa.add_argument("--opt", action="append", metavar="ID=VALUE", default=None)
     pr = psub.add_parser("refresh")
-    # Optional PRESET: re-expand just that referenced pack (else every one).
-    pr.add_argument("preset", metavar="PRESET", nargs="?", default=None)
+    # Optional PACK: re-expand just that referenced pack (else every one).
+    pr.add_argument("pack", metavar="PACK", nargs="?", default=None)
     # Preview the diff without writing (also the CI "is anything stale" probe).
     pr.add_argument("--check", action="store_true")
     prm = psub.add_parser("remove")
-    prm.add_argument("preset", metavar="PRESET")
+    prm.add_argument("pack", metavar="PACK")
 
     return parser
 
@@ -223,14 +223,14 @@ _STRICT_HELP = (
     "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credproxy workspace NAME binding add|remove|list|test ...\n"
     "  credproxy workspace NAME rule add|remove|list|test ...   (traffic guardrails)\n"
-    "  credproxy workspace NAME preset add PRESET   (service pack: bindings + rules)\n"
+    "  credproxy workspace NAME pack add PACK   (service pack: bindings + rules)\n"
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
     "  credproxy injector scaffold NAME [--script] | list | check NAME | api\n"
     "  credproxy provider scaffold NAME | provider list | show NAME\n"
     "  credproxy script check [NAME]       (compile .star scripts before push)\n"
-    "  credproxy preset list               (service setup packs: bindings + guardrails)\n"
+    "  credproxy pack list               (service setup packs: bindings + guardrails)\n"
     "Dev harness:\n"
     "  credproxy dev build|test|reload\n"
     "\n"
@@ -260,14 +260,14 @@ _LOOSE_HELP = (
     "  credp mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
     "  credp rule add|remove|list|test ...      (traffic guardrails)\n"
-    "  credp preset add PRESET                  (service pack: bindings + rules)\n"
+    "  credp pack add PACK                  (service pack: bindings + rules)\n"
     "  credp binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
     "  credp injector scaffold NAME [--script] | list | check NAME | api\n"
     "  credp provider scaffold NAME | provider list | show NAME\n"
     "  credp script check [NAME]       (compile .star scripts before push)\n"
-    "  credp preset list               (service setup packs: bindings + guardrails)\n"
+    "  credp pack list               (service setup packs: bindings + guardrails)\n"
     "Dev harness:\n"
     "  credp dev build|test|reload\n"
     "\n"
@@ -282,7 +282,7 @@ _LOOSE_HELP = (
 _BINDING_ADD_HELP = (
     "credproxy workspace NAME binding add --injector INJ -- bind a credential\n"
     "into requests for one or more hosts. (Coordinated multi-binding sets +\n"
-    "guardrails are the `preset` noun: `workspace NAME preset add PRESET`.)\n"
+    "guardrails are the `pack` noun: `workspace NAME pack add PACK`.)\n"
     "\n"
     "  --injector INJ    how the credential is shaped into the request (bearer,\n"
     "                    basic, body, sigv4, ...). See `credproxy injector list`.\n"
@@ -301,32 +301,32 @@ _BINDING_ADD_HELP = (
     "                    `env = false`); mutually exclusive with --env.\n"
 )
 
-_PRESET_ADD_HELP = (
-    "credproxy workspace NAME preset add PRESET -- apply a service setup pack:\n"
-    "append a durable `[[preset]]` REFERENCE (with the resolved provider/secret/\n"
+_PACK_ADD_HELP = (
+    "credproxy workspace NAME pack add PACK -- apply a service setup pack:\n"
+    "append a durable `[[pack]]` REFERENCE (with the resolved provider/secret/\n"
     "options written explicitly) to the workspace TOML. The resolver expands it --\n"
     "its `[[binding]]` set, `[[rule]]` guardrails, AND container half\n"
     "(`[[mount]]`/`[env]`/`[[setup]]`) -- at resolve time and snapshots the\n"
-    "expansion in the lock. `credproxy preset list` shows every pack.\n"
+    "expansion in the lock. `credproxy pack list` shows every pack.\n"
     "\n"
-    "  --provider PROV   where binding values come from (a binding-bearing preset\n"
+    "  --provider PROV   where binding values come from (a binding-bearing pack\n"
     "                    may supply a default; a rule/container-only pack needs none).\n"
     "  --secret REF      the reference the provider resolves (see `binding add`);\n"
-    "                    may be defaulted by a preset for its default provider.\n"
+    "                    may be defaulted by a pack for its default provider.\n"
     "\n"
     "A reference, not a stamp: the expansion lives in the lock, never the TOML; a\n"
-    "changed definition is inert until `preset refresh`, but editing the block's\n"
+    "changed definition is inert until `pack refresh`, but editing the block's\n"
     "own inputs (provider/secret/options/disable/override) re-expands on the next\n"
     "resolve. A binding/rule on a host with no prior binding flips it to\n"
     "TLS-intercepted; the container half changes the workspace spec (restart to\n"
-    "apply if the container exists) -- `preset add` announces both. An attached\n"
+    "apply if the container exists) -- `pack add` announces both. An attached\n"
     "workspace refuses a container-half pack. Re-referencing the same pack is\n"
-    "refused (a `[[preset]]` block already names it).\n"
+    "refused (a `[[pack]]` block already names it).\n"
     "\n"
     "Sibling verbs:\n"
-    "  preset refresh [PRESET] [--check]   re-expand from the current definition,\n"
+    "  pack refresh [PACK] [--check]   re-expand from the current definition,\n"
     "                    diffing the locked snapshot (`--check` previews, no write).\n"
-    "  preset remove PRESET   drop the `[[preset]]` block + its lock snapshot.\n"
+    "  pack remove PACK   drop the `[[pack]]` block + its lock snapshot.\n"
 )
 
 _BINDING_TEST_HELP = (
@@ -599,8 +599,8 @@ def _verb_help(verb_argv: list[str]) -> str:
                 "Rules govern traffic on intercepted hosts (block/respond/rewrite/\n"
                 "script), credential-free. `rule test METHOD URL` dry-runs the\n"
                 "matcher. Run `rule add --help` for details.")
-    if verb == "preset":
-        return _PRESET_ADD_HELP
+    if verb == "pack":
+        return _PACK_ADD_HELP
     if verb in _VERB_HELP:
         return _VERB_HELP[verb]
     return f"usage: credproxy workspace NAME {verb}"
@@ -745,13 +745,13 @@ def _run_ws_verb(
             do_rule_list(ctx, name)
         elif rc == "test":
             do_rule_test(ctx, name, a)
-    elif verb == "preset":
-        if a.presetcmd == "add":
-            do_preset_add(ctx, name, a)
-        elif a.presetcmd == "refresh":
-            do_preset_refresh(ctx, name, a)
-        elif a.presetcmd == "remove":
-            do_preset_remove(ctx, name, a)
+    elif verb == "pack":
+        if a.packcmd == "add":
+            do_pack_add(ctx, name, a)
+        elif a.packcmd == "refresh":
+            do_pack_refresh(ctx, name, a)
+        elif a.packcmd == "remove":
+            do_pack_remove(ctx, name, a)
 
 
 # ---- loose aliases -----------------------------------------------------------
@@ -861,8 +861,8 @@ def main(loose_default: bool = False) -> None:
             _dispatch_meta(ctx, head, rest)
         elif head in ("injector", "provider"):
             _dispatch_def(ctx, head, rest)
-        elif head == "preset":
-            _dispatch_preset(ctx, rest)
+        elif head == "pack":
+            _dispatch_pack(ctx, rest)
         elif head == "script":
             _dispatch_script(ctx, rest)
         elif head == "dev":
@@ -1089,7 +1089,7 @@ def _dispatch_emit_compose(ctx: Ctx, rest: list[str]) -> None:
 
 def _dispatch_script(ctx: Ctx, rest: list[str]) -> None:
     """`script` definition commands. Today just `check [NAME]` -- compile scripts
-    before push (sibling of `injector list`/`provider list`/`preset list`)."""
+    before push (sibling of `injector list`/`provider list`/`pack list`)."""
     usage = ("usage: credproxy script check [NAME] [--container]\n"
              "Compile resolvable .star scripts in the proxy runtime (on-host when\n"
              "the Starlark deps import, else in the image). A script referenced by\n"
@@ -1111,23 +1111,23 @@ def _dispatch_script(ctx: Ctx, rest: list[str]) -> None:
     do_script_check(ctx, names[0] if names else None, force_container)
 
 
-def _dispatch_preset(ctx: Ctx, rest: list[str]) -> None:
-    # `preset` is dual-role: `list` is definitional (no workspace, both surfaces);
+def _dispatch_pack(ctx: Ctx, rest: list[str]) -> None:
+    # `pack` is dual-role: `list` is definitional (no workspace, both surfaces);
     # `add` is workspace-scoped (it references a pack in a workspace TOML). A bare
-    # `preset` or `--help` lists, since the listing IS the documentation.
+    # `pack` or `--help` lists, since the listing IS the documentation.
     if not rest or _wants_help(rest) or rest[0] == "list":
-        do_preset_list(ctx)
+        do_pack_list(ctx)
         return
     if rest[0] in ("add", "refresh", "remove"):
-        # Top-level `preset {add,refresh,remove}` is the loose implicit-workspace
-        # form; strict requires the explicit `workspace NAME preset ...`.
+        # Top-level `pack {add,refresh,remove}` is the loose implicit-workspace
+        # form; strict requires the explicit `workspace NAME pack ...`.
         if not ctx.loose:
-            fail(f"`preset {rest[0]}` needs a workspace: "
-                 f"`credproxy workspace NAME preset {rest[0]}`")
-        _run_ws_verb(ctx, None, ["preset", *rest], [])
+            fail(f"`pack {rest[0]}` needs a workspace: "
+                 f"`credproxy workspace NAME pack {rest[0]}`")
+        _run_ws_verb(ctx, None, ["pack", *rest], [])
         return
-    fail(f"unknown preset command '{rest[0]}' (usage: credproxy preset list  |  "
-         f"credproxy workspace NAME preset add|refresh|remove ...)")
+    fail(f"unknown pack command '{rest[0]}' (usage: credproxy pack list  |  "
+         f"credproxy workspace NAME pack add|refresh|remove ...)")
 
 
 def _dispatch_dev(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:

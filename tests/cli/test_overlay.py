@@ -148,7 +148,7 @@ def test_overlay_shadows_overlay_injector(xdg, tmp_path, monkeypatch):
     assert row.shadows == ("overlay:b",)
 
 
-# ---- definitions: providers / scripts / presets (shadow representative) -------
+# ---- definitions: providers / scripts / packs (shadow representative) -------
 
 
 def test_overlay_shadows_overlay_provider(xdg, tmp_path, monkeypatch):
@@ -177,37 +177,37 @@ def test_overlay_shadows_overlay_script(xdg, tmp_path, monkeypatch):
     assert row.shadows == ("overlay:b",)
 
 
-# ---- definitions: presets ----------------------------------------------------
+# ---- definitions: packs ----------------------------------------------------
 
 
-def test_overlay_preset_is_resolvable(xdg, overlay):
-    (overlay / "presets").mkdir()
-    (overlay / "presets" / "acme.toml").write_text(
+def test_overlay_pack_is_resolvable(xdg, overlay):
+    (overlay / "packs").mkdir()
+    (overlay / "packs" / "acme.toml").write_text(
         "default_provider = \"env\"\n"
         "[placeholder]\nprefix = \"acme_\"\nlength = 32\ncharset = \"hex\"\n"
         "[[part]]\nsuffix = \"api\"\ninjector = \"bearer\"\n"
         "hosts = [\"api.acme.example\"]\nenv = \"ACME_TOKEN\"\n"
     )
-    from credproxy_cli.core.model.presets import build_preset, load_presets
-    assert "acme" in load_presets()
-    assert "github" in load_presets()   # builtin still present
-    exp = build_preset("acme", "env", "ACME_TOKEN")
+    from credproxy_cli.core.model.packs import build_pack, load_packs
+    assert "acme" in load_packs()
+    assert "github" in load_packs()   # builtin still present
+    exp = build_pack("acme", "env", "ACME_TOKEN")
     assert [b.name for b in exp.bindings] == ["acme-api"]
     assert exp.bindings[0].hosts == ("api.acme.example",)
-    assert exp.rules == ()               # binding-only preset
+    assert exp.rules == ()               # binding-only pack
 
 
-def test_overlay_shadows_overlay_preset(xdg, tmp_path, monkeypatch):
-    a = tmp_path / "a"; (a / "presets").mkdir(parents=True)
-    b = tmp_path / "b"; (b / "presets").mkdir(parents=True)
+def test_overlay_shadows_overlay_pack(xdg, tmp_path, monkeypatch):
+    a = tmp_path / "a"; (a / "packs").mkdir(parents=True)
+    b = tmp_path / "b"; (b / "packs").mkdir(parents=True)
     body = ("[placeholder]\nprefix = \"p_\"\nlength = 16\ncharset = \"hex\"\n"
             "[[part]]\nsuffix = \"api\"\ninjector = \"bearer\"\nhosts = [\"h.example\"]\n")
-    (a / "presets" / "pack.toml").write_text(body)
-    (b / "presets" / "pack.toml").write_text(body)
+    (a / "packs" / "pack.toml").write_text(body)
+    (b / "packs" / "pack.toml").write_text(body)
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
-    from credproxy_cli.core.model.presets import load_preset_sources, describe_presets
-    assert load_preset_sources()["pack"] == "overlay:a"
-    row = next(r for r in describe_presets() if r["name"] == "pack")
+    from credproxy_cli.core.model.packs import load_pack_sources, describe_packs
+    assert load_pack_sources()["pack"] == "overlay:a"
+    row = next(r for r in describe_packs() if r["name"] == "pack")
     assert row["shadows"] == ["overlay:b"]
 
 

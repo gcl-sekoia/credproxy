@@ -2,7 +2,7 @@
 
 The workspace TOML is the hand-authored intent file (comments sacred); every
 value credproxy GENERATES lives here instead, so the CLI never has to rewrite
-inside the user's file. `placeholders` (#62) and `presets` (#63) are written by
+inside the user's file. `placeholders` (#62) and `packs` (#63) are written by
 the MODEL-plane resolver; `applied` (#65 -- last-applied container spec, pushed
 bindings/rules metadata, the pushed `config_generation`, and the setup-completed
 container id) is written by the ENGINE plane at push/start/setup success points.
@@ -13,7 +13,7 @@ preserves EVERY top-level key it reads -- including ones this version doesn't
 know about -- so any section round-trips unclobbered through a code path that
 only touches another. That round-trip is what lets the two writers coexist: the
 resolver's `save_lock` preserves `applied`, and an engine `update("applied", ...)`
-preserves `placeholders`/`presets`, provided both writes happen under the SAME
+preserves `placeholders`/`packs`, provided both writes happen under the SAME
 held workspace flock (so neither reads a stale file).
 """
 from __future__ import annotations
@@ -79,7 +79,7 @@ def update(ws: "Workspace", section: str, value) -> None:
     every other top-level key, then write it back atomically.
 
     The narrow API the ENGINE routes its `applied` writes through, so an engine
-    write and the resolver's `save_lock` (placeholders/presets) never clobber
+    write and the resolver's `save_lock` (placeholders/packs) never clobber
     each other: each reads the file, replaces just its own section, and writes
     every other section back verbatim. Callers already hold the workspace flock,
     so the read-modify-write is race-free within that held section."""

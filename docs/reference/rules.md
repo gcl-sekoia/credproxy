@@ -53,11 +53,11 @@ the workspace gets `502 credproxy: rule 'NAME' failed`, never a proceed-un-gover
 
 That declaration order spans both sources of rules: the resolver builds the
 effective rule list as **literal `[[rule]]` blocks first, then the rules a
-`[[preset]]` reference expands to, in `[[preset]]` declaration order** (a preset
+`[[pack]]` reference expands to, in `[[pack]]` declaration order** (a pack
 is a durable reference the resolver expands — see
 [`configuration.md`](configuration.md)). So a literal rule always evaluates
-before a preset-supplied one on the same host, and two preset packs evaluate in
-the order their `[[preset]]` blocks appear. Order your `[[preset]]` blocks
+before a pack-supplied one on the same host, and two pack packs evaluate in
+the order their `[[pack]]` blocks appear. Order your `[[pack]]` blocks
 accordingly when two packs govern overlapping traffic.
 
 ## Interception is a union — a rule can flip a host to intercepted
@@ -336,19 +336,19 @@ def on_request():
   JSON-clean (strings, numbers, booleans, arrays, tables), since they ride the
   `/admin/config` push.
 
-### Distributing a policy: script + preset
+### Distributing a policy: script + pack
 
 A shared script plus per-rule params is only half the story — the other half is
-*wiring it into a workspace in one command*. That's the **preset**: a preset's
+*wiring it into a workspace in one command*. That's the **pack**: a pack's
 optional `[[rule]]` array ships the guardrails alongside (or instead of) a
-credential's bindings, so `credproxy workspace NAME preset add org-guardrails`
+credential's bindings, so `credproxy workspace NAME pack add org-guardrails`
 applies the whole policy — hosts, params, visibility — in one move (a durable
-`[[preset]]` reference the resolver expands). An org overlay
-ships the `.star` under `scripts/` and the pack under `presets/` in the same
-overlay, and every workspace applies it identically. See the preset section in
+`[[pack]]` reference the resolver expands). An org overlay
+ships the `.star` under `scripts/` and the pack under `packs/` in the same
+overlay, and every workspace applies it identically. See the pack section in
 [`configuration.md`](configuration.md#bindings) and [`overlays.md`](../advanced/overlays.md);
-a preset `[[rule]]` is a standard rule with a `suffix` (→ `name`
-`<preset>-<suffix>`) and full `[rule.params]` support.
+a pack `[[rule]]` is a standard rule with a `suffix` (→ `name`
+`<pack>-<suffix>`) and full `[rule.params]` support.
 
 ## What the workspace sees
 

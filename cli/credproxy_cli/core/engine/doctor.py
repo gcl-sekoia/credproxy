@@ -161,7 +161,7 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
     out += binding_checks
     out += _script_compile_checks(ws)
     out += _rule_checks(ws)
-    out += _preset_requires_checks(ws, fetch=fetch, fetched_refs=fetched_refs)
+    out += _pack_requires_checks(ws, fetch=fetch, fetched_refs=fetched_refs)
     out += _proxy_config_sync_check(ws)
     return out
 
@@ -299,7 +299,7 @@ def _binding_checks(ws: Workspace, *, fetch: bool) -> tuple[list[Check], dict]:
     the layer-2 parse, so it means only "also fetch", never a different verdict.
 
     Returns `(checks, fetched)` where `fetched` maps `{(provider, ref): ok}` for
-    every binding secret this run already fetched -- the preset-requires layer
+    every binding secret this run already fetched -- the pack-requires layer
     reads it to avoid re-invoking a provider it just called (finding 4). Empty
     unless `fetch`."""
     out: list[Check] = []
@@ -318,7 +318,7 @@ def _binding_checks(ws: Workspace, *, fetch: bool) -> tuple[list[Check], dict]:
 
     # Layer 2: the authoritative parse+validate. Reuse its result for --fetch so a
     # parse failure can't yield a different exit code with vs. without --fetch.
-    # Goes through `resolve_workspace` (config-v2), so preset-EXPANDED bindings are
+    # Goes through `resolve_workspace` (config-v2), so pack-EXPANDED bindings are
     # validated + fetched as ordinary bindings -- no special-casing.
     from ..model.bindings import test_bindings
     from ..model.resolver import resolve_workspace
@@ -340,7 +340,7 @@ def _binding_checks(ws: Workspace, *, fetch: bool) -> tuple[list[Check], dict]:
                            f"[{ws.name}] {r.name}: secret resolved ({r.value_len} chars)")
                        if r.ok else
                        _fail(f"ws:{ws.name}:{r.name}:fetch", f"[{ws.name}] {r.name}: {r.error}"))
-        # Record each fetched (provider, first-ref) -> ok so the preset-requires
+        # Record each fetched (provider, first-ref) -> ok so the pack-requires
         # layer can reuse the outcome rather than re-invoking the provider
         # (finding 4). `test_bindings` keeps input order, so zip is 1:1.
         for b, r in zip(bs, results):
@@ -382,17 +382,17 @@ def _probe_bindings_raw(ws: Workspace, bindings: list, out: list[Check]) -> None
                         out.append(_fail(f"{bid}:host[{j}]", f"[{ws.name}] {label}: {err}"))
 
 
-def _preset_requires_checks(ws: Workspace, *, fetch: bool,
+def _pack_requires_checks(ws: Workspace, *, fetch: bool,
                             fetched_refs: dict | None = None) -> list[Check]:
-    """Re-run each referenced preset's declarative `[[requires]]` host-prereq
-    checks (#58) -- the authoritative side (`preset add`/`create` are advisory).
+    """Re-run each referenced pack's declarative `[[requires]]` host-prereq
+    checks (#58) -- the authoritative side (`pack add`/`create` are advisory).
 
-    Discovery is via the workspace's `[[preset]]` references + the lock (config-v2),
+    Discovery is via the workspace's `[[pack]]` references + the lock (config-v2),
     not provenance comments. For each still-resolvable pack, re-run its checks; a
     reference naming a pack that no longer resolves in the registry is a
     skip-with-note (`ok=True`). A pack whose lock snapshot's `definition_rev` no
     longer matches the current definition surfaces a passing note (run
-    `preset refresh`).
+    `pack refresh`).
 
     The `provider` kind checks the provider CHOSEN at reference time, recovered from
     the pack's lock snapshot (or the ref's own provider). A `fetch=true` check runs
@@ -400,8 +400,8 @@ def _preset_requires_checks(ws: Workspace, *, fetch: bool,
     provider check -- so a nameless `doctor` scan-all never invokes a provider."""
     from ..model import prereqs
     from ..model.lock import load_lock
-    from ..model.presets import (
-        load_presets, parse_preset_refs, resolve_preset_credential,
+    from ..model.packs import (
+        load_packs, parse_pack_refs, resolve_pack_credential,
         resolve_requires_for_check,
     )
 
@@ -411,77 +411,77 @@ def _preset_requires_checks(ws: Workspace, *, fetch: bool,
     except (OSError, tomllib.TOMLDecodeError):
         return []
     try:
-        refs = parse_preset_refs(raw, source)
+        refs = parse_pack_refs(raw, source)
     except CredproxyError:
         return []   # the :bindings check already reported the malformed reference
     if not refs:
         return []
 
-    # `load_presets()` raises `ConfigError` on the FIRST unparseable registry
+    # `load_packs()` raises `ConfigError` on the FIRST unparseable registry
     # `.toml` -- report it as a failing check rather than aborting the sweep.
     try:
-        presets = load_presets()
+        packs = load_packs()
     except CredproxyError as e:
-        return [_fail(f"ws:{ws.name}:presets:load",
-                      f"[{ws.name}] preset registry failed to load: {e}",
-                      "fix or remove the malformed preset file in the registry")]
+        return [_fail(f"ws:{ws.name}:packs:load",
+                      f"[{ws.name}] pack registry failed to load: {e}",
+                      "fix or remove the malformed pack file in the registry")]
 
-    lock_presets = load_lock(ws).get("presets", {})
+    lock_packs = load_lock(ws).get("packs", {})
 
     out: list[Check] = []
     for ref in refs:
         pack = ref.name
-        spec = presets.get(pack)
+        spec = packs.get(pack)
         if spec is None:
             out.append(Check(
-                f"ws:{ws.name}:preset:{pack}", True,
-                f"[{ws.name}] preset '{pack}' is referenced but no longer resolves "
+                f"ws:{ws.name}:pack:{pack}", True,
+                f"[{ws.name}] pack '{pack}' is referenced but no longer resolves "
                 f"in the registry -- prerequisite checks skipped",
                 "the reference still works from the lock snapshot; reinstall the "
                 "pack to re-check its prerequisites"))
             continue
 
-        entry = lock_presets.get(pack) if isinstance(lock_presets, dict) else None
+        entry = lock_packs.get(pack) if isinstance(lock_packs, dict) else None
         if isinstance(entry, dict) and entry.get("definition_rev") != spec.rev:
             out.append(_ok(
-                f"ws:{ws.name}:preset:{pack}:changed",
-                f"[{ws.name}] preset '{pack}' definition changed since the lock "
-                f"snapshot -- run `credproxy workspace {ws.name} preset refresh`"))
+                f"ws:{ws.name}:pack:{pack}:changed",
+                f"[{ws.name}] pack '{pack}' definition changed since the lock "
+                f"snapshot -- run `credproxy workspace {ws.name} pack refresh`"))
 
         if not spec.requires:
             continue
 
         provider, secret = _ref_credential(spec, ref, entry)
-        # Options feeding a requires path live in the intent file (`[preset.options]`)
+        # Options feeding a requires path live in the intent file (`[pack.options]`)
         # or default -- always recoverable, so no skip-with-note is needed for them.
         resolved_requires, skipped = resolve_requires_for_check(spec, ref.options)
         for j, rq in enumerate(skipped):
             out.append(Check(
-                f"ws:{ws.name}:preset:{pack}:requires-opt[{j}]", True,
-                f"[{ws.name}] preset '{pack}' requires ({rq.kind}): path option "
+                f"ws:{ws.name}:pack:{pack}:requires-opt[{j}]", True,
+                f"[{ws.name}] pack '{pack}' requires ({rq.kind}): path option "
                 f"'{rq.path_option}' has no value or default -- check skipped",
-                f"supply it in the `[preset.options]` of the `[[preset]]` block "
+                f"supply it in the `[pack.options]` of the `[[pack]]` block "
                 f"(or give the option a default)"))
         results = prereqs.evaluate(resolved_requires, provider=provider,
                                    secret=_secret_ref(secret), do_fetch=fetch,
                                    fetched_refs=fetched_refs)
         for i, r in enumerate(results):
-            cid = f"ws:{ws.name}:preset:{pack}:requires[{i}]"
-            msg = f"[{ws.name}] preset '{pack}' requires ({r.kind}): {r.detail}"
+            cid = f"ws:{ws.name}:pack:{pack}:requires[{i}]"
+            msg = f"[{ws.name}] pack '{pack}' requires ({r.kind}): {r.detail}"
             out.append(_ok(cid, msg) if r.ok else Check(cid, False, msg, r.hint))
     return out
 
 
 def _ref_credential(spec, ref, entry) -> tuple[str | None, object]:
-    """The (provider, secret) a preset reference resolves to: the lock snapshot's
+    """The (provider, secret) a pack reference resolves to: the lock snapshot's
     first binding (authoritative -- what was recorded at reference time), else the
     ref's own provider/secret with pack defaults applied. (None, None) for a pack
     with no bindings."""
-    from ..model.presets import resolve_preset_credential
+    from ..model.packs import resolve_pack_credential
     if isinstance(entry, dict):
         for b in entry.get("expansion", {}).get("bindings", []):
             return b.get("provider"), b.get("secret")
-    provider, secret, _missing = resolve_preset_credential(
+    provider, secret, _missing = resolve_pack_credential(
         spec, ref.provider, ref.secret)
     return provider, secret
 

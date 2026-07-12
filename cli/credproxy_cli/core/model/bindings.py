@@ -625,7 +625,7 @@ def _render_binding_block(binding: Binding) -> str:
 
 def append_bindings(ws: Workspace, bindings: list[Binding]) -> None:
     """Append one or more `[[binding]]` blocks in a SINGLE write, so a
-    multi-binding add (e.g. a preset) lands atomically rather than leaving a
+    multi-binding add (e.g. a pack) lands atomically rather than leaving a
     partial set on a mid-loop failure."""
     text = ws.config_path.read_text()
     if text and not text.endswith("\n"):

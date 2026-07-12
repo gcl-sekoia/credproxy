@@ -63,13 +63,13 @@ to. A binding is what makes a credential actually work inside a workspace.
 *Example:* "use the `env` provider's `GITHUB_TOKEN`, send it as a `bearer`
 token, but only to `api.github.com`."
 
-### Preset
+### Pack
 
 A ready-made set of bindings (and optional rules) for one service, so you do not
 have to wire each host by hand. One credential often needs different injectors on
 different hosts of the same service.
 
-*Example:* the `github` preset creates three bindings from one token: `bearer`
+*Example:* the `github` pack creates three bindings from one token: `bearer`
 on `api.github.com`, `basic` on `github.com`, and `basic` on `ghcr.io`.
 
 ### Rule
@@ -84,7 +84,7 @@ tool in the workspace cannot delete a repository.
 ### Overlay
 
 A folder where your team can ship its own defaults, providers, injectors, and
-presets without changing credproxy's code. credproxy searches your overlays
+packs without changing credproxy's code. credproxy searches your overlays
 before its built-in definitions.
 
 *Example:* your team ships an overlay with a `vault` provider and a custom

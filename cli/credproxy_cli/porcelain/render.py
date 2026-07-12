@@ -30,7 +30,7 @@ def say(msg: str) -> None:
 
 
 def _say_push_hint(ws: str, attached: bool) -> None:
-    """The follow-up hint after a config edit (binding/rule/preset add): how to
+    """The follow-up hint after a config edit (binding/rule/pack add): how to
     get it onto the proxy. Managed workspaces hint `start` (which pushes);
     ATTACHED workspaces have no `start` -- their verb is `push` (`apply` is its
     alias there, so mentioning it stays correct on both)."""
@@ -158,7 +158,7 @@ class Renderer:
         summary = "  →  ".join(f"{label} ({totals[label]})" for label in labels)
         print("registries  (resolution order, effective counts)")
         print(f"  {summary}")
-        for kind in ("injectors", "providers", "scripts", "presets"):
+        for kind in ("injectors", "providers", "scripts", "packs"):
             t = regs[kind]
             detail = "   ".join(f"{label}={t[label]}" for label in labels)
             print(f"  {kind:<18}{detail}")
@@ -170,14 +170,14 @@ class Renderer:
 
     # -- create / use / generic name ack --
     def created(self, name: str, path: str, attached: bool = False,
-                presets: list[dict] | None = None) -> None:
+                packs: list[dict] | None = None) -> None:
         print(f"created workspace '{name}' at {path}")
-        # Template-declared `[[preset]]` entries (#57) were expanded and stamped
-        # into the fresh config -- announce each like `preset add` does (no
+        # Template-declared `[[pack]]` entries (#57) were expanded and stamped
+        # into the fresh config -- announce each like `pack add` does (no
         # recreate/push hint; the create hint below covers the follow-up).
-        for p in (presets or []):
-            self._preset_summary(
-                name, p["preset"], p["bindings"], p["rules"],
+        for p in (packs or []):
+            self._pack_summary(
+                name, p["pack"], p["bindings"], p["rules"],
                 p["newly_intercepted"], p["mounts"], p["env"],
                 p["setup"], p.get("requires"))
         # An ATTACHED workspace has no `start` (its containers are external);
@@ -383,7 +383,7 @@ class Renderer:
             _say_push_hint(ws, attached=True)
 
     def bindings_added(self, ws: str, rows: list[dict]) -> None:
-        """Several bindings added in one command (a preset expansion). Human mode
+        """Several bindings added in one command (a pack expansion). Human mode
         prints each; the JSON renderer emits a SINGLE object (one command -> one
         JSON value, not one per binding)."""
         for b in rows:
@@ -599,13 +599,13 @@ class Renderer:
         elif not info.get("description"):
             print("  (this provider implements neither describe nor help)")
 
-    # -- preset list --
-    def preset_list(self, rows: list[dict]) -> None:
+    # -- pack list --
+    def pack_list(self, rows: list[dict]) -> None:
         if not rows:
-            print("no presets")
+            print("no packs")
             return
         print("Service setup packs (bindings + guardrails). Apply with:")
-        print("  credproxy workspace NAME preset add NAME [--provider P --secret REF]")
+        print("  credproxy workspace NAME pack add NAME [--provider P --secret REF]")
         for p in rows:
             mounts = p.get("mounts") or []
             penv = p.get("env") or []
@@ -645,13 +645,13 @@ class Renderer:
                 print(f"  note: option(s) referenced by no marker (inert): "
                       f"{', '.join(unref)}")
 
-    def _preset_summary(self, ws: str, preset: str, bindings: list[dict],
+    def _pack_summary(self, ws: str, pack: str, bindings: list[dict],
                         rules: list[dict], newly_intercepted: list[str],
                         mounts: list[dict], env: list[dict],
                         setup: list[dict],
                         requires: list[dict] | None = None) -> None:
-        """The per-preset summary (header + item lines + newly-intercepted
-        advisory), shared by `preset_applied` and `create`'s
+        """The per-pack summary (header + item lines + newly-intercepted
+        advisory), shared by `pack_applied` and `create`'s
         per-entry announcement. No push hint / recreate warning -- those are the
         caller's (they differ between add and create)."""
         nb, nr = len(bindings), len(rules)
@@ -662,7 +662,7 @@ class Renderer:
             parts.append(f"{len(env)} env var(s)")
         if setup:
             parts.append(f"{len(setup)} setup step(s)")
-        print(f"applied preset '{preset}' to workspace '{ws}': " + ", ".join(parts))
+        print(f"applied pack '{pack}' to workspace '{ws}': " + ", ".join(parts))
         for b in bindings:
             print(f"  binding {b['name']:<16} {b['injector']:<7} "
                   f"{', '.join(b['hosts'])}")
@@ -696,7 +696,7 @@ class Renderer:
             say(f"{len(unmet)} unmet prerequisite(s) above -- fix them, then "
                 f"`credproxy doctor {ws}` to re-check")
 
-    def preset_applied(self, ws: str, preset: str, bindings: list[dict],
+    def pack_applied(self, ws: str, pack: str, bindings: list[dict],
                        rules: list[dict], newly_intercepted: list[str],
                        mounts: list[dict] | None = None,
                        env: list[dict] | None = None,
@@ -704,7 +704,7 @@ class Renderer:
                        recreate: bool = False,
                        attached: bool = False,
                        requires: list[dict] | None = None) -> None:
-        self._preset_summary(ws, preset, bindings, rules, newly_intercepted,
+        self._pack_summary(ws, pack, bindings, rules, newly_intercepted,
                              mounts or [], env or [],
                              setup or [], requires or [])
         if recreate:
@@ -712,27 +712,27 @@ class Renderer:
                 f"restart to apply: credproxy workspace {ws} start")
         _say_push_hint(ws, attached)
 
-    # -- preset refresh --
-    def preset_refreshed(self, ws: str, presets: list[dict], *,
+    # -- pack refresh --
+    def pack_refreshed(self, ws: str, packs: list[dict], *,
                          check: bool = False,
                          newly_intercepted: list[str] | None = None,
                          recreate: bool = False,
                          attached: bool = False,
                          written: bool = False) -> None:
-        if not presets:
-            print(f"no presets referenced in workspace '{ws}'")
+        if not packs:
+            print(f"no packs referenced in workspace '{ws}'")
             return
         any_changed = False
-        for p in presets:
+        for p in packs:
             if not p["changed"]:
-                print(f"preset '{p['preset']}': up to date")
+                print(f"pack '{p['pack']}': up to date")
                 continue
             any_changed = True
             actions: dict[str, int] = {}
             for e in p["entries"]:
                 actions[e["action"]] = actions.get(e["action"], 0) + 1
             summary = ", ".join(f"{n} {a}" for a, n in actions.items())
-            print(f"preset '{p['preset']}': {summary}")
+            print(f"pack '{p['pack']}': {summary}")
             for e in p["entries"]:
                 print(f"  {e['kind']} {e['name']}  {e['action']}")
                 if e.get("diff"):
@@ -752,7 +752,7 @@ class Renderer:
                     "--check to apply")
         elif any_changed:
             say("to keep a hand change across a refresh, express it as `disable` "
-                "or `[preset.override.<suffix>]` in the `[[preset]]` block")
+                "or `[pack.override.<suffix>]` in the `[[pack]]` block")
             _say_push_hint(ws, attached)
         elif written:
             # The lock was rewritten even though no expansion changed -- a
@@ -760,8 +760,8 @@ class Renderer:
             # drift note. Say so, so "up to date" isn't read as "nothing happened".
             say("definition rev updated (expansion unchanged)")
 
-    # -- preset remove --
-    def preset_removed(self, ws: str, preset: str, bindings: list[dict],
+    # -- pack remove --
+    def pack_removed(self, ws: str, pack: str, bindings: list[dict],
                        rules: list[dict], no_longer_intercepted: list[str],
                        mounts: list[dict], env: list[dict], setup: list[dict],
                        recreate: bool = False, attached: bool = False) -> None:
@@ -772,7 +772,7 @@ class Renderer:
             parts.append(f"{len(env)} env var(s)")
         if setup:
             parts.append(f"{len(setup)} setup step(s)")
-        print(f"removed preset '{preset}' from workspace '{ws}': "
+        print(f"removed pack '{pack}' from workspace '{ws}': "
               + ", ".join(parts) + " left the effective model")
         for b in bindings:
             print(f"  binding {b['name']:<16} {b['injector']:<7} "
@@ -808,8 +808,8 @@ class JsonRenderer(Renderer):
 
     def error(self, exc: Exception) -> None:
         obj = {"type": type(exc).__name__, "message": str(exc)}
-        # An exception may attach structured fields (e.g. PresetTemplateError's
-        # {preset, missing}) so a --json consumer gets the shape, not just prose.
+        # An exception may attach structured fields (e.g. PackTemplateError's
+        # {pack, missing}) so a --json consumer gets the shape, not just prose.
         extra = getattr(exc, "json_fields", None)
         if isinstance(extra, dict):
             obj.update(extra)
@@ -822,13 +822,13 @@ class JsonRenderer(Renderer):
         self._emit(d)
 
     def created(self, name: str, path: str, attached: bool = False,
-                presets: list[dict] | None = None) -> None:
-        # `presets` announce entries carry NO binding `placeholder`: `create`
+                packs: list[dict] | None = None) -> None:
+        # `packs` announce entries carry NO binding `placeholder`: `create`
         # writes no lock, so the shared placeholder is minted only at the first
-        # persisting resolve (`_expand_template_presets` strips the sentinel).
+        # persisting resolve (`_expand_template_packs` strips the sentinel).
         obj = {"name": name, "config_path": path}
-        if presets:
-            obj["presets"] = presets
+        if packs:
+            obj["packs"] = packs
         self._emit(obj)
 
     def used(self, name: str) -> None:
@@ -942,10 +942,10 @@ class JsonRenderer(Renderer):
     def def_list(self, kind: str, rows: list[dict]) -> None:
         self._emit(rows)
 
-    def preset_list(self, rows: list[dict]) -> None:
+    def pack_list(self, rows: list[dict]) -> None:
         self._emit(rows)
 
-    def preset_applied(self, ws: str, preset: str, bindings: list[dict],
+    def pack_applied(self, ws: str, pack: str, bindings: list[dict],
                        rules: list[dict], newly_intercepted: list[str],
                        mounts: list[dict] | None = None,
                        env: list[dict] | None = None,
@@ -953,30 +953,30 @@ class JsonRenderer(Renderer):
                        recreate: bool = False,
                        attached: bool = False,
                        requires: list[dict] | None = None) -> None:
-        self._emit({"workspace": ws, "preset": preset, "bindings": bindings,
+        self._emit({"workspace": ws, "pack": pack, "bindings": bindings,
                     "rules": rules, "newly_intercepted": newly_intercepted,
                     "mounts": mounts or [], "env": env or [],
                     "setup": setup or [],
                     "recreate": recreate, "requires": requires or []})
 
-    def preset_refreshed(self, ws: str, presets: list[dict], *,
+    def pack_refreshed(self, ws: str, packs: list[dict], *,
                          check: bool = False,
                          newly_intercepted: list[str] | None = None,
                          recreate: bool = False,
                          attached: bool = False,
                          written: bool = False) -> None:
         # `written` is the "did the lock file mutate?" signal, DISTINCT from a
-        # per-preset `changed` (expansion changed): a definition-rev-only edit
+        # per-pack `changed` (expansion changed): a definition-rev-only edit
         # rewrites the lock while every `changed` stays false.
-        self._emit({"workspace": ws, "check": check, "presets": presets,
+        self._emit({"workspace": ws, "check": check, "packs": packs,
                     "newly_intercepted": newly_intercepted or [],
                     "recreate": recreate, "written": written})
 
-    def preset_removed(self, ws: str, preset: str, bindings: list[dict],
+    def pack_removed(self, ws: str, pack: str, bindings: list[dict],
                        rules: list[dict], no_longer_intercepted: list[str],
                        mounts: list[dict], env: list[dict], setup: list[dict],
                        recreate: bool = False, attached: bool = False) -> None:
-        self._emit({"workspace": ws, "removed": preset, "bindings": bindings,
+        self._emit({"workspace": ws, "removed": pack, "bindings": bindings,
                     "rules": rules,
                     "no_longer_intercepted": no_longer_intercepted,
                     "mounts": mounts, "env": env, "setup": setup,

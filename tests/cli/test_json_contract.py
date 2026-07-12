@@ -41,16 +41,16 @@ def test_json_confirm_prompt_goes_to_stderr_not_stdout(xdg, workspaces_dir):
     assert 'Delete workspace "w"' in err                       # prompt on stderr
 
 
-def test_json_preset_emits_single_object(xdg, workspaces_dir):
-    """`preset add` expands to several bindings/rules but is one command, so
+def test_json_pack_emits_single_object(xdg, workspaces_dir):
+    """`pack add` expands to several bindings/rules but is one command, so
     --json must emit ONE object, not one per binding."""
     assert _run(["workspace", "create", "w"])[0] == 0
-    code, out, err = _run(["--json", "workspace", "w", "preset", "add", "github"])
+    code, out, err = _run(["--json", "workspace", "w", "pack", "add", "github"])
     assert code == 0, out + err
     obj = json.loads(out)                            # parses as a SINGLE value
-    assert obj["workspace"] == "w" and obj["preset"] == "github"
-    assert len(obj["bindings"]) == 3                 # github preset -> 3 bindings
-    assert obj["rules"] == []                        # binding-only builtin preset
+    assert obj["workspace"] == "w" and obj["pack"] == "github"
+    assert len(obj["bindings"]) == 3                 # github pack -> 3 bindings
+    assert obj["rules"] == []                        # binding-only builtin pack
     assert "newly_intercepted" in obj
 
 

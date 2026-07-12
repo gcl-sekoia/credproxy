@@ -26,7 +26,7 @@ read -- #65 folded the old per-file artifacts into `lock.json`):
 
 All `applied` writes go through the model plane's `lock.update("applied", ...)`
 (load-modify-write the whole lock), so they preserve the resolver's
-`placeholders`/`presets` and vice versa -- sequenced AFTER any resolver
+`placeholders`/`packs` and vice versa -- sequenced AFTER any resolver
 `save_lock` within the same held workspace flock so neither reads a stale file.
 """
 from __future__ import annotations
@@ -83,7 +83,7 @@ def list_workspaces() -> list[WorkspaceStatus]:
 # The old per-file artifacts (applied-spec.json / applied-bindings.json /
 # applied-rules.json / setup_done) are folded into `lock.json`'s `applied`
 # section (#65). Every write merges into that section via lock.update, which
-# load-modify-writes the WHOLE lock so the resolver's placeholders/presets are
+# load-modify-writes the WHOLE lock so the resolver's placeholders/packs are
 # preserved; every read tolerates a missing lock/section (== "nothing applied").
 
 
@@ -101,7 +101,7 @@ def _load_applied(ws: Workspace) -> dict:
 
 def _update_applied(ws: Workspace, **fields) -> None:
     """Merge `fields` into the lock's `applied` section, preserving the resolver's
-    placeholders/presets (and any applied keys not being written) by routing
+    placeholders/packs (and any applied keys not being written) by routing
     through lock.update (load-modify-write of the whole lock). Callers hold the
     workspace flock and have already persisted any dirty resolver lock, so this
     reads a fresh file and clobbers nothing."""
@@ -176,7 +176,7 @@ def _load_applied_rules(ws: Workspace) -> list[dict] | None:
 
 def create_workspace_files(ws: Workspace, text: str | None = None) -> None:
     """Scaffold a managed workspace's config + auth token. `text` overrides the
-    rendered template (used by `create` after in-memory `[[preset]]` expansion, so
+    rendered template (used by `create` after in-memory `[[pack]]` expansion, so
     the write is a single atomic step -- all-or-nothing)."""
     if ws.exists():
         raise WorkspaceError(
@@ -194,7 +194,7 @@ def create_attached_workspace_files(ws: Workspace, selector: dict,
     (already-validated, normalized) selector, plus the auth token. The token is
     still host-owned -- it authenticates the config push to the externally-run
     proxy exactly as for a managed workspace. `text` overrides the rendered
-    template (post-`[[preset]]`-expansion; single atomic write)."""
+    template (post-`[[pack]]`-expansion; single atomic write)."""
     from ..model.config import render_attach_template
 
     if ws.exists():
@@ -1064,7 +1064,7 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
     if not ws.exists():
         raise WorkspaceError(f"workspace '{ws.name}' not found")
 
-    # `resolved.config` folds in any `[[preset]]` container half (config-v2), so
+    # `resolved.config` folds in any `[[pack]]` container half (config-v2), so
     # drift compares the effective set (binds existence-checked like `start`).
     resolved = resolve_workspace(ws, check_bind_exists=True)
     cfg = resolved.config

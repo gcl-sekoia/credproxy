@@ -27,7 +27,7 @@ Read these in order the first time.
   GitHub token that works inside the container while the secret stays out.
 - [05 · Secret managers](guide/05-secret-managers.md) — beyond `env`: 1Password,
   the macOS Keychain, Bitwarden, and the `gh` CLI as credential sources.
-- [06 · Presets](guide/06-presets.md) — wire a whole service with one command.
+- [06 · Packs](guide/06-packs.md) — wire a whole service with one command.
 - [07 · Rules](guide/07-rules.md) — block, stub, and rewrite traffic as
   guardrails, no credential involved.
 - [08 · Going further](guide/08-going-further.md) — many workspaces, mounts,

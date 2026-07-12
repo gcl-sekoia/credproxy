@@ -75,7 +75,7 @@ def overlay_dirs() -> list[tuple[str, Path]]:
     """The ordered org *overlays*, most specific first -- the middle tier(s)
     between the end-user's XDG config and the in-package `builtin` defaults. Each
     holds an org's customized scaffold and definitions (injectors/providers/
-    scripts/presets) -- see docs/advanced/overlays.md.
+    scripts/packs) -- see docs/advanced/overlays.md.
 
     `CREDPROXY_OVERLAY_PATH` is an `os.pathsep`-separated list of dirs, searched
     leftmost-first (PATH semantics); it REPLACES the default entirely. Unset
@@ -141,8 +141,8 @@ def builtin_scripts_dir() -> Path:
     return BUILTIN_DIR / "scripts"
 
 
-def builtin_presets_dir() -> Path:
-    return BUILTIN_DIR / "presets"
+def builtin_packs_dir() -> Path:
+    return BUILTIN_DIR / "packs"
 
 
 # Singleton distribution assets (one file; a higher tier overrides it).
@@ -166,7 +166,7 @@ def resolve_singleton(filename: str) -> Path | None:
 
 def layered_dirs(kind: str) -> list[tuple[str, Path]]:
     """The ordered search path for a *registry* asset kind (`injectors`,
-    `providers`, `scripts`, `presets`), most specific first:
+    `providers`, `scripts`, `packs`), most specific first:
 
         user (XDG)  ->  overlays (declared order)  ->  builtin (upstream default)
 

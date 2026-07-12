@@ -456,7 +456,7 @@ def append_rule(ws: Workspace, rule: Rule) -> None:
 
 def append_rules(ws: Workspace, rules: list[Rule]) -> None:
     """Append one or more `[[rule]]` blocks in a SINGLE atomic write (so a
-    multi-rule preset stamps all-or-nothing). Order is preserved -- rules
+    multi-rule pack stamps all-or-nothing). Order is preserved -- rules
     evaluate in declaration order, so the caller's order is the runtime order."""
     if not rules:
         return

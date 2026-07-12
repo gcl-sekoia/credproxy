@@ -75,7 +75,7 @@ error.
 You now know enough to use credproxy day to day. When you need more:
 
 - **[Overlays](../advanced/overlays.md)** — ship your team's own defaults,
-  providers, injectors, and presets without editing credproxy or maintaining a
+  providers, injectors, and packs without editing credproxy or maintaining a
   fork.
 - **[Composability](../advanced/composability.md)** — attached workspaces: let
   Docker Compose, a devcontainer, or CI run the containers while credproxy

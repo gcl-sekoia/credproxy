@@ -145,8 +145,8 @@ at all: the builtin `gh-cli` provider returns `gh auth token --hostname <ref>`
 (ref = a GitHub hostname; empty = gh's default host), reading gh's own keyring
 without prompting. Its `describe`/`help` are static — like every provider, the
 backend is touched only in the `get` path, so `provider list`/`show` never
-shells out. It pairs with the `github` preset, which defaults its provider to
-`gh-cli` and its secret to `github.com`, so `preset add github` wires
+shells out. It pairs with the `github` pack, which defaults its provider to
+`gh-cli` and its secret to `github.com`, so `pack add github` wires
 GitHub API + git + ghcr off one existing login with no further flags.
 
 The builtin `docker-credential` provider adapts any `docker-credential-*` helper

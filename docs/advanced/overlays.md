@@ -4,7 +4,7 @@
 
 An org or team often wants its own defaults: a standard workspace image, an
 internal CA in every container's setup, a vault provider, an artifact-registry
-preset. credproxy is built so you can do all of that **without editing engine
+pack. credproxy is built so you can do all of that **without editing engine
 code** — and, ideally, without maintaining a code fork at all.
 
 ## The resolution order
@@ -22,7 +22,7 @@ builtin          cli/credproxy_cli/builtin/   upstream defaults (in-package)
 
 A same-named file in a higher tier **shadows** the lower one; a new name **adds**
 to the set. This is `paths.overlay_roots()` — the single seam both
-`paths.layered_dirs()` (the registries: injectors, providers, scripts, presets)
+`paths.layered_dirs()` (the registries: injectors, providers, scripts, packs)
 and `paths.resolve_singleton()` (the one singleton, `workspace.template.toml`)
 derive from, so every asset kind resolves through exactly the same tiers.
 
@@ -107,7 +107,7 @@ story and the no-fork bundle differ only in how the directory is named.
   injectors/<name>.toml           # request-shaping schemes
   providers/<name>                # secret-source executables
   scripts/<name>.star             # sandboxed Starlark injector / rule bodies
-  presets/<name>.toml             # service setup packs: bindings + rule guardrails
+  packs/<name>.toml             # service setup packs: bindings + rule guardrails
 ```
 
 > The only hardcoded engine constant is the proxy image tag (`IMAGE_TAG`). There
@@ -120,7 +120,7 @@ story and the no-fork bundle differ only in how the directory is named.
 
 The `<name>.toml` body a fresh `credproxy create` writes. Make it your canonical
 default workspace — your image, your `user`/`home`, your `setup`, even default
-`[[binding]]` blocks (or `[[preset]]` entries, expanded at create — see below)
+`[[binding]]` blocks (or `[[pack]]` entries, expanded at create — see below)
 for org infrastructure. It is a **literal** workspace
 config: every occurrence of the exact token `{name}` is replaced with the
 workspace name, and **nothing else** is touched — no `str.format`, so literal
@@ -138,19 +138,19 @@ Because it rides the same walk as the registries, a **user** can keep a personal
 > deliberate: a scaffold is an *upstream authoring template* to start from, not
 > an overlay-customizable default.
 
-### Registries — injectors / providers / scripts / presets
+### Registries — injectors / providers / scripts / packs
 
 Drop a `<name>.toml` (or executable, or `.star`) in the matching subdir. Same
 name as a builtin (or a less-specific overlay) **replaces** it; a new name
 **adds** it. The shapes match the builtin examples — see
 [`injectors.md`](../reference/injectors.md), [`providers.md`](../reference/providers.md), and
-`cli/credproxy_cli/builtin/presets/github.toml`.
+`cli/credproxy_cli/builtin/packs/github.toml`.
 
 **Shipping a policy as a pack.** A rule script (`scripts/readonly-guard.star`)
-and a **preset** that wires it (`presets/org-guardrails.toml`, an optional
-`[[rule]]` array; see [`rules.md`](../reference/rules.md#distributing-a-policy-script--preset))
+and a **pack** that wires it (`packs/org-guardrails.toml`, an optional
+`[[rule]]` array; see [`rules.md`](../reference/rules.md#distributing-a-policy-script--pack))
 travel together in the overlay, so a workspace applies the whole policy with one
-`credproxy workspace NAME preset add org-guardrails`. A preset can carry bindings
+`credproxy workspace NAME pack add org-guardrails`. A pack can carry bindings
 (`[[part]]`), rules (`[[rule]]`), **and the container half** (`[[mount]]`, `[env]`,
 `[[setup]]`) — any subset. A **pure-rule** pack (no `[placeholder]`/provider) is a
 credential-free policy bundle; a **pure-container** pack (mounts/env/setup only)
@@ -159,19 +159,19 @@ ships a service's setup without a credential.
 **Multi-slot packs.** A pack's parts all share one credential, so a pack for a
 multi-slot injector (AWS `sigv4`, OVH) just gives each `[[part]]` that injector —
 **every part's injector must declare the same slots**. The operator supplies the
-credential once with repeated `preset add --secret SLOT=REF` flags (the reference
+credential once with repeated `pack add --secret SLOT=REF` flags (the reference
 records a `secret = { slot = "ref", … }` table). `default_secret` is single-slot
 only, so a multi-slot pack has no secret default and always takes the explicit
 flags.
 
-**A pack's files ride the pack's tier.** A `[[mount]]` in a preset that names an
+**A pack's files ride the pack's tier.** A `[[mount]]` in a pack that names an
 `overlay = "setup.d/x.sh"` source resolves within the pack's *own* tier — the
 expansion records the qualified form `overlay = "<tier>:setup.d/x.sh"` (the tier
 is an overlay basename, or `user`/`builtin`), so the file is pinned to the pack
 and unaffected by overlay reordering/shadowing. `[[setup]]` steps must declare an
 explicit `order` (packs are explicit about ordering); host-bind sources are baked
-as literal v1 defaults, existence-checked when the workspace starts. `preset add`
-appends a `[[preset]]` reference (the expansion is snapshotted in the lockfile,
+as literal v1 defaults, existence-checked when the workspace starts. `pack add`
+appends a `[[pack]]` reference (the expansion is snapshotted in the lockfile,
 never written into the TOML), so re-referencing the same pack is refused rather
 than duplicated.
 
@@ -196,9 +196,9 @@ target = "/ssh-agent"
 ```
 
 A value resolves at expansion time — explicit `--opt id=value` / a template
-`[preset.options]` table → a prompt (loose surface + terminal only) → the
+`[pack.options]` table → a prompt (loose surface + terminal only) → the
 `default` → otherwise the add fails with a structured missing-options error. The
-resolved value is written into the reference's `[preset.options]` sub-table and
+resolved value is written into the reference's `[pack.options]` sub-table and
 substituted into the expanded field (the `{ option = … }` marker never reaches the
 workspace TOML).
 
@@ -229,14 +229,14 @@ methods = ["DELETE"]
 
 The resolved host goes through the same `hostmatch` validation as any binding/rule
 host (a bad glob like `*.com` fails the add atomically), and joins the intercept
-set like any other — `preset add` announces a newly TLS-intercepted host. A refresh
-recovers the value from `[preset.options]`, never re-prompting. `preset list` shows
+set like any other — `pack add` announces a newly TLS-intercepted host. A refresh
+recovers the value from `[pack.options]`, never re-prompting. `pack list` shows
 an unresolved host as `{option=gitlab_host}`.
 
 **Declare your pack's host prerequisites.** A pack often needs host state its
 container half can't provide — the `gh` CLI installed, a signing-agent socket
 dir, a set env var, a provider that can serve the secret. Declare each with a
-`[[requires]]` block so `preset add`/`create` check it (advisory — the reference
+`[[requires]]` block so `pack add`/`create` check it (advisory — the reference
 still lands) and `doctor` re-checks it (authoritative):
 
 ```toml
@@ -264,48 +264,48 @@ implemented by credproxy. **A pack never supplies a script to run** on the host,
 so activating an overlay from a fresh clone can't execute pack-authored code; the
 only host-executable is a [provider](../reference/providers.md), reached through
 the normal protocol for the `provider` kind. `doctor` finds which packs a
-workspace uses from its `[[preset]]` references and the lock snapshot; a
-`fetch = true` check runs only under `doctor NAME --fetch`. See [the preset guide](../guide/06-presets.md#declaring-host-prerequisites).
+workspace uses from its `[[pack]]` references and the lock snapshot; a
+`fetch = true` check runs only under `doctor NAME --fetch`. See [the pack guide](../guide/06-packs.md#declaring-host-prerequisites).
 
-**A template can *declare* presets.** Instead of inlining literal `[[binding]]`
-blocks (which bypass preset machinery), a `workspace.template.toml` /
-`workspace.attach.template.toml` may carry `[[preset]]` entries that `create`
-expands through the **same** path as `preset add` — so each created workspace
+**A template can *declare* packs.** Instead of inlining literal `[[binding]]`
+blocks (which bypass pack machinery), a `workspace.template.toml` /
+`workspace.attach.template.toml` may carry `[[pack]]` entries that `create`
+expands through the **same** path as `pack add` — so each created workspace
 gets its own freshly generated shared placeholder, and the template shrinks from
 mechanism to intent:
 
 ```toml
 # in your overlay's workspace.template.toml, alongside ordinary literal config
-[[preset]]
+[[pack]]
 name = "github"                     # complete defaults (gh-cli / github.com): nothing else needed
 
-[[preset]]
+[[pack]]
 name     = "claude-code"
 provider = "bw"
 secret   = "claude-code-oauth-token"
 ```
 
 Each entry takes `name` (required) and optional `provider` / `secret` (a single
-ref, defaulting exactly as `preset add` does — the pack's `default_provider`,
+ref, defaulting exactly as `pack add` does — the pack's `default_provider`,
 and `default_secret` only when the resolved provider *is* the default). At create
 the credential + options are resolved and written back into the block, and the
-`[[preset]]` reference **survives** into the stamped `<name>.toml` as a durable
-reference (config-v2: the loader accepts `preset`, and the first resolve expands
+`[[pack]]` reference **survives** into the stamped `<name>.toml` as a durable
+reference (config-v2: the loader accepts `pack`, and the first resolve expands
 it into the lock). Create is **all-or-nothing**: a defaults-less pack with no
 provider/secret, a name collision against a literal `[[binding]]`, or an attach
 template naming a container-half pack fails the whole create with nothing written
 (no config, no token, no state). There is **no prompting on the strict surface** —
 a missing field is a loud error naming exactly what to fill (loose + a terminal
-prompts). Leave `[[preset]]` out of the *builtin* templates so a bare
-`credproxy create` needs no provider login; template presets are for
+prompts). Leave `[[pack]]` out of the *builtin* templates so a bare
+`credproxy create` needs no provider login; template packs are for
 overlays/forks.
 
-**Template vs. preset — both exist on purpose.** Baking `[[binding]]`/`[[rule]]`
-blocks (or now `[[preset]]` entries) into `workspace.template.toml` applies them
-to **every** workspace at **create** time, all-or-nothing. A **preset** applied
-with `preset add` is the **per-service, composable, post-create** granularity:
+**Template vs. pack — both exist on purpose.** Baking `[[binding]]`/`[[rule]]`
+blocks (or now `[[pack]]` entries) into `workspace.template.toml` applies them
+to **every** workspace at **create** time, all-or-nothing. A **pack** applied
+with `pack add` is the **per-service, composable, post-create** granularity:
 applied to the workspaces that need it, when they need it, and stacked with
-others. Use the template for "every box gets this"; use a bare `preset add` for
+others. Use the template for "every box gets this"; use a bare `pack add` for
 "this box also talks to service X."
 
 ## Shipping static files (overlay mounts)
@@ -327,7 +327,7 @@ without reading source files: it lists the overlays in resolution order (with
 present/absent), the per-tier registry counts keyed by full label, and an
 `overlay_overrides` total (the **effective** view — an overlay asset a user file
 shadows counts as `user`, not as an overlay override). The registry `list`
-commands (`injector list`, `provider list`, `preset list`) annotate each row
+commands (`injector list`, `provider list`, `pack list`) annotate each row
 with the tiers it **shadows**, e.g. `bearer   overlay:team-ml   (shadows
 builtin)`.
 
@@ -451,5 +451,5 @@ A user's `$XDG_CONFIG_HOME/credproxy/` file still wins over the overlays, which
 win over builtin — for **every** asset including `workspace.template.toml`, so an
 individual can override an org default locally with no exception. To verify an
 overlay in place, point `CREDPROXY_OVERLAY_PATH` at it and run `credproxy info`,
-`credproxy injector list`, `credproxy preset list`, `credproxy config`, or
+`credproxy injector list`, `credproxy pack list`, `credproxy config`, or
 `credproxy workspace create … && credproxy workspace … config --declared`.

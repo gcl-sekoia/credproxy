@@ -260,7 +260,7 @@ The proxy is a Compose service; the workspace shares its netns and gates on it.
 `credproxy emit-compose myproject` scaffolds exactly this.
 
 1. `credproxy workspace create myproject --attach compose-project=myproject`,
-   then add bindings/rules (`binding add`, `rule add`, `preset add`).
+   then add bindings/rules (`binding add`, `rule add`, `pack add`).
 2. Bring up the **proxy** service (its token bind-mounts `<state>/auth.token`;
    `emit-compose` wires the path). Its healthcheck probes **`/ready`**, so it
    reports healthy only once credentials land.

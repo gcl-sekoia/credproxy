@@ -115,10 +115,10 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
 
     meta = ImageEnv.load()
     # Resolve once (config-v2): `resolved.config` is the container half with any
-    # `[[preset]]` container half (mounts/env/setup) merged in and binds
-    # existence-checked (check_bind_exists=True), so a preset mount feeds the spec
+    # `[[pack]]` container half (mounts/env/setup) merged in and binds
+    # existence-checked (check_bind_exists=True), so a pack mount feeds the spec
     # hash exactly like a stamped one; `resolved.bindings`/`.rules` are the merged
-    # (literal + preset) set the push below uses.
+    # (literal + pack) set the push below uses.
     from ..model.resolver import resolve_workspace
     resolved = resolve_workspace(ws, check_bind_exists=True)
     for n in resolved.notes:
@@ -442,7 +442,7 @@ def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
 
     # Read current configured bindings/rules (placeholders bound from the lock,
     # no secret fetch, no push yet). resolve_workspace is side-effect-free.
-    # `resolved.config` folds in any `[[preset]]` container half for drift.
+    # `resolved.config` folds in any `[[pack]]` container half for drift.
     resolved = resolve_workspace(ws, check_bind_exists=True)
     for n in resolved.notes:
         notify(f"note: {n}")

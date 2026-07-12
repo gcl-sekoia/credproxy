@@ -621,7 +621,7 @@ def test_info_json_shape(xdg, workspaces_dir, monkeypatch):
     assert set(d["paths"]) == {"config", "state", "builtin"}
     assert d["overlays"] == [{"label": "overlay:ov", "path": str(ov),
                               "present": True}]
-    for kind in ("injectors", "providers", "scripts", "presets"):
+    for kind in ("injectors", "providers", "scripts", "packs"):
         assert set(d["registries"][kind]) == {"user", "overlay:ov", "builtin"}
     assert "overlay_overrides" in d
     assert "default_workspace" in d           # loose

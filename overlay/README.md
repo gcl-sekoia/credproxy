@@ -29,7 +29,7 @@ overlay/acme-corp/
   injectors/<name>.toml        # request-shaping schemes
   providers/<name>             # secret-source executables
   scripts/<name>.star          # sandboxed Starlark injector / rule bodies
-  presets/<name>.toml          # service setup packs: bindings + rule guardrails
+  packs/<name>.toml          # service setup packs: bindings + rule guardrails
   tests/test_*.py              # optional; run by `credproxy dev test` (testkit)
 ```
 

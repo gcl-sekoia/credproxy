@@ -1,26 +1,26 @@
-"""Presets: CLI-side generators that emit a coordinated *service setup pack* --
+"""Packs: CLI-side generators that emit a coordinated *service setup pack* --
 the bindings a credential needs across a service's hosts AND the credential-free
 guardrails (rules) that should accompany them.
 
 The binding half packages the multi-binding shape a single credential needs --
 e.g. a GitHub PAT is `bearer` on api.github.com but HTTP `basic` on github.com /
 ghcr.io, sharing ONE bare-token placeholder. The rule half ships policy: an
-overlay's `readonly-guard.star` wired to its hosts/params in one `preset add`.
-Either half may be empty: a credential-only preset (`[[part]]` only) or a
+overlay's `readonly-guard.star` wired to its hosts/params in one `pack add`.
+Either half may be empty: a credential-only pack (`[[part]]` only) or a
 pure-rule policy pack (`[[rule]]` only, no `[placeholder]`/provider/secret).
 
-A preset is a durable **reference** (config-v2): a `[[preset]]` block in the
+A pack is a durable **reference** (config-v2): a `[[pack]]` block in the
 workspace TOML names a pack; the CLI's resolver (`core/model/resolver.py`)
 expands it at resolve time and snapshots the expansion in the lockfile. The proxy
-never sees a "preset" (the push wire is unchanged) -- the expanded bindings/rules
+never sees a "pack" (the push wire is unchanged) -- the expanded bindings/rules
 and container half merge into the effective model as ordinary entries. A changed
-definition is inert until `preset refresh` re-expands; editing the reference's own
+definition is inert until `pack refresh` re-expands; editing the reference's own
 inputs (provider/secret/options/disable/overrides) re-expands on the next resolve.
 
-Presets are *data*, loaded from the layered registry (user > overlays >
-builtin, paths.layered_dirs) -- a `<name>.toml` per preset, the name being the
+Packs are *data*, loaded from the layered registry (user > overlays >
+builtin, paths.layered_dirs) -- a `<name>.toml` per pack, the name being the
 filename stem. So an org adds its own packs by dropping a TOML in an overlay, no
-code. See docs/advanced/overlays.md and builtin/presets/github.toml.
+code. See docs/advanced/overlays.md and builtin/packs/github.toml.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from ..paths import layered_dirs
 
 @dataclass(frozen=True)
 class _Part:
-    suffix: str             # appended to the preset's base name
+    suffix: str             # appended to the pack's base name
     injector: str           # injector / scheme to use
     hosts: tuple[str, ...]
     env: str | None
@@ -49,8 +49,8 @@ class _Part:
 
 
 @dataclass(frozen=True)
-class _PresetRule:
-    suffix: str             # appended to the preset's base name (like _Part)
+class _PackRule:
+    suffix: str             # appended to the pack's base name (like _Part)
     rule: "core_rules.Rule"  # a validated Rule with name=None (filled at build)
     # Host option markers (#72), as on `_Part` -- (element index, option id) for
     # each `{ option = "id" }` element of the rule's `hosts`.
@@ -86,8 +86,8 @@ class _Require:
 
 
 @dataclass(frozen=True)
-class _PresetMount:
-    """One preset `[[mount]]`, in stamp-ready form. `value` is what gets stamped
+class _PackMount:
+    """One pack `[[mount]]`, in stamp-ready form. `value` is what gets stamped
     into the workspace TOML for `kind`: a tier-QUALIFIED overlay rel
     (`tier:setup.d/x.sh`, pinned to the pack's owning tier), a volume name, or a
     literal host-bind source (baked v1 default, existence-checked at `start`, not
@@ -108,8 +108,8 @@ class _PresetMount:
     source_option: str | None = None
 
 
-def mount_table(pm: _PresetMount) -> dict:
-    """Reconstruct the raw mount TABLE from a `_PresetMount`, for re-normalizing
+def mount_table(pm: _PackMount) -> dict:
+    """Reconstruct the raw mount TABLE from a `_PackMount`, for re-normalizing
     through `config._parse_mount` at add time (the merged-mount validation) and
     for rendering the stamped inline table."""
     t: dict = {pm.kind: pm.value, "target": pm.target}
@@ -127,10 +127,10 @@ _OPTION_TYPES = ("string", "enum", "bool")
 class _Option:
     """One pack `[[option]]` definition (#59): a whole-field parameter an operator
     supplies at expansion time (explicit `--opt id=value` / template
-    `[preset.options]` -> prompt on loose+TTY -> `default` -> fail). `type` is
+    `[pack.options]` -> prompt on loose+TTY -> `default` -> fail). `type` is
     `string`/`enum`/`bool`; `has_default` distinguishes "no default declared"
     (required) from a falsy default. `choices` is non-empty for `enum` only.
-    `description` is the prompt/`preset list` blurb. Options parameterize
+    `description` is the prompt/`pack list` blurb. Options parameterize
     HOST-HALF whole values only (a mount `bind`/`volume` source, a `[[requires]]`
     `path`) via a structural `{ option = "id" }` marker -- never a token inside a
     string (string interpolation is inexpressible by construction)."""
@@ -162,22 +162,22 @@ def _option_marker(value, where: str) -> str | None:
 
 
 @dataclass(frozen=True)
-class PresetSpec:
+class PackSpec:
     name: str
-    # The shared, service-shaped sentinel -- None for a preset with no bindings
+    # The shared, service-shaped sentinel -- None for a pack with no bindings
     # (a pure-rule or pure-container pack; nothing to couple).
     placeholder: Placeholder | None
     parts: tuple[_Part, ...]
-    rules: tuple[_PresetRule, ...] = ()
+    rules: tuple[_PackRule, ...] = ()
     # The container-half a pack may ALSO carry (stamped as ordinary literal
     # config, expansion-not-a-link): managed mounts, env vars, ordered setup
     # steps. Any of the five (parts/rules/mounts/env/setup) may be empty; the
-    # whole preset may not be.
-    mounts: tuple[_PresetMount, ...] = ()
+    # whole pack may not be.
+    mounts: tuple[_PackMount, ...] = ()
     env: tuple[tuple[str, str], ...] = ()      # ordered (key, value) pairs
     setup: tuple[dict, ...] = ()               # {"run", "user", "order"} dicts
     # Declarative host-prerequisite checks (#58): NOT stamped into the workspace
-    # (host state, not config) -- checked (advisory) at `preset add`/`create` and
+    # (host state, not config) -- checked (advisory) at `pack add`/`create` and
     # (authoritative) at `doctor` time. Ordered as declared.
     requires: tuple[_Require, ...] = ()
     # Pack `[[option]]` definitions (#59): whole-field parameters resolved at
@@ -185,7 +185,7 @@ class PresetSpec:
     # requires path) BEFORE stamping. Empty () once resolved (`apply_option_values`
     # clears them on the literal spec).
     options: tuple[_Option, ...] = ()
-    # first-12-hex of sha256 over the preset DEFINITION FILE bytes, for the
+    # first-12-hex of sha256 over the pack DEFINITION FILE bytes, for the
     # provenance marker (`rev=`); the pack files are pinned to a tier, this pins
     # the stamp to a pack revision.
     rev: str = ""
@@ -199,7 +199,7 @@ class PresetSpec:
 
     @property
     def needs_credential(self) -> bool:
-        """A preset with bindings needs a provider/secret (and a placeholder);
+        """A pack with bindings needs a provider/secret (and a placeholder);
         a pure-rule / pure-container pack needs none."""
         return bool(self.parts)
 
@@ -234,8 +234,8 @@ def _tier_qualifier(source_label: str) -> str:
     return base
 
 
-def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
-    src = f"preset '{name}' ({path})"
+def _parse_pack(path, name: str, tier: str = "builtin") -> PackSpec:
+    src = f"pack '{name}' ({path})"
     try:
         data = path.read_bytes()
         raw = tomllib.loads(data.decode())
@@ -272,12 +272,12 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
             f"or [[setup]]")
 
     # [placeholder] is the BINDING coupling mechanism, required only when the
-    # preset carries bindings; a pure-rule pack has nothing to couple.
+    # pack carries bindings; a pure-rule pack has nothing to couple.
     ph = raw.get("placeholder")
     if parts_raw:
         if not isinstance(ph, dict):
             raise ConfigError(f"{src}: missing [placeholder] table "
-                              f"(required when the preset has [[part]] bindings)")
+                              f"(required when the pack has [[part]] bindings)")
         # Validate through the shared injector path so a bad charset or a length
         # <= prefix (zero-entropy, non-unique placeholder) fails HERE, not as a
         # KeyError in generate() or a silently-broken sentinel at build time.
@@ -295,7 +295,7 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
     # every `{ option = "id" }` marker names a defined option (and is
     # type-appropriate), so `[[part]]`/`[[rule]]` host markers (#72) need the
     # option set in hand before they parse.
-    options = [_parse_preset_option(o, i, src) for i, o in enumerate(options_raw)]
+    options = [_parse_pack_option(o, i, src) for i, o in enumerate(options_raw)]
     _reject_dup_join_keys([o.id for o in options], "option", "id", src)
     option_by_id = {o.id: o for o in options}
 
@@ -328,13 +328,13 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
         parts.append(_Part(suffix=suffix, injector=injector,
                            hosts=hosts, env=env, host_options=host_opts))
 
-    rules = [_parse_preset_rule(r, i, src, option_by_id)
+    rules = [_parse_pack_rule(r, i, src, option_by_id)
              for i, r in enumerate(rules_raw)]
-    mounts = [_parse_preset_mount(m, i, src, tier, option_by_id)
+    mounts = [_parse_pack_mount(m, i, src, tier, option_by_id)
               for i, m in enumerate(mounts_raw)]
-    env = _parse_preset_env(env_raw, src)
-    setup = [_parse_preset_setup(s, i, src) for i, s in enumerate(setup_raw)]
-    requires = [_parse_preset_require(r, i, src, has_parts=bool(parts_raw),
+    env = _parse_pack_env(env_raw, src)
+    setup = [_parse_pack_setup(s, i, src) for i, s in enumerate(setup_raw)]
+    requires = [_parse_pack_require(r, i, src, has_parts=bool(parts_raw),
                                       options=option_by_id)
                 for i, r in enumerate(requires_raw)]
 
@@ -347,7 +347,7 @@ def _parse_preset(path, name: str, tier: str = "builtin") -> PresetSpec:
     _reject_dup_join_keys(
         [_norm_mount_target(m.target) for m in mounts], "mount", "target", src)
 
-    return PresetSpec(
+    return PackSpec(
         name=name,
         placeholder=placeholder,
         parts=tuple(parts),
@@ -387,7 +387,7 @@ def _reject_dup_join_keys(keys: list, kind: str, field: str, src: str) -> None:
             f"a unique {field}")
 
 
-def _parse_preset_option(o, i: int, src: str) -> _Option:
+def _parse_pack_option(o, i: int, src: str) -> _Option:
     """One pack `[[option]]` -> a validated `_Option`. `id` required non-empty; `type`
     in {string, enum, bool}; `enum` needs a non-empty `choices` list of strings (and,
     if a default is present, it must be a member); a `bool` default must be a bool;
@@ -472,7 +472,7 @@ _HOST_OPTION_DUMMY = "credproxy-option-host.invalid"
 
 
 def _parse_host_markers(hosts_raw, options: dict, where: str):
-    """Validate a preset `[[part]]`/`[[rule]]` `hosts` array that may mix literal
+    """Validate a pack `[[part]]`/`[[rule]]` `hosts` array that may mix literal
     strings and whole-element `{ option = "id" }` markers (#72). Returns
     `(hosts, host_options)`: `hosts` is the literal tuple with `_HOST_OPTION_DUMMY`
     at each marker position (so the shared shape/hostmatch validation still runs at
@@ -502,9 +502,9 @@ def _parse_host_markers(hosts_raw, options: dict, where: str):
     return tuple(out), tuple(host_opts)
 
 
-def _parse_preset_require(r, i: int, src: str, *, has_parts: bool,
+def _parse_pack_require(r, i: int, src: str, *, has_parts: bool,
                           options: dict) -> _Require:
-    """One preset `[[requires]]` entry -> a `_Require`. `kind` selects the check
+    """One pack `[[requires]]` entry -> a `_Require`. `kind` selects the check
     and dictates which single payload field is required; unknown keys are
     rejected (mirroring the other per-section validators). A `provider` check on
     a pack with no `[[part]]` bindings is a definition error (nothing to fetch),
@@ -600,8 +600,8 @@ def _parse_preset_require(r, i: int, src: str, *, has_parts: bool,
 _MOUNT_OPTION_DUMMY = {"bind": "/__credproxy_option__", "volume": "optplaceholder"}
 
 
-def _parse_preset_mount(m, i: int, src: str, tier: str, options: dict) -> _PresetMount:
-    """One preset `[[mount]]` -> a `_PresetMount`. An unqualified `overlay` source
+def _parse_pack_mount(m, i: int, src: str, tier: str, options: dict) -> _PackMount:
+    """One pack `[[mount]]` -> a `_PackMount`. An unqualified `overlay` source
     is QUALIFIED with the pack's owning `tier` (so it resolves within THIS pack's
     tier, immune to overlay reorder/shadow) before being validated through the
     SHARED `config._parse_mount` (bind sources kept literal -- a baked v1 default
@@ -667,7 +667,7 @@ def _parse_preset_mount(m, i: int, src: str, tier: str, options: dict) -> _Prese
     kind = norm["kind"]
     # An option-sourced mount carries an empty `value` on the DEFINITION spec; the
     # literal is filled by apply_option_values before stamping.
-    return _PresetMount(
+    return _PackMount(
         kind=kind,
         value="" if source_option else table[kind],
         target=norm["target"],
@@ -677,8 +677,8 @@ def _parse_preset_mount(m, i: int, src: str, tier: str, options: dict) -> _Prese
     )
 
 
-def _parse_preset_env(env_raw: dict, src: str) -> list[tuple[str, str]]:
-    """A preset `[env]` table -> ordered (key, value) pairs. Values must be
+def _parse_pack_env(env_raw: dict, src: str) -> list[tuple[str, str]]:
+    """A pack `[env]` table -> ordered (key, value) pairs. Values must be
     non-empty strings (they stamp as `KEY = "value"`)."""
     out: list[tuple[str, str]] = []
     for k, v in env_raw.items():
@@ -691,8 +691,8 @@ def _parse_preset_env(env_raw: dict, src: str) -> list[tuple[str, str]]:
     return out
 
 
-def _parse_preset_setup(s, i: int, src: str) -> dict:
-    """One preset `[[setup]]` step -> a normalized `{"run", "user", "order"}`
+def _parse_pack_setup(s, i: int, src: str) -> dict:
+    """One pack `[[setup]]` step -> a normalized `{"run", "user", "order"}`
     dict via the SHARED `config._parse_setup_table` -- with the extra pack rules
     that `order` is REQUIRED and a bare command string is REJECTED (the root
     string form is the workspace's escape hatch, never a pack's)."""
@@ -700,29 +700,29 @@ def _parse_preset_setup(s, i: int, src: str) -> dict:
     where = f"{src} setup[{i}]"
     if isinstance(s, str):
         raise ConfigError(
-            f"{where} a preset setup step must be a table "
+            f"{where} a pack setup step must be a table "
             f'{{ run = "...", order = N }}, not a bare string')
     if not isinstance(s, dict):
         raise ConfigError(f"{where} must be a table")
     return core_config._parse_setup_table(s, where, require_order=True)
 
 
-def _parse_preset_rule(entry, i: int, src: str, options: dict) -> _PresetRule:
-    """One preset `[[rule]]` -> a _PresetRule. Like `[[part]]`, it carries a
-    `suffix` (expanding to `name = <preset>-<suffix>`), NOT a literal `name`;
+def _parse_pack_rule(entry, i: int, src: str, options: dict) -> _PackRule:
+    """One pack `[[rule]]` -> a _PackRule. Like `[[part]]`, it carries a
+    `suffix` (expanding to `name = <pack>-<suffix>`), NOT a literal `name`;
     the rest is a standard rule table validated through the SAME
     `core.rules._parse_rule_entry` the load path and `rule add` use -- so a bad
-    preset rule fails at preset load with the same errors (and inherits the
+    pack rule fails at pack load with the same errors (and inherits the
     CLI<->proxy validator mirror + #36's `[rule.params]` validation).
 
     A `hosts` element may be a `{ option = "id" }` marker (#72): those elements are
     replaced with a benign dummy before `_parse_rule_entry` (so its shape
-    validation still runs), the option refs recorded on the `_PresetRule`, and the
+    validation still runs), the option refs recorded on the `_PackRule`, and the
     real value substituted at expansion (`_substitute_host_options`)."""
     # `where` is the location fragment; `src` is passed separately as the message
     # source (both to _parse_rule_entry and our own raises), so it must NOT be
     # baked into `where` too -- else _parse_rule_entry's `f"{source}: {where}..."`
-    # would print the preset path twice.
+    # would print the pack path twice.
     where = f"rule[{i}]"
     if not isinstance(entry, dict):
         raise ConfigError(f"{src}: {where} must be a table")
@@ -730,8 +730,8 @@ def _parse_preset_rule(entry, i: int, src: str, options: dict) -> _PresetRule:
     if not isinstance(suffix, str) or not suffix:
         raise ConfigError(f"{src}: {where} 'suffix' must be a non-empty string")
     if "name" in entry:
-        raise ConfigError(f"{src}: {where} a preset rule uses 'suffix' (-> "
-                          f"name '<preset>-<suffix>'), not a literal 'name'")
+        raise ConfigError(f"{src}: {where} a pack rule uses 'suffix' (-> "
+                          f"name '<pack>-<suffix>'), not a literal 'name'")
     fields = {k: v for k, v in entry.items() if k != "suffix"}
     host_opts: tuple[tuple[int, str], ...] = ()
     raw_hosts = fields.get("hosts")
@@ -743,31 +743,31 @@ def _parse_preset_rule(entry, i: int, src: str, options: dict) -> _PresetRule:
         rule = core_rules._parse_rule_entry(fields, src, where)
     except CredproxyError as e:
         raise ConfigError(str(e)) from e
-    return _PresetRule(suffix=suffix, rule=rule, host_options=host_opts)
+    return _PackRule(suffix=suffix, rule=rule, host_options=host_opts)
 
 
-def load_presets() -> dict[str, PresetSpec]:
-    """All resolvable presets keyed by name, user shadowing overlays shadowing
+def load_packs() -> dict[str, PackSpec]:
+    """All resolvable packs keyed by name, user shadowing overlays shadowing
     builtin (least-specific first so the most-specific overwrites)."""
-    seen: dict[str, PresetSpec] = {}
-    for source, base in reversed(layered_dirs("presets")):
+    seen: dict[str, PackSpec] = {}
+    for source, base in reversed(layered_dirs("packs")):
         if not base.is_dir():
             continue
         tier = _tier_qualifier(source)
         for path in sorted(base.iterdir()):
             if path.suffix == ".toml" and path.is_file():
-                seen[path.stem] = _parse_preset(path, path.stem, tier)
+                seen[path.stem] = _parse_pack(path, path.stem, tier)
     return seen
 
 
-def _preset_provenance() -> tuple[dict[str, str], dict[str, list[str]]]:
-    """One reversed walk mapping each resolvable preset name to (its winning tier
-    label, the tier labels it shadows most-specific-first). Presets don't carry
+def _pack_provenance() -> tuple[dict[str, str], dict[str, list[str]]]:
+    """One reversed walk mapping each resolvable pack name to (its winning tier
+    label, the tier labels it shadows most-specific-first). Packs don't carry
     source on the spec (unlike the other registries), so this is the diagnostics
-    seam (`info`'s per-tier counts, `preset list`'s shadow annotations)."""
+    seam (`info`'s per-tier counts, `pack list`'s shadow annotations)."""
     src: dict[str, str] = {}
     shadowed: dict[str, list[str]] = {}
-    for source, base in reversed(layered_dirs("presets")):
+    for source, base in reversed(layered_dirs("packs")):
         if not base.is_dir():
             continue
         for path in sorted(base.iterdir()):
@@ -778,25 +778,25 @@ def _preset_provenance() -> tuple[dict[str, str], dict[str, list[str]]]:
     return src, {n: list(reversed(losers)) for n, losers in shadowed.items()}
 
 
-def load_preset_sources() -> dict[str, str]:
-    """Map each resolvable preset name to the tier label it resolves from."""
-    return _preset_provenance()[0]
+def load_pack_sources() -> dict[str, str]:
+    """Map each resolvable pack name to the tier label it resolves from."""
+    return _pack_provenance()[0]
 
 
-def get_preset(name: str) -> PresetSpec:
-    presets = load_presets()
-    spec = presets.get(name)
+def get_pack(name: str) -> PackSpec:
+    packs = load_packs()
+    spec = packs.get(name)
     if spec is None:
         raise CredproxyError(
-            f"unknown preset {name!r}; known presets: "
-            f"{', '.join(sorted(presets)) or '(none)'}"
+            f"unknown pack {name!r}; known packs: "
+            f"{', '.join(sorted(packs)) or '(none)'}"
         )
     return spec
 
 
 def _hosts_display(hosts: tuple[str, ...],
                    host_options: tuple[tuple[int, str], ...]) -> list[str]:
-    """Render a part/rule `hosts` array for `preset list`: an option-marker element
+    """Render a part/rule `hosts` array for `pack list`: an option-marker element
     (which holds `_HOST_OPTION_DUMMY` on the unresolved spec) renders as
     `{option=id}`, like a mount source does (#72); literals pass through."""
     opt_at = dict(host_options)
@@ -804,12 +804,12 @@ def _hosts_display(hosts: tuple[str, ...],
             for i, h in enumerate(hosts)]
 
 
-def describe_presets() -> list[dict]:
-    """Structured description of every known preset, for `preset list`: the
+def describe_packs() -> list[dict]:
+    """Structured description of every known pack, for `pack list`: the
     bindings AND rules it expands to, so an operator sees the full stamp before
-    applying. No secret/provider -- those are supplied at `preset add` time. Each
+    applying. No secret/provider -- those are supplied at `pack add` time. Each
     row carries its resolved tier label (`source`) and the tiers it `shadows`."""
-    sources, shadows = _preset_provenance()
+    sources, shadows = _pack_provenance()
     return [
         {
             "name": spec.name,
@@ -854,15 +854,15 @@ def describe_presets() -> list[dict]:
             # no marker sink yet.
             "unreferenced_options": _unreferenced_option_ids(spec),
         }
-        for spec in sorted(load_presets().values(), key=lambda s: s.name)
+        for spec in sorted(load_packs().values(), key=lambda s: s.name)
     ]
 
 
-def _unreferenced_option_ids(spec: PresetSpec) -> list[str]:
+def _unreferenced_option_ids(spec: PackSpec) -> list[str]:
     """Option ids no `{ option = "id" }` marker references (mount source, requires
     path, or `[[part]]`/`[[rule]]` host #72). An unreferenced option is a likely
     pack-author mistake (its value is resolved but substituted nowhere) -- surfaced
-    as a `preset list` note (N6). Declaration order preserved."""
+    as a `pack list` note (N6). Declaration order preserved."""
     referenced = {m.source_option for m in spec.mounts if m.source_option}
     referenced |= {rq.path_option for rq in spec.requires if rq.path_option}
     referenced |= {oid for p in spec.parts for _, oid in p.host_options}
@@ -871,7 +871,7 @@ def _unreferenced_option_ids(spec: PresetSpec) -> list[str]:
 
 
 def option_summary(o: _Option) -> dict:
-    """A JSON-clean summary of one `[[option]]` (for `preset list` + the structured
+    """A JSON-clean summary of one `[[option]]` (for `pack list` + the structured
     missing-options error). `default` is present only when declared; `choices` only
     for an enum."""
     out: dict = {"id": o.id, "type": o.type, "description": o.description}
@@ -883,14 +883,14 @@ def option_summary(o: _Option) -> dict:
 
 
 def require_summary(rq: _Require) -> dict:
-    """A JSON-clean summary of one `[[requires]]` check (for `preset list` and
+    """A JSON-clean summary of one `[[requires]]` check (for `pack list` and
     the requires-result rendering). Only the payload field for its kind is
     carried, plus `fetch` for a provider check."""
     out: dict = {"kind": rq.kind, "hint": rq.hint}
     if rq.kind == "path":
         # An option-fed path (`path = { option = "id" }`) carries no literal until
         # expansion; render the marker `{option=id}` (like a mount source does in
-        # `describe_presets`) so `preset list` shows which option feeds it -- never
+        # `describe_packs`) so `pack list` shows which option feeds it -- never
         # a bare `None` (N2).
         out["path"] = (f"{{option={rq.path_option}}}" if rq.path_option
                        else rq.path)
@@ -904,37 +904,37 @@ def require_summary(rq: _Require) -> dict:
 
 
 @dataclass(frozen=True)
-class TemplatePreset:
-    """One `[[preset]]` entry declared in a `workspace.template.toml` /
+class TemplatePack:
+    """One `[[pack]]` entry declared in a `workspace.template.toml` /
     `workspace.attach.template.toml`, consumed and expanded at `create` time (it
-    never survives into the stamped `<name>.toml` -- the loader rejects `preset`
-    in a workspace config). Mirrors the `preset add` inputs: the pack `name`, an
+    never survives into the stamped `<name>.toml` -- the loader rejects `pack`
+    in a workspace config). Mirrors the `pack add` inputs: the pack `name`, an
     optional `provider`, a `secret` (a bare ref, or a `{slot = ref}` table for a
-    multi-slot injector, #71), and an optional `[preset.options]` sub-table
+    multi-slot injector, #71), and an optional `[pack.options]` sub-table
     (`{id = value}`) supplying pack option values (#59) -- the explicit-value
     channel `--opt id=value` is for at create time."""
     name: str
     provider: str | None
     secret: str | dict | None
-    options: dict = field(default_factory=dict)  # {id: value}, from `[preset.options]`
+    options: dict = field(default_factory=dict)  # {id: value}, from `[pack.options]`
 
 
-def parse_template_presets(raw: dict, source: str) -> list[TemplatePreset]:
-    """Extract + validate the `[[preset]]` entries from a rendered template's
+def parse_template_packs(raw: dict, source: str) -> list[TemplatePack]:
+    """Extract + validate the `[[pack]]` entries from a rendered template's
     parsed TOML. `source` labels error messages. Returns [] when there are none.
     Fields: `name` (required non-empty string), `provider` (optional non-empty
     string), `secret` (optional -- a bare ref or a `{slot = ref}` table, exactly
-    like a `[[preset]]` reference / `preset add`'s `--secret`). Unknown keys are
+    like a `[[pack]]` reference / `pack add`'s `--secret`). Unknown keys are
     rejected."""
-    entries_raw = raw.get("preset")
+    entries_raw = raw.get("pack")
     if entries_raw is None:
         return []
     if not isinstance(entries_raw, list):
-        raise ConfigError(f"{source}: `[[preset]]` must be an array of tables")
+        raise ConfigError(f"{source}: `[[pack]]` must be an array of tables")
     allowed = {"name", "provider", "secret", "options"}
-    out: list[TemplatePreset] = []
+    out: list[TemplatePack] = []
     for i, e in enumerate(entries_raw):
-        where = f"{source}: preset[{i}]"
+        where = f"{source}: pack[{i}]"
         if not isinstance(e, dict):
             raise ConfigError(f"{where} must be a table")
         extra = sorted(set(e) - allowed)
@@ -952,18 +952,18 @@ def parse_template_presets(raw: dict, source: str) -> list[TemplatePreset]:
         opts = e.get("options")
         if opts is not None and not isinstance(opts, dict):
             raise ConfigError(
-                f"{where} 'options' must be a `[preset.options]` table of "
+                f"{where} 'options' must be a `[pack.options]` table of "
                 f"`id = value` pairs")
-        out.append(TemplatePreset(name=name, provider=provider, secret=secret,
+        out.append(TemplatePack(name=name, provider=provider, secret=secret,
                                   options=dict(opts) if opts else {}))
     return out
 
 
-def resolve_preset_credential(
-    spec: PresetSpec, provider: str | None, secret: str | dict | None,
+def resolve_pack_credential(
+    spec: PackSpec, provider: str | None, secret: str | dict | None,
 ) -> tuple[str | None, str | dict | None, list[str]]:
-    """Apply a preset's provider/secret DEFAULTS -- the single source of truth
-    shared by `preset add` and template-declared `[[preset]]` expansion (#57), so
+    """Apply a pack's provider/secret DEFAULTS -- the single source of truth
+    shared by `pack add` and template-declared `[[pack]]` expansion (#57), so
     the two never diverge on how a pack's `default_provider`/`default_secret` fill
     an omitted flag/field.
 
@@ -993,7 +993,7 @@ def resolve_preset_credential(
 
 def coerce_option_value(opt: _Option, raw, where: str):
     """Coerce+validate one raw option value (a string from `--opt id=value` /
-    template `[preset.options]`, or an already-typed TOML value) against `opt`'s
+    template `[pack.options]`, or an already-typed TOML value) against `opt`'s
     type. Idempotent for already-typed values (a bool stays a bool, an enum member
     stays). Raises ConfigError on a type/enum mismatch. `where` labels the error."""
     if opt.type == "bool":
@@ -1018,9 +1018,9 @@ def coerce_option_value(opt: _Option, raw, where: str):
     return raw
 
 
-def resolve_options(spec: PresetSpec, explicit: dict, prompt=None) -> tuple[dict, list[_Option]]:
+def resolve_options(spec: PackSpec, explicit: dict, prompt=None) -> tuple[dict, list[_Option]]:
     """Resolve every pack option to a concrete value in the settled order
-    (#59 decision 2): explicit (`--opt`/template `[preset.options]`) -> `prompt`
+    (#59 decision 2): explicit (`--opt`/template `[pack.options]`) -> `prompt`
     (loose+TTY only; None disables it) -> declared `default` -> unresolved.
 
     Returns `(values, missing)`: `values` maps each RESOLVED option id to its
@@ -1028,7 +1028,7 @@ def resolve_options(spec: PresetSpec, explicit: dict, prompt=None) -> tuple[dict
     `_Option`s (no explicit, no prompt, no default). An `explicit` key naming no
     defined option is a hard error (a typo the caller wants surfaced). The caller
     renders the structured missing error and, when `missing` is empty, feeds
-    `values` to `build_preset(..., options=values)` / `apply_option_values`.
+    `values` to `build_pack(..., options=values)` / `apply_option_values`.
 
     `prompt(opt)` returns a coerced/validated value (the porcelain prompt does its
     own coercion), so a prompted value bypasses `coerce_option_value` here."""
@@ -1036,14 +1036,14 @@ def resolve_options(spec: PresetSpec, explicit: dict, prompt=None) -> tuple[dict
     unknown = sorted(set(explicit) - defined)
     if unknown:
         raise ConfigError(
-            f"preset '{spec.name}': unknown option(s): {', '.join(unknown)} "
+            f"pack '{spec.name}': unknown option(s): {', '.join(unknown)} "
             f"(known: {', '.join(sorted(defined)) or '(none)'})")
     values: dict = {}
     missing: list[_Option] = []
     for opt in spec.options:
         if opt.id in explicit:
             values[opt.id] = coerce_option_value(
-                opt, explicit[opt.id], f"preset '{spec.name}' option")
+                opt, explicit[opt.id], f"pack '{spec.name}' option")
         elif prompt is not None:
             values[opt.id] = prompt(opt)
         elif opt.has_default:
@@ -1053,30 +1053,30 @@ def resolve_options(spec: PresetSpec, explicit: dict, prompt=None) -> tuple[dict
     return values, missing
 
 
-def _finalize_option_values(spec: PresetSpec, values: dict) -> dict:
+def _finalize_option_values(spec: PackSpec, values: dict) -> dict:
     """Fill every option from `values` (already resolved) or its declared default,
     coercing each. Raises ConfigError naming any option with neither -- the
-    last-resort backstop for `build_preset`/`apply_option_values` (porcelain
+    last-resort backstop for `build_pack`/`apply_option_values` (porcelain
     resolves + reports the structured missing error before reaching here)."""
     out: dict = {}
     missing: list[str] = []
     for opt in spec.options:
         if opt.id in values:
             out[opt.id] = coerce_option_value(
-                opt, values[opt.id], f"preset '{spec.name}' option")
+                opt, values[opt.id], f"pack '{spec.name}' option")
         elif opt.has_default:
             out[opt.id] = opt.default
         else:
             missing.append(opt.id)
     if missing:
         raise ConfigError(
-            f"preset '{spec.name}': unresolved option(s): {', '.join(missing)} "
+            f"pack '{spec.name}': unresolved option(s): {', '.join(missing)} "
             f"(supply --opt id=value)")
     return out
 
 
-def _substitute_mount_options(spec: PresetSpec, values: dict,
-                              context: str = "add") -> PresetSpec:
+def _substitute_mount_options(spec: PackSpec, values: dict,
+                              context: str = "add") -> PackSpec:
     """Substitute resolved option values into the MOUNT source markers only,
     returning a spec whose mounts are literal. Only options a mount references need
     a value (explicit or default) -- an option feeding ONLY a `[[requires]]` path is
@@ -1089,20 +1089,20 @@ def _substitute_mount_options(spec: PresetSpec, values: dict,
     `--opt` flag and the value is read back from the stamped config (S3)."""
     from . import config as core_config
 
-    new_mounts: list[_PresetMount] = []
+    new_mounts: list[_PackMount] = []
     for m in spec.mounts:
         if m.source_option is None:
             new_mounts.append(m)
             continue
         literal = _resolve_one_option(spec, m.source_option, values, context)
-        where = f"preset '{spec.name}' mount (option '{m.source_option}')"
+        where = f"pack '{spec.name}' mount (option '{m.source_option}')"
         table = mount_table(replace(m, value=literal, source_option=None))
         core_config._parse_mount(table, where, expand_bind=False)
         new_mounts.append(replace(m, value=literal, source_option=None))
     return replace(spec, mounts=tuple(new_mounts))
 
 
-def _apply_host_markers(spec: PresetSpec, resolve_one) -> tuple:
+def _apply_host_markers(spec: PackSpec, resolve_one) -> tuple:
     """Substitute `[[part]]`/`[[rule]]` host markers (#72) via `resolve_one(oid) ->
     literal`, returning `(new_parts, new_rules)` with the dummy positions filled and
     `host_options` cleared. Shared by `_substitute_host_options` (expansion, with
@@ -1120,7 +1120,7 @@ def _apply_host_markers(spec: PresetSpec, resolve_one) -> tuple:
             # option that supplied it.
             if not val:
                 raise ConfigError(
-                    f"preset '{spec.name}': option '{oid}' supplies an empty host")
+                    f"pack '{spec.name}': option '{oid}' supplies an empty host")
             hosts[idx] = val
         # A marker may resolve to a value equal to a literal in the same array (or
         # to another marker's value); dedupe order-preserving so the expanded
@@ -1137,7 +1137,7 @@ def _apply_host_markers(spec: PresetSpec, resolve_one) -> tuple:
             continue
         new_parts.append(replace(
             p, hosts=_sub(p.hosts, p.host_options), host_options=()))
-    new_rules: list[_PresetRule] = []
+    new_rules: list[_PackRule] = []
     for pr in spec.rules:
         if not pr.host_options:
             new_rules.append(pr)
@@ -1148,8 +1148,8 @@ def _apply_host_markers(spec: PresetSpec, resolve_one) -> tuple:
     return tuple(new_parts), tuple(new_rules)
 
 
-def _substitute_host_options(spec: PresetSpec, values: dict,
-                             context: str = "add") -> PresetSpec:
+def _substitute_host_options(spec: PackSpec, values: dict,
+                             context: str = "add") -> PackSpec:
     """Substitute resolved option values into `[[part]]`/`[[rule]]` host markers
     (#72), returning a spec whose part/rule hosts are literal. Mirrors
     `_substitute_mount_options` (per-option resolution with a context-flavored
@@ -1159,7 +1159,7 @@ def _substitute_host_options(spec: PresetSpec, values: dict,
     return replace(spec, parts=parts, rules=rules)
 
 
-def _resolve_one_option(spec: PresetSpec, oid: str, values: dict,
+def _resolve_one_option(spec: PackSpec, oid: str, values: dict,
                         context: str = "add"):
     """The final value for option `oid`: `values[oid]` (coerced) else its declared
     default, else a ConfigError. `context` selects the remedy (see
@@ -1167,20 +1167,20 @@ def _resolve_one_option(spec: PresetSpec, oid: str, values: dict,
     at the read-back path (an option-fed mount was removed or its target changed)."""
     opt = next(o for o in spec.options if o.id == oid)
     if oid in values:
-        return coerce_option_value(opt, values[oid], f"preset '{spec.name}' option")
+        return coerce_option_value(opt, values[oid], f"pack '{spec.name}' option")
     if opt.has_default:
         return opt.default
     if context == "refresh":
         raise ConfigError(
-            f"preset '{spec.name}': could not recover option '{oid}' from the "
+            f"pack '{spec.name}': could not recover option '{oid}' from the "
             f"stamped config (the option-fed mount was removed or its target "
-            f"changed); re-add the pack (`preset add {spec.name} --opt "
+            f"changed); re-add the pack (`pack add {spec.name} --opt "
             f"{oid}=...`) or restore the stamped mount")
     raise ConfigError(
-        f"preset '{spec.name}': unresolved option '{oid}' (supply --opt {oid}=value)")
+        f"pack '{spec.name}': unresolved option '{oid}' (supply --opt {oid}=value)")
 
 
-def apply_option_values(spec: PresetSpec, values: dict) -> PresetSpec:
+def apply_option_values(spec: PackSpec, values: dict) -> PackSpec:
     """Substitute resolved option `values` into every `{ option = "id" }` marker,
     returning a LITERAL spec (`options=()`, no markers left). Mount sources and
     requires paths become their whole literal value; each substituted value is
@@ -1189,21 +1189,21 @@ def apply_option_values(spec: PresetSpec, values: dict) -> PresetSpec:
     `values` must resolve every option (defaults folded via `_finalize_option_values`).
 
     This is the FULL substitution (mounts, requires, AND `[[part]]`/`[[rule]]`
-    hosts #72), used by `preset add` / `create` to build the literal spec whose
-    `requires` feed the #58 prereq run. (`build_preset` uses the expansion-only
+    hosts #72), used by `pack add` / `create` to build the literal spec whose
+    `requires` feed the #58 prereq run. (`build_pack` uses the expansion-only
     `_substitute_mount_options` + `_substitute_host_options`, since the expansion
     never carries requires.)"""
     from . import config as core_config
 
     resolved = _finalize_option_values(spec, values)
 
-    new_mounts: list[_PresetMount] = []
+    new_mounts: list[_PackMount] = []
     for m in spec.mounts:
         if m.source_option is None:
             new_mounts.append(m)
             continue
         literal = resolved[m.source_option]  # a string (bind/volume source)
-        where = f"preset '{spec.name}' mount (option '{m.source_option}')"
+        where = f"pack '{spec.name}' mount (option '{m.source_option}')"
         table = mount_table(replace(m, value=literal, source_option=None))
         # Re-run the shared shape/charset validation now the source is literal.
         core_config._parse_mount(table, where, expand_bind=False)
@@ -1226,7 +1226,7 @@ def apply_option_values(spec: PresetSpec, values: dict) -> PresetSpec:
                    parts=new_parts, rules=new_rules, options=())
 
 
-def resolve_requires_for_check(spec: PresetSpec, option_values: dict):
+def resolve_requires_for_check(spec: PackSpec, option_values: dict):
     """Resolve a stamped pack's `[[requires]]` for the authoritative `doctor` re-run
     (#59): substitute each `path = { option = "id" }` marker with its read-back
     value (`option_values`, recovered from stamped mounts) or the option's default.
@@ -1245,7 +1245,7 @@ def resolve_requires_for_check(spec: PresetSpec, option_values: dict):
         opt = next((o for o in spec.options if o.id == rq.path_option), None)
         if opt is not None and rq.path_option in option_values:
             val = coerce_option_value(opt, option_values[rq.path_option],
-                                      f"preset '{spec.name}' option")
+                                      f"pack '{spec.name}' option")
         elif opt is not None and opt.has_default:
             val = opt.default
         else:
@@ -1255,7 +1255,7 @@ def resolve_requires_for_check(spec: PresetSpec, option_values: dict):
     return resolved, skipped
 
 
-def _validate_require_path(val: str, preset: str, opt_id: str) -> None:
+def _validate_require_path(val: str, pack: str, opt_id: str) -> None:
     """A requires `path` supplied by an option must still be absolute or
     `~`/`$VAR`-rooted (the same determinism rule the literal form enforces at
     definition parse)."""
@@ -1263,14 +1263,14 @@ def _validate_require_path(val: str, preset: str, opt_id: str) -> None:
         import os
         if not os.path.isabs(os.path.expanduser(os.path.expandvars(val))):
             raise ConfigError(
-                f"preset '{preset}': option '{opt_id}' supplies requires path "
+                f"pack '{pack}': option '{opt_id}' supplies requires path "
                 f"{val!r}, which must be absolute or `~`/`$VAR`-rooted "
                 f"(a relative path is nondeterministic across `doctor` runs)")
 
 
 @dataclass(frozen=True)
-class PresetExpansion:
-    """A preset expanded: the ordinary bindings/rules/container-half it merges into
+class PackExpansion:
+    """A pack expanded: the ordinary bindings/rules/container-half it merges into
     a workspace's effective model (and the CLI snapshots in the lockfile). `rev`
     (the definition-file digest) pins the snapshot to a pack revision.
     Mounts/env/setup are the container half."""
@@ -1278,7 +1278,7 @@ class PresetExpansion:
     rev: str
     bindings: tuple[Binding, ...]
     rules: tuple["core_rules.Rule", ...]
-    mounts: tuple[_PresetMount, ...]
+    mounts: tuple[_PackMount, ...]
     env: tuple[tuple[str, str], ...]
     setup: tuple[dict, ...]
 
@@ -1287,7 +1287,7 @@ class PresetExpansion:
         return bool(self.mounts or self.env or self.setup)
 
 
-def preset_slot_set(spec: PresetSpec) -> tuple[str, ...]:
+def pack_slot_set(spec: PackSpec) -> tuple[str, ...]:
     """The single secret slot set every part of a binding-carrying pack shares
     (#71). All parts couple ONE credential -- the same `secret` ref(s) thread into
     each part's binding unchanged -- so their injectors MUST declare the identical
@@ -1298,7 +1298,7 @@ def preset_slot_set(spec: PresetSpec) -> tuple[str, ...]:
     An unresolvable part injector raises here too -- strictly earlier and clearer
     than the same failure downstream in `load_bindings`.
 
-    Note: this validates ALL declared parts, at `build_preset` time -- BEFORE a
+    Note: this validates ALL declared parts, at `build_pack` time -- BEFORE a
     ref's `disable`/`override` narrows the expansion. So a pack whose parts declare
     divergent slots is inexpressible even by disabling the odd part (a
     single-credential pack with divergent slots is a definition smell -- split it
@@ -1311,14 +1311,14 @@ def preset_slot_set(spec: PresetSpec) -> tuple[str, ...]:
             inj = find_injector(part.injector)
         except CredproxyError as e:
             raise ConfigError(
-                f"preset '{spec.name}' part '{part.suffix}': {e}") from e
+                f"pack '{spec.name}' part '{part.suffix}': {e}") from e
         slot_by_part[part.suffix] = tuple(inj.spec.slots)
     distinct = {frozenset(sl) for sl in slot_by_part.values()}
     if len(distinct) > 1:
         detail = "; ".join(f"'{s}' -> {{{', '.join(sl)}}}"
                            for s, sl in slot_by_part.items())
         raise ConfigError(
-            f"preset '{spec.name}': all parts share one credential, so their "
+            f"pack '{spec.name}': all parts share one credential, so their "
             f"injectors must declare the same secret slots, but they differ: "
             f"{detail}")
     # Return the first part's ordering (all sets are equal); () if no parts.
@@ -1333,18 +1333,18 @@ def _secret_slot_set(secret) -> set[str]:
     return set(secret or {})
 
 
-def build_preset(preset: str, provider: str | None = None,
+def build_pack(pack: str, provider: str | None = None,
                  secret: str | dict | None = None,
                  options: dict | None = None,
                  context: str = "add",
-                 placeholder: str | None = None) -> PresetExpansion:
-    """Expand `preset` into a `PresetExpansion`. All bindings share one
+                 placeholder: str | None = None) -> PackExpansion:
+    """Expand `pack` into a `PackExpansion`. All bindings share one
     placeholder (freshly generated, or `placeholder` when the caller reuses one
     from the lock) and resolve the same `secret` -- a bare ref (single-slot) or a
     `{slot: ref}` table (multi-slot, #71) -- via `provider` (both None for a pack
-    with no bindings). Each rule's `name` is filled to `<preset>-<suffix>`.
+    with no bindings). Each rule's `name` is filled to `<pack>-<suffix>`.
     Mounts/env/setup carry through verbatim. Raises CredproxyError on an unknown
-    preset, and a ConfigError when the parts' injectors declare divergent slot
+    pack, and a ConfigError when the parts' injectors declare divergent slot
     sets or the supplied `secret` doesn't match that shared set.
 
     `options` (#59) maps resolved option ids to values; when the pack declares
@@ -1354,7 +1354,7 @@ def build_preset(preset: str, provider: str | None = None,
     with neither raises (porcelain resolves + reports the structured missing error
     before reaching here). `context` (`"add"` | `"refresh"`) flavors that
     unresolved-option remedy."""
-    spec = get_preset(preset)
+    spec = get_pack(pack)
     if spec.options:
         spec = _substitute_mount_options(spec, options or {}, context)
         spec = _substitute_host_options(spec, options or {}, context)
@@ -1362,12 +1362,12 @@ def build_preset(preset: str, provider: str | None = None,
         # All parts share one credential (#71): validate the injectors agree on a
         # slot set and the supplied secret matches it, BEFORE minting bindings, so
         # a mismatch fails the whole expansion (atomic add/refresh) with a
-        # preset-framed message rather than a per-binding one downstream.
-        slots = preset_slot_set(spec)
+        # pack-framed message rather than a per-binding one downstream.
+        slots = pack_slot_set(spec)
         provided = _secret_slot_set(secret)
         if provided != set(slots):
             raise ConfigError(
-                f"preset '{spec.name}': the secret provides slot(s) "
+                f"pack '{spec.name}': the secret provides slot(s) "
                 f"{{{', '.join(sorted(provided))}}} but the pack's injector(s) "
                 f"declare {{{', '.join(slots)}}} -- pass `--secret SLOT=REF` for "
                 f"each declared slot")
@@ -1387,18 +1387,18 @@ def build_preset(preset: str, provider: str | None = None,
     )
     rules = tuple(replace(pr.rule, name=f"{spec.name}-{pr.suffix}")
                   for pr in spec.rules)
-    return PresetExpansion(
+    return PackExpansion(
         name=spec.name, rev=spec.rev, bindings=bindings, rules=rules,
         mounts=spec.mounts, env=spec.env, setup=spec.setup,
     )
 
 
-# ---- intent-file `[[preset]]` references (config-v2) -------------------------
+# ---- intent-file `[[pack]]` references (config-v2) -------------------------
 
 
 @dataclass(frozen=True)
-class PresetRef:
-    """One `[[preset]]` reference in a workspace TOML (config-v2). A durable
+class PackRef:
+    """One `[[pack]]` reference in a workspace TOML (config-v2). A durable
     pointer to a pack the resolver expands at resolve time and snapshots in the
     lock. `provider`/`secret` may be omitted (pack defaults fill them at
     expansion); `options` supplies pack `[[option]]` values; `disable` omits
@@ -1413,35 +1413,35 @@ class PresetRef:
     overrides: dict               # {suffix: {field: value}}
 
 
-# Fields a `[preset.override.<suffix>]` may NOT replace: the identity that names
+# Fields a `[pack.override.<suffix>]` may NOT replace: the identity that names
 # the expanded binding/rule (its `name`), a part's declared `suffix`, and the
 # generated shared `placeholder` (the pack's stable identity, reused from the lock
 # and never rotated -- overriding it would displace the recorded shared value).
 _OVERRIDE_FORBIDDEN = ("name", "suffix", "placeholder")
 
-# Fields a `[preset.override.<suffix>]` targeting a BINDING may replace: the
+# Fields a `[pack.override.<suffix>]` targeting a BINDING may replace: the
 # overridable `[[binding]]` fields, minus the identity/generated ones already in
 # `_OVERRIDE_FORBIDDEN` (`name`/`placeholder`). An unknown key here (e.g. `host`
 # for `hosts`) is a typo that would silently no-op forever, so it errors.
 _BINDING_OVERRIDE_FIELDS = ("hosts", "injector", "provider", "secret", "env")
 
 
-def parse_preset_refs(raw: dict, source: str) -> list[PresetRef]:
-    """Extract + validate the `[[preset]]` references from a parsed workspace
+def parse_pack_refs(raw: dict, source: str) -> list[PackRef]:
+    """Extract + validate the `[[pack]]` references from a parsed workspace
     TOML. `source` labels errors. Returns [] when there are none. Known keys only
     (`name`/`provider`/`secret`/`disable`/`options`/`override`); `disable` and
     `override` suffixes are checked against the pack AT EXPANSION (the pack defines
     the valid suffixes, not the loader)."""
-    entries_raw = raw.get("preset")
+    entries_raw = raw.get("pack")
     if entries_raw is None:
         return []
     if not isinstance(entries_raw, list):
-        raise ConfigError(f"{source}: `[[preset]]` must be an array of tables")
+        raise ConfigError(f"{source}: `[[pack]]` must be an array of tables")
     allowed = {"name", "provider", "secret", "disable", "options", "override"}
-    out: list[PresetRef] = []
+    out: list[PackRef] = []
     seen: set[str] = set()
     for i, e in enumerate(entries_raw):
-        where = f"{source}: preset[{i}]"
+        where = f"{source}: pack[{i}]"
         if not isinstance(e, dict):
             raise ConfigError(f"{where} must be a table")
         extra = sorted(set(e) - allowed)
@@ -1454,10 +1454,10 @@ def parse_preset_refs(raw: dict, source: str) -> list[PresetRef]:
             raise ConfigError(f"{where} 'name' must be a non-empty string")
         if name in seen:
             raise ConfigError(
-                f"{where} duplicate `[[preset]]` reference for {name!r} "
+                f"{where} duplicate `[[pack]]` reference for {name!r} "
                 f"(each pack is referenced once)")
         seen.add(name)
-        where = f"{source}: preset '{name}'"
+        where = f"{source}: pack '{name}'"
         provider = e.get("provider")
         if provider is not None and (not isinstance(provider, str) or not provider):
             raise ConfigError(f"{where}: 'provider' must be a non-empty string")
@@ -1466,10 +1466,10 @@ def parse_preset_refs(raw: dict, source: str) -> list[PresetRef]:
         options = e.get("options")
         if options is not None and not isinstance(options, dict):
             raise ConfigError(
-                f"{where}: 'options' must be a `[preset.options]` table of "
+                f"{where}: 'options' must be a `[pack.options]` table of "
                 f"`id = value` pairs")
         overrides = _parse_ref_overrides(e.get("override"), where)
-        out.append(PresetRef(
+        out.append(PackRef(
             name=name, provider=provider, secret=secret,
             options=dict(options) if options else {},
             disable=disable, overrides=overrides))
@@ -1477,8 +1477,8 @@ def parse_preset_refs(raw: dict, source: str) -> list[PresetRef]:
 
 
 def _parse_ref_secret(secret, where: str):
-    """A `[[preset]]` `secret`: a single ref (str) or a `{slot = ref}` table
-    (multi-slot), mirroring `preset add`'s one `--secret`, or absent (None)."""
+    """A `[[pack]]` `secret`: a single ref (str) or a `{slot = ref}` table
+    (multi-slot), mirroring `pack add`'s one `--secret`, or absent (None)."""
     if secret is None:
         return None
     if isinstance(secret, str):
@@ -1507,13 +1507,13 @@ def _parse_ref_disable(disable, where: str) -> tuple[str, ...]:
 
 
 def _parse_ref_overrides(override, where: str) -> dict:
-    """A `[preset.override.<suffix>]` table-of-tables: each suffix maps to a table
+    """A `[pack.override.<suffix>]` table-of-tables: each suffix maps to a table
     of whole-field replacements. Identity fields (`name`/`suffix`) are refused."""
     if override is None:
         return {}
     if not isinstance(override, dict):
         raise ConfigError(
-            f"{where}: 'override' must be a `[preset.override.<suffix>]` "
+            f"{where}: 'override' must be a `[pack.override.<suffix>]` "
             f"table of per-suffix field tables")
     out: dict = {}
     for suffix, fields in override.items():
@@ -1531,8 +1531,8 @@ def _parse_ref_overrides(override, where: str) -> dict:
     return out
 
 
-def preset_ref_inputs(ref: PresetRef) -> dict:
-    """The canonical, JSON-clean INPUTS of a `[[preset]]` ref -- what the lock
+def pack_ref_inputs(ref: PackRef) -> dict:
+    """The canonical, JSON-clean INPUTS of a `[[pack]]` ref -- what the lock
     records so a later resolve can tell whether the operator changed the reference
     (re-expand) or only the definition changed (stay inert). Omitted fields are
     absent (a hand-authored ref that relies on pack defaults stays stable even if
@@ -1551,51 +1551,51 @@ def preset_ref_inputs(ref: PresetRef) -> dict:
     return d
 
 
-# A `[[preset]]` table header line (a trailing comment is allowed) and the
-# `[preset.options]` / `[preset.override.<suffix>]` child sub-tables that BELONG
+# A `[[pack]]` table header line (a trailing comment is allowed) and the
+# `[pack.options]` / `[pack.override.<suffix>]` child sub-tables that BELONG
 # to it. The child regex MUST fold those children into the block span, or a
-# `preset remove` would orphan them and corrupt the file (the child-table bug
+# `pack remove` would orphan them and corrupt the file (the child-table bug
 # class caught in #62/#63). Mirrors `_BINDING_CHILD_RE`/`_RULE_CHILD_RE`.
 #
-# These are the SINGLE source for both the model-side `remove_preset` and the
-# porcelain `_rewrite_template_preset_blocks` (create-time `[[preset]]` rewrite)
-# -- a spelling divergence between the two once let `[preset . options]` (a
+# These are the SINGLE source for both the model-side `remove_pack` and the
+# porcelain `_rewrite_template_pack_blocks` (create-time `[[pack]]` rewrite)
+# -- a spelling divergence between the two once let `[pack . options]` (a
 # whitespace-spelled child, valid TOML naming the SAME table) escape one span and
 # corrupt the file. The child regex is whitespace-TOLERANT around the dot so a
 # spaced-dot child folds into its block. (The "child separated by an intervening
 # top-level table" and quoted-key cases stay a shared limitation with
 # `_BINDING_CHILD_RE`/`_RULE_CHILD_RE`.)
-_PRESET_HEADER_RE = re.compile(r"^\s*\[\[\s*preset\s*\]\]\s*(#.*)?$")
-_PRESET_CHILD_RE = re.compile(r"^\s*\[\s*preset\s*\.\s*[^\[\]\n]+\]\s*(#.*)?$")
+_PACK_HEADER_RE = re.compile(r"^\s*\[\[\s*pack\s*\]\]\s*(#.*)?$")
+_PACK_CHILD_RE = re.compile(r"^\s*\[\s*pack\s*\.\s*[^\[\]\n]+\]\s*(#.*)?$")
 
 
-def remove_preset(ws: "Workspace", name: str) -> None:
-    """Remove the named `[[preset]]` reference block -- header AND its
-    `[preset.options]`/`[preset.override.*]` child sub-tables -- from the workspace
-    TOML via a surgical whole-block delete, then drop the lock's `presets[name]`
+def remove_pack(ws: "Workspace", name: str) -> None:
+    """Remove the named `[[pack]]` reference block -- header AND its
+    `[pack.options]`/`[pack.override.*]` child sub-tables -- from the workspace
+    TOML via a surgical whole-block delete, then drop the lock's `packs[name]`
     snapshot. Same mechanics/constraints as `remove_binding`: raises if the pack
-    isn't referenced, and refuses the inline-array form (`preset = [ { ... } ]`)
+    isn't referenced, and refuses the inline-array form (`pack = [ { ... } ]`)
     with a prescriptive rewrite hint rather than editing the wrong block."""
     from .bindings import _block_spans, _atomic_write_text
 
     text = ws.config_path.read_text()
     raw = tomllib.loads(text)
     source = str(ws.config_path)
-    refs = parse_preset_refs(raw, source)     # rejects duplicate references
+    refs = parse_pack_refs(raw, source)     # rejects duplicate references
     matches = [i for i, r in enumerate(refs) if r.name == name]
     if not matches:
-        raise ConfigError(f"preset '{name}' is not referenced in {ws.config_path}")
+        raise ConfigError(f"pack '{name}' is not referenced in {ws.config_path}")
     target = matches[0]
 
     lines = text.splitlines(keepends=True)
-    spans = _block_spans(text, header_re=_PRESET_HEADER_RE,
-                         child_re=_PRESET_CHILD_RE)
+    spans = _block_spans(text, header_re=_PACK_HEADER_RE,
+                         child_re=_PACK_CHILD_RE)
     # The inline-array form parses to refs but yields ZERO block spans, so the
     # span<->ref indexing would be wrong (or IndexError). Refuse with a fix.
     if len(spans) != len(refs):
         raise ConfigError(
-            f"'{name}' isn't a removable `[[preset]]` block in {ws.config_path} "
-            f"-- rewrite it as a `[[preset]]` table to remove it")
+            f"'{name}' isn't a removable `[[pack]]` block in {ws.config_path} "
+            f"-- rewrite it as a `[[pack]]` table to remove it")
     start, end = spans[target]
     # Drop one preceding blank separator so repeated add/remove doesn't accumulate
     # blank lines.
@@ -1607,14 +1607,14 @@ def remove_preset(ws: "Workspace", name: str) -> None:
     # Drop the removed pack's lock snapshot, so no stale expansion lingers.
     from . import lock as lock_mod
     lock = lock_mod.load_lock(ws)
-    if name in lock.get("presets", {}):
-        del lock["presets"][name]
+    if name in lock.get("packs", {}):
+        del lock["packs"][name]
         lock_mod.save_lock(ws, lock)
 
 
-def _suffix_of(preset: str, name: str) -> str:
-    """The `<suffix>` of an expanded `<preset>-<suffix>` binding/rule name."""
-    prefix = f"{preset}-"
+def _suffix_of(pack: str, name: str) -> str:
+    """The `<suffix>` of an expanded `<pack>-<suffix>` binding/rule name."""
+    prefix = f"{pack}-"
     return name[len(prefix):] if name.startswith(prefix) else name
 
 
@@ -1629,7 +1629,7 @@ def _rule_to_dict(r: "core_rules.Rule") -> dict:
     return tomllib.loads(core_rules._render_rule_block(r))["rule"][0]
 
 
-def expansion_to_lock(exp: PresetExpansion, ref: PresetRef) -> dict:
+def expansion_to_lock(exp: PackExpansion, ref: PackRef) -> dict:
     """Apply a ref's `disable`/`override` to `exp` and serialize the result to the
     lock's intent-level `expansion` dicts. Validates that every `disable`/`override`
     suffix names a real part/rule suffix of the pack (raising otherwise, naming the
@@ -1644,7 +1644,7 @@ def expansion_to_lock(exp: PresetExpansion, ref: PresetRef) -> dict:
         bad = [s for s in suffixes if s not in valid]
         if bad:
             raise ConfigError(
-                f"preset '{exp.name}': {what} names unknown suffix(es) "
+                f"pack '{exp.name}': {what} names unknown suffix(es) "
                 f"{', '.join(repr(s) for s in bad)} -- valid suffixes: "
                 f"{', '.join(sorted(valid)) or '(none)'}")
 
@@ -1662,7 +1662,7 @@ def expansion_to_lock(exp: PresetExpansion, ref: PresetRef) -> dict:
         bad = sorted(set(ov) - set(_BINDING_OVERRIDE_FIELDS))
         if bad:
             raise ConfigError(
-                f"preset '{exp.name}': override '{suffix}' names unknown binding "
+                f"pack '{exp.name}': override '{suffix}' names unknown binding "
                 f"field(s) {', '.join(repr(k) for k in bad)} -- overridable "
                 f"binding fields: {', '.join(_BINDING_OVERRIDE_FIELDS)}")
 
@@ -1696,7 +1696,7 @@ def expansion_to_lock(exp: PresetExpansion, ref: PresetRef) -> dict:
 def lock_expansion_to_model(name: str, expansion: dict, source: str):
     """Reconstruct effective bindings/rules + container-half dicts from a lock
     `expansion` snapshot, feeding each intent dict back through the SAME field
-    parsers the literal path uses -- so a preset part is held to identical
+    parsers the literal path uses -- so a pack part is held to identical
     validation and produces identical `Binding`/`Rule` objects. Returns
     `(bindings, rules, mounts, env, setup)`; `mounts`/`env`/`setup` are the raw
     intent dicts (the engine re-normalizes mounts through `config._parse_mount`)."""
@@ -1705,7 +1705,7 @@ def lock_expansion_to_model(name: str, expansion: dict, source: str):
 
     b_raw = {"binding": list(expansion.get("bindings", []))}
     r_raw = {"rule": list(expansion.get("rules", []))}
-    src = f"{source}: preset '{name}'"
+    src = f"{source}: pack '{name}'"
     bindings = _parse_bindings(b_raw, src)
     _require_binding_names(bindings, src)
     rules = _parse_rules(r_raw, src)

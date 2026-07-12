@@ -52,47 +52,47 @@ class InjectorError(CredproxyError):
     (missing/invalid `header`, bad `[placeholder]` charset, etc.)."""
 
 
-class PresetTemplateError(ConfigError):
-    """A template-declared `[[preset]]` entry (#57) can't be expanded at `create`
+class PackTemplateError(ConfigError):
+    """A template-declared `[[pack]]` entry (#57) can't be expanded at `create`
     time because a required field (provider/secret) is missing and the pack has no
-    default for it. Carries `preset` + `missing` so `--json` can serialize the
-    structured `{preset, missing}` shape (surfaced via `json_fields`)."""
+    default for it. Carries `pack` + `missing` so `--json` can serialize the
+    structured `{pack, missing}` shape (surfaced via `json_fields`)."""
 
-    def __init__(self, preset: str, missing: list[str]):
-        self.preset = preset
+    def __init__(self, pack: str, missing: list[str]):
+        self.pack = pack
         self.missing = list(missing)
         joined = " and ".join(f"`{m}`" for m in self.missing)
         add_flags = " ".join(f"--{m} ..." for m in self.missing)
         super().__init__(
-            f"template preset '{preset}' is missing {joined} -- fill it in the "
-            f"`[[preset]]` entry (name/provider/secret) in your "
+            f"template pack '{pack}' is missing {joined} -- fill it in the "
+            f"`[[pack]]` entry (name/provider/secret) in your "
             f"workspace.template.toml, or drop the entry and run "
-            f"`credproxy workspace NAME preset add {preset} {add_flags}` after "
+            f"`credproxy workspace NAME pack add {pack} {add_flags}` after "
             f"create")
 
     @property
     def json_fields(self) -> dict:
-        return {"preset": self.preset, "missing": self.missing}
+        return {"pack": self.pack, "missing": self.missing}
 
 
-class PresetOptionsError(ConfigError):
-    """A preset expansion (`preset add` / template `[[preset]]`) can't resolve one
-    or more required pack `[[option]]`s (#59): no explicit `--opt`/`[preset.options]`
+class PackOptionsError(ConfigError):
+    """A pack expansion (`pack add` / template `[[pack]]`) can't resolve one
+    or more required pack `[[option]]`s (#59): no explicit `--opt`/`[pack.options]`
     value, no default, and no prompt (strict, or loose without a TTY). Carries
-    `preset` + `missing` -- a list of `{id, type, description, enum?}` dicts -- so
-    `--json` serializes the structured `{preset, missing}` shape an agent re-invokes
+    `pack` + `missing` -- a list of `{id, type, description, enum?}` dicts -- so
+    `--json` serializes the structured `{pack, missing}` shape an agent re-invokes
     against (`--opt id=value` per entry)."""
 
-    def __init__(self, preset: str, missing: list[dict]):
-        self.preset = preset
+    def __init__(self, pack: str, missing: list[dict]):
+        self.pack = pack
         self.missing = list(missing)
         ids = ", ".join(m["id"] for m in self.missing)
         flags = " ".join(f"--opt {m['id']}=..." for m in self.missing)
         super().__init__(
-            f"preset '{preset}' needs option value(s): {ids} -- supply {flags} "
+            f"pack '{pack}' needs option value(s): {ids} -- supply {flags} "
             f"(or a default in the pack, or run on the loose surface in a terminal "
             f"to be prompted)")
 
     @property
     def json_fields(self) -> dict:
-        return {"preset": self.preset, "missing": self.missing}
+        return {"pack": self.pack, "missing": self.missing}

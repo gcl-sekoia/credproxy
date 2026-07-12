@@ -5,10 +5,10 @@
     side effect -- in particular `scaffold --help` must not write a file named
     '--help' (the original bug).
   - `binding add`/`binding test`/`create` print descriptive help.
-  - `preset list` enumerates the coordinated multi-binding sets, and a
-    `--preset` add announces its expansion.
+  - `pack list` enumerates the coordinated multi-binding sets, and a
+    `--pack` add announces its expansion.
   - the scaffolded TOML template references a real injector (not the `github`
-    preset) and the canonical `workspace NAME start` verb order.
+    pack) and the canonical `workspace NAME start` verb order.
 """
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def test_binding_add_help_describes_flags(xdg):
     blob = out + err
     # The friction the blind agents hit: what does --secret mean for env?
     assert "host env var NAME" in blob
-    assert "--injector" in blob   # --preset retired -> `preset add` noun
+    assert "--injector" in blob   # --pack retired -> `pack add` noun
 
 
 def test_binding_test_help_exits_zero(xdg):
@@ -116,19 +116,19 @@ def test_start_help_does_not_start(xdg):
     assert code == 0
 
 
-# ---- preset list -------------------------------------------------------------
+# ---- pack list -------------------------------------------------------------
 
 
-def test_preset_list_human():
-    code, out, err = _run(["preset", "list"])
+def test_pack_list_human():
+    code, out, err = _run(["pack", "list"])
     assert code == 0
     blob = out + err
     assert "github" in blob
     assert "github-api" in blob and "github-git" in blob and "github-ghcr" in blob
 
 
-def test_preset_list_json():
-    code, out, err = _run(["--json", "preset", "list"])
+def test_pack_list_json():
+    code, out, err = _run(["--json", "pack", "list"])
     assert code == 0
     data = json.loads(out)
     names = {p["name"] for p in data}
@@ -139,39 +139,39 @@ def test_preset_list_json():
     assert api["injector"] == "bearer" and api["hosts"] == ["api.github.com"]
 
 
-def test_preset_bare_and_help_both_list():
-    for argv in (["preset"], ["preset", "--help"]):
+def test_pack_bare_and_help_both_list():
+    for argv in (["pack"], ["pack", "--help"]):
         code, out, err = _run(argv)
         assert code == 0 and "github" in (out + err)
 
 
-def test_preset_unknown_subcommand_errors():
-    code, out, err = _run(["preset", "bogus"])
+def test_pack_unknown_subcommand_errors():
+    code, out, err = _run(["pack", "bogus"])
     assert code == 1
 
 
-# ---- preset expansion is announced -------------------------------------------
+# ---- pack expansion is announced -------------------------------------------
 
 
-def test_preset_add_announces_expansion(ws_factory):
+def test_pack_add_announces_expansion(ws_factory):
     ws_factory("demo")
     code, out, err = _run(
-        ["workspace", "demo", "preset", "add", "github",
+        ["workspace", "demo", "pack", "add", "github",
          "--provider", "env", "--secret", "GITHUB_TOKEN"]
     )
     assert code == 0
     blob = out + err
-    assert "applied preset 'github'" in blob and "3 binding(s)" in blob
+    assert "applied pack 'github'" in blob and "3 binding(s)" in blob
 
 
-# ---- preset default provider / secret ----------------------------------------
+# ---- pack default provider / secret ----------------------------------------
 
 
-def test_preset_github_defaults_provider_and_secret(ws_factory):
-    """`preset add github` with no flags wires all three bindings off the gh-cli
+def test_pack_github_defaults_provider_and_secret(ws_factory):
+    """`pack add github` with no flags wires all three bindings off the gh-cli
     provider with the github.com host as the ref."""
     ws = ws_factory("demo")
-    code, out, err = _run(["workspace", "demo", "preset", "add", "github"])
+    code, out, err = _run(["workspace", "demo", "pack", "add", "github"])
     assert code == 0, out + err
     from credproxy_cli.core.model.bindings import load_bindings
     bindings = _rbindings(ws)
@@ -179,11 +179,11 @@ def test_preset_github_defaults_provider_and_secret(ws_factory):
     assert all(b.provider == "gh-cli" and b.secret == "github.com" for b in bindings)
 
 
-def test_preset_github_secret_override_keeps_default_provider(ws_factory):
+def test_pack_github_secret_override_keeps_default_provider(ws_factory):
     """An explicit --secret (e.g. an Enterprise host) overrides the ref while the
     provider still defaults to gh-cli."""
     ws = ws_factory("demo")
-    code, out, err = _run(["workspace", "demo", "preset", "add", "github",
+    code, out, err = _run(["workspace", "demo", "pack", "add", "github",
                            "--secret", "ghe.corp.com"])
     assert code == 0, out + err
     from credproxy_cli.core.model.bindings import load_bindings
@@ -191,18 +191,18 @@ def test_preset_github_secret_override_keeps_default_provider(ws_factory):
                for b in _rbindings(ws))
 
 
-def test_preset_nondefault_provider_requires_secret(ws_factory):
+def test_pack_nondefault_provider_requires_secret(ws_factory):
     """A non-default provider can't borrow the default ref -- a ref's meaning is
     provider-specific -- so --secret stays required."""
     ws_factory("demo")
-    code, out, err = _run(["workspace", "demo", "preset", "add", "github",
+    code, out, err = _run(["workspace", "demo", "pack", "add", "github",
                            "--provider", "env"])
     assert code == 1
     assert "needs --secret" in (out + err)
 
 
 def test_injector_add_still_requires_provider(ws_factory):
-    """With --provider now optional at the parser level (so presets can default
+    """With --provider now optional at the parser level (so packs can default
     it), the --injector path must still demand it explicitly."""
     ws_factory("demo")
     code, out, err = _run(["workspace", "demo", "binding", "add", "--injector",
@@ -215,7 +215,7 @@ def test_injector_add_still_requires_provider(ws_factory):
 
 
 def test_template_uses_real_injector_and_verb_order(ws_factory):
-    """The template must not present the `github` PRESET as an injector, and
+    """The template must not present the `github` PACK as an injector, and
     must use the canonical `workspace NAME start` verb order."""
     from credproxy_cli.core.model.config import render_template
     rendered = render_template("demo")
@@ -225,14 +225,14 @@ def test_template_uses_real_injector_and_verb_order(ws_factory):
     assert "credproxy start demo" not in rendered
 
 
-# ---- preset add: service setup packs (#37) ----------------------------------
+# ---- pack add: service setup packs (#37) ----------------------------------
 
 
-def _install_preset(preset_name: str, toml: str, scripts: dict | None = None):
+def _install_pack(pack_name: str, toml: str, scripts: dict | None = None):
     from credproxy_cli.core.paths import config_dir, scripts_config_dir
-    pd = config_dir() / "presets"
+    pd = config_dir() / "packs"
     pd.mkdir(parents=True, exist_ok=True)
-    (pd / f"{preset_name}.toml").write_text(toml)
+    (pd / f"{pack_name}.toml").write_text(toml)
     for sname, src in (scripts or {}).items():
         sd = scripts_config_dir()
         sd.mkdir(parents=True, exist_ok=True)
@@ -241,7 +241,7 @@ def _install_preset(preset_name: str, toml: str, scripts: dict | None = None):
 
 _GUARD_STAR = "def on_request():\n    return True\n"
 
-_MIXED_PRESET = """
+_MIXED_PACK = """
 [placeholder]
 prefix = "ghp_"
 length = 40
@@ -263,10 +263,10 @@ allow_prefixes = ["/repos/scratch-"]
 """
 
 
-def test_preset_add_stamps_bindings_and_rules(ws_factory):
+def test_pack_add_stamps_bindings_and_rules(ws_factory):
     ws = ws_factory("demo")
-    _install_preset("gh-guarded", _MIXED_PRESET, scripts={"guard": _GUARD_STAR})
-    code, out, err = _run(["workspace", "demo", "preset", "add", "gh-guarded",
+    _install_pack("gh-guarded", _MIXED_PACK, scripts={"guard": _GUARD_STAR})
+    code, out, err = _run(["workspace", "demo", "pack", "add", "gh-guarded",
                            "--provider", "env", "--secret", "GITHUB_TOKEN"])
     assert code == 0, out + err
     from credproxy_cli.core.model.bindings import load_bindings
@@ -278,12 +278,12 @@ def test_preset_add_stamps_bindings_and_rules(ws_factory):
     assert rules[0].params == {"allow_prefixes": ["/repos/scratch-"]}
 
 
-def test_preset_add_pure_rule_no_flags(ws_factory):
+def test_pack_add_pure_rule_no_flags(ws_factory):
     ws = ws_factory("demo")
-    _install_preset("policy",
+    _install_pack("policy",
                     '[[rule]]\nsuffix="noDelete"\nhosts=["api.github.com"]\n'
                     'action="block"\nmethods=["DELETE"]\n')
-    code, out, err = _run(["workspace", "demo", "preset", "add", "policy"])
+    code, out, err = _run(["workspace", "demo", "pack", "add", "policy"])
     assert code == 0, out + err
     from credproxy_cli.core.model.bindings import load_bindings
     from credproxy_cli.core.model.rules import load_rules
@@ -291,25 +291,25 @@ def test_preset_add_pure_rule_no_flags(ws_factory):
     assert [r.name for r in _rrules(ws)] == ["policy-noDelete"]
 
 
-def test_preset_add_pure_rule_rejects_provider(ws_factory):
+def test_pack_add_pure_rule_rejects_provider(ws_factory):
     ws_factory("demo")
-    _install_preset("policy", '[[rule]]\nsuffix="b"\nhosts=["h.example"]\n'
+    _install_pack("policy", '[[rule]]\nsuffix="b"\nhosts=["h.example"]\n'
                               'action="block"\n')
-    code, out, err = _run(["workspace", "demo", "preset", "add", "policy",
+    code, out, err = _run(["workspace", "demo", "pack", "add", "policy",
                            "--provider", "env", "--secret", "X"])
     assert code == 1
     assert "pure-rule" in (out + err)
 
 
-def test_preset_add_atomic_collision_no_partial_stamp(ws_factory):
+def test_pack_add_atomic_collision_no_partial_stamp(ws_factory):
     ws = ws_factory("demo")
-    _install_preset("gh-guarded", _MIXED_PRESET, scripts={"guard": _GUARD_STAR})
-    # Pre-create a binding whose name collides with the preset's rule expansion.
+    _install_pack("gh-guarded", _MIXED_PACK, scripts={"guard": _GUARD_STAR})
+    # Pre-create a binding whose name collides with the pack's rule expansion.
     from credproxy_cli.core.model.bindings import Binding, append_bindings
     append_bindings(ws, [Binding(
         name="gh-guarded-api", injector="bearer", provider="env", secret="T",
         hosts=("api.github.com",), placeholder="ghp_x", env=None)])
-    code, out, err = _run(["workspace", "demo", "preset", "add", "gh-guarded",
+    code, out, err = _run(["workspace", "demo", "pack", "add", "gh-guarded",
                            "--provider", "env", "--secret", "T"])
     assert code == 1
     assert "collides with a literal" in (out + err)
@@ -317,35 +317,35 @@ def test_preset_add_atomic_collision_no_partial_stamp(ws_factory):
     assert _rrules(ws) == []
 
 
-def test_preset_add_announces_newly_intercepted(ws_factory):
+def test_pack_add_announces_newly_intercepted(ws_factory):
     ws_factory("demo")
-    _install_preset("policy", '[[rule]]\nsuffix="b"\nhosts=["fresh.example.com"]\n'
+    _install_pack("policy", '[[rule]]\nsuffix="b"\nhosts=["fresh.example.com"]\n'
                               'action="block"\n')
-    code, out, err = _run(["workspace", "demo", "preset", "add", "policy"])
+    code, out, err = _run(["workspace", "demo", "pack", "add", "policy"])
     assert code == 0, out + err
     assert "newly intercepted" in (out + err) and "fresh.example.com" in (out + err)
 
 
-def test_binding_add_preset_flag_retired(ws_factory):
+def test_binding_add_pack_flag_retired(ws_factory):
     ws_factory("demo")
     code, out, err = _run(["workspace", "demo", "binding", "add",
-                           "--preset", "github"])
-    # --preset is gone from binding add; argparse rejects the unknown flag.
+                           "--pack", "github"])
+    # --pack is gone from binding add; argparse rejects the unknown flag.
     assert code != 0
 
 
-def test_preset_add_loose_resolves_default_workspace(ws_factory):
+def test_pack_add_loose_resolves_default_workspace(ws_factory):
     from credproxy_cli.core.model.pointer import set_default
     ws = ws_factory("demo")
     set_default(ws)
-    _install_preset("policy", '[[rule]]\nsuffix="b"\nhosts=["h.example"]\n'
+    _install_pack("policy", '[[rule]]\nsuffix="b"\nhosts=["h.example"]\n'
                               'action="block"\n')
-    code, out, err = _run(["--loose", "preset", "add", "policy"])
+    code, out, err = _run(["--loose", "pack", "add", "policy"])
     assert code == 0, out + err
     from credproxy_cli.core.model.rules import load_rules
     assert [r.name for r in _rrules(ws)] == ["policy-b"]
 
 
-def test_preset_add_strict_top_level_needs_workspace():
-    code, out, err = _run(["preset", "add", "github"])   # strict, no workspace
+def test_pack_add_strict_top_level_needs_workspace():
+    code, out, err = _run(["pack", "add", "github"])   # strict, no workspace
     assert code == 1 and "needs a workspace" in (out + err)

@@ -1,4 +1,4 @@
-"""Evaluate a preset's declarative `[[requires]]` host-prerequisites (#58).
+"""Evaluate a pack's declarative `[[requires]]` host-prerequisites (#58).
 
 A pack DECLARES host-side prerequisites its container half can't provide -- a
 signing-key socket dir, the `gh` CLI on PATH, an env var, a provider that can
@@ -8,10 +8,10 @@ implemented here, so cloning a fork's overlay can't run its code at check time.
 The single sanctioned host-executable seam stays the provider protocol, reached
 only through the existing `bindings.test_binding` path for the `provider` kind.
 
-Checks are advisory at reference time (`preset add`/`create` report failures but
+Checks are advisory at reference time (`pack add`/`create` report failures but
 still land the reference -- the config is durable, host state is fixable
 afterward) and authoritative at `doctor` time. `doctor` re-runs them, discovering
-which packs a workspace uses from its `[[preset]]` references + the lock snapshot.
+which packs a workspace uses from its `[[pack]]` references + the lock snapshot.
 
 The `provider` kind checks the provider actually CHOSEN at reference time (not a
 pack default), resolved by the caller from the stamped bindings; `fetch = true`
@@ -26,7 +26,7 @@ import shutil
 from dataclasses import dataclass
 
 from ..errors import CredproxyError
-from .presets import _Require
+from .packs import _Require
 
 
 @dataclass(frozen=True)

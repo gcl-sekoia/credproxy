@@ -1,4 +1,4 @@
-← [06 · Presets](06-presets.md) · [index](../README.md) · [08 · Going further](08-going-further.md) →
+← [06 · Packs](06-packs.md) · [index](../README.md) · [08 · Going further](08-going-further.md) →
 
 # 07 · Rules
 
@@ -10,7 +10,7 @@ in the workspace from deleting a repository.
 
 ## Block a request
 
-The `github` preset from the last chapter lets the workspace reach
+The `github` pack from the last chapter lets the workspace reach
 `api.github.com`. Suppose you want that, but never a `DELETE`. Add a block rule:
 
 ```console

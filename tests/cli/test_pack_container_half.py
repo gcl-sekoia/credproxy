@@ -1,6 +1,6 @@
-"""Presets carry the container half: `[[mount]]` / `[env]` / `[[setup]]` (#56).
+"""Packs carry the container half: `[[mount]]` / `[env]` / `[[setup]]` (#56).
 
-Covers _parse_preset acceptance/rejection for the new sections, shared-validator
+Covers _parse_pack acceptance/rejection for the new sections, shared-validator
 parity with workspace-config parsing, the surgical stamping (golden text), the
 collision matrix + double-add guard, qualified overlay-source resolution per
 tier, the attached-workspace refusal + recreate announcement, and the post-stamp
@@ -18,12 +18,12 @@ from test_porcelain import _run
 # ---- helpers -----------------------------------------------------------------
 
 
-def _write_preset(name: str, toml: str, *, tier: str = "user"):
-    """Install a preset TOML in a tier (user / an overlay dir under config).
-    Returns the preset dir path so callers can drop pack files beside it."""
+def _write_pack(name: str, toml: str, *, tier: str = "user"):
+    """Install a pack TOML in a tier (user / an overlay dir under config).
+    Returns the pack dir path so callers can drop pack files beside it."""
     from credproxy_cli.core.paths import config_dir
     base = config_dir() if tier == "user" else config_dir() / "_ov" / tier
-    pd = base / "presets"
+    pd = base / "packs"
     pd.mkdir(parents=True, exist_ok=True)
     (pd / f"{name}.toml").write_text(textwrap.dedent(toml))
     return base
@@ -48,12 +48,12 @@ def _make_ws(name: str, content: str):
 _WS_MIN = 'image = "python:3.12-slim"\nuser = "vscode"\n'
 
 
-# ---- _parse_preset acceptance / rejection ------------------------------------
+# ---- _parse_pack acceptance / rejection ------------------------------------
 
 
 def test_parse_accepts_mount_env_setup(xdg):
-    from credproxy_cli.core.model.presets import get_preset
-    base = _write_preset("cont", """
+    from credproxy_cli.core.model.packs import get_pack
+    base = _write_pack("cont", """
         [[mount]]
         overlay = "setup.d/x.sh"
         target = "/opt/x.sh"
@@ -67,7 +67,7 @@ def test_parse_accepts_mount_env_setup(xdg):
         order = 30
     """)
     _pack_file(base, "setup.d/x.sh")
-    spec = get_preset("cont")
+    spec = get_pack("cont")
     assert spec.needs_credential is False and spec.has_container_half is True
     assert [m.kind for m in spec.mounts] == ["overlay", "volume"]
     # overlay source is qualified to the pack's owning tier.
@@ -78,49 +78,49 @@ def test_parse_accepts_mount_env_setup(xdg):
 
 def test_parse_rejects_empty_pack(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("empty", "default_provider = \"env\"\n")
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("empty", "default_provider = \"env\"\n")
     with pytest.raises(ConfigError, match="at least one"):
-        load_presets()
+        load_packs()
 
 
 def test_parse_setup_requires_order(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("noorder", '[[setup]]\nrun = "x"\n')
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("noorder", '[[setup]]\nrun = "x"\n')
     with pytest.raises(ConfigError, match="order.*required"):
-        load_presets()
+        load_packs()
 
 
 def test_parse_setup_rejects_bare_string(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("strsetup", 'setup = ["do a thing"]\n')
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("strsetup", 'setup = ["do a thing"]\n')
     with pytest.raises(ConfigError, match="must be a table"):
-        load_presets()
+        load_packs()
 
 
 def test_parse_env_rejects_non_string_value(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("badenv", "[env]\nN = 7\n")
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("badenv", "[env]\nN = 7\n")
     with pytest.raises(ConfigError, match="must be a non-empty string"):
-        load_presets()
+        load_packs()
 
 
 def test_parse_env_rejects_empty_value(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("emptyenv", '[env]\nN = ""\n')
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("emptyenv", '[env]\nN = ""\n')
     with pytest.raises(ConfigError, match="non-empty string"):
-        load_presets()
+        load_packs()
 
 
 # ---- shared-validator parity -------------------------------------------------
 
 
 def test_mount_validator_parity_with_workspace(xdg):
-    """An invalid mount fails identically in a workspace config and a preset --
+    """An invalid mount fails identically in a workspace config and a pack --
     both go through config._parse_mount."""
     from credproxy_cli.core.model import config as core_config
     from credproxy_cli.core.errors import ConfigError
@@ -129,27 +129,27 @@ def test_mount_validator_parity_with_workspace(xdg):
         core_config._parse_mount(bad, "ws")
     with pytest.raises(ConfigError, match="exactly one of bind/volume/overlay") as b:
         core_config._parse_mount(bad, "ws", expand_bind=False)
-    # And the preset path surfaces the same underlying validator error.
-    _write_preset("twokind",
+    # And the pack path surfaces the same underlying validator error.
+    _write_pack("twokind",
                   '[[mount]]\nvolume = "cache"\nbind = "/x"\ntarget = "/c"\n')
-    from credproxy_cli.core.model.presets import load_presets
+    from credproxy_cli.core.model.packs import load_packs
     with pytest.raises(ConfigError, match="exactly one of bind/volume/overlay"):
-        load_presets()
+        load_packs()
 
 
 def test_setup_validator_parity(xdg):
-    """The preset path reuses config._parse_setup_table -- a bad `user` value
+    """The pack path reuses config._parse_setup_table -- a bad `user` value
     fails the same way it does in a workspace config."""
     from credproxy_cli.core.model import config as core_config
     from credproxy_cli.core.errors import ConfigError
     with pytest.raises(ConfigError, match='must be "workspace" or "root"'):
         core_config._parse_setup_table({"run": "x", "user": "bob"}, "w",
                                        require_order=True)
-    _write_preset("baduser",
+    _write_pack("baduser",
                   '[[setup]]\nrun = "x"\nuser = "bob"\norder = 1\n')
-    from credproxy_cli.core.model.presets import load_presets
+    from credproxy_cli.core.model.packs import load_packs
     with pytest.raises(ConfigError, match='must be "workspace" or "root"'):
-        load_presets()
+        load_packs()
 
 
 # ---- qualified overlay-source resolution -------------------------------------
@@ -162,7 +162,7 @@ def test_qualified_source_resolves_per_tier(xdg, monkeypatch):
     from credproxy_cli.core.model import config as core_config
     from credproxy_cli.core.paths import config_dir
     ov = config_dir() / "_ovdir"
-    (ov / "presets").mkdir(parents=True)
+    (ov / "packs").mkdir(parents=True)
     _pack_file(ov, "setup.d/y.sh")
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
     resolved = core_config._overlay_source("_ovdir:setup.d/y.sh", "w")
@@ -175,9 +175,9 @@ def test_qualified_source_user_and_builtin_tiers(xdg):
     _pack_file(config_dir(), "setup.d/z.sh")
     assert core_config._overlay_source("user:setup.d/z.sh", "w") \
         == str((config_dir() / "setup.d" / "z.sh").resolve())
-    # builtin tier: an existing builtin file (a preset TOML) resolves.
-    got = core_config._overlay_source("builtin:presets/github.toml", "w")
-    assert got.endswith("builtin/presets/github.toml")
+    # builtin tier: an existing builtin file (a pack TOML) resolves.
+    got = core_config._overlay_source("builtin:packs/github.toml", "w")
+    assert got.endswith("builtin/packs/github.toml")
 
 
 def test_qualified_source_unknown_tier(xdg):
@@ -194,31 +194,31 @@ def test_qualified_source_escape_rejected(xdg):
         core_config._overlay_source("user:../../etc/passwd", "w")
 
 
-def test_preset_qualifies_overlay_to_owning_overlay_tier(xdg, monkeypatch):
+def test_pack_qualifies_overlay_to_owning_overlay_tier(xdg, monkeypatch):
     import os
     from credproxy_cli.core.paths import config_dir
     ov = config_dir() / "acme"
-    (ov / "presets").mkdir(parents=True)
+    (ov / "packs").mkdir(parents=True)
     _pack_file(ov, "setup.d/a.sh")
-    (ov / "presets" / "acme-cont.toml").write_text(
+    (ov / "packs" / "acme-cont.toml").write_text(
         '[[mount]]\noverlay = "setup.d/a.sh"\ntarget = "/opt/a.sh"\n')
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
-    from credproxy_cli.core.model.presets import get_preset
-    spec = get_preset("acme-cont")
+    from credproxy_cli.core.model.packs import get_pack
+    spec = get_pack("acme-cont")
     assert spec.mounts[0].value == "acme:setup.d/a.sh"
 
 
 # ---- stamping (golden text) --------------------------------------------------
 
 
-def _install_cont_preset(name="cont", *, with_binding=False):
+def _install_cont_pack(name="cont", *, with_binding=False):
     """A container-half pack (+ optional binding) with its overlay pack file."""
     binding = (
         '[placeholder]\nprefix = "ghp_"\nlength = 40\ncharset = "alnumeric"\n'
         '[[part]]\nsuffix = "api"\ninjector = "bearer"\n'
         'hosts = ["api.github.com"]\nenv = "GITHUB_TOKEN"\n'
     ) if with_binding else ""
-    base = _write_preset(name, binding + """
+    base = _write_pack(name, binding + """
         [[mount]]
         overlay = "setup.d/c.sh"
         target = "/opt/c.sh"
@@ -232,23 +232,23 @@ def _install_cont_preset(name="cont", *, with_binding=False):
 
 
 def test_mount_target_collision(xdg):
-    _install_cont_preset()
+    _install_cont_pack()
     ws = _make_ws("w", _WS_MIN + textwrap.dedent('''
         [[mounts]]
         volume = "v"
         target = "/opt/c.sh"
     '''))
-    code, out, err = _run(["workspace", "w", "preset", "add", "cont"])
+    code, out, err = _run(["workspace", "w", "pack", "add", "cont"])
     assert code == 1 and "already mounted" in (out + err)
     # Nothing stamped.
     assert "C_VAR" not in ws.config_path.read_text()
 
 
 def test_env_different_value_fails(xdg):
-    _install_cont_preset()
+    _install_cont_pack()
     ws = _make_ws("w", _WS_MIN + '\n[env]\nC_VAR = "other"\n')
     before = ws.config_path.read_text()
-    code, out, err = _run(["workspace", "w", "preset", "add", "cont"])
+    code, out, err = _run(["workspace", "w", "pack", "add", "cont"])
     assert code == 1 and "different value" in (out + err)
     assert ws.config_path.read_text() == before   # no partial write
 
@@ -257,9 +257,9 @@ def test_env_different_value_fails(xdg):
 
 
 def test_attached_refuses_container_half(xdg):
-    _install_cont_preset("cont", with_binding=True)
+    _install_cont_pack("cont", with_binding=True)
     ws = _make_ws("attd", 'attach = { container = "extbox" }\n')
-    code, out, err = _run(["workspace", "attd", "preset", "add", "cont",
+    code, out, err = _run(["workspace", "attd", "pack", "add", "cont",
                            "--provider", "env", "--secret", "GITHUB_TOKEN"])
     assert code == 1 and "attached" in (out + err)
     # Nothing stamped.
@@ -267,29 +267,29 @@ def test_attached_refuses_container_half(xdg):
 
 
 def test_recreate_announced_only_when_container_exists(xdg, monkeypatch):
-    _install_cont_preset()
+    _install_cont_pack()
     ws = _make_ws("w", _WS_MIN)
     # No container -> no recreate hint.
-    from credproxy_cli.porcelain import cmd_preset as pcli
+    from credproxy_cli.porcelain import cmd_pack as pcli
     monkeypatch.setattr(pcli.core_docker, "container_status", lambda _n: None)
-    code, out, err = _run(["workspace", "w", "preset", "add", "cont"])
+    code, out, err = _run(["workspace", "w", "pack", "add", "cont"])
     assert code == 0 and "restart to apply" not in (out + err)
 
     # Container present -> recreate hint fires.
     ws2 = _make_ws("w2", _WS_MIN)
     monkeypatch.setattr(pcli.core_docker, "container_status", lambda _n: "running")
-    code, out, err = _run(["workspace", "w2", "preset", "add", "cont"])
+    code, out, err = _run(["workspace", "w2", "pack", "add", "cont"])
     assert code == 0, out + err
     assert "restart to apply: credproxy workspace w2 start" in (out + err)
 
 
-# ---- describe (preset list JSON) ---------------------------------------------
+# ---- describe (pack list JSON) ---------------------------------------------
 
 
 def test_describe_includes_container_half(xdg):
-    _install_cont_preset()
-    from credproxy_cli.core.model.presets import describe_presets
-    row = next(p for p in describe_presets() if p["name"] == "cont")
+    _install_cont_pack()
+    from credproxy_cli.core.model.packs import describe_packs
+    row = next(p for p in describe_packs() if p["name"] == "cont")
     assert row["mounts"] == [{"kind": "overlay", "source": "user:setup.d/c.sh",
                               "target": "/opt/c.sh"}]
     assert row["env"] == [{"key": "C_VAR", "value": "one"}]
@@ -305,28 +305,28 @@ def test_describe_includes_container_half(xdg):
 
 def test_overlay_named_user_rejected(xdg, monkeypatch):
     """An overlay dir literally named `user` shadows the reserved `user` tier
-    qualifier -- loading its presets errors clearly."""
+    qualifier -- loading its packs errors clearly."""
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.paths import config_dir
-    from credproxy_cli.core.model.presets import load_presets
+    from credproxy_cli.core.model.packs import load_packs
     ov = config_dir() / "ovs" / "user"
-    (ov / "presets").mkdir(parents=True)
-    (ov / "presets" / "p.toml").write_text('[env]\nX = "y"\n')
+    (ov / "packs").mkdir(parents=True)
+    (ov / "packs" / "p.toml").write_text('[env]\nX = "y"\n')
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
     with pytest.raises(ConfigError, match="reserved 'user' tier qualifier"):
-        load_presets()
+        load_packs()
 
 
 def test_overlay_named_builtin_rejected(xdg, monkeypatch):
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.paths import config_dir
-    from credproxy_cli.core.model.presets import load_presets
+    from credproxy_cli.core.model.packs import load_packs
     ov = config_dir() / "ovs" / "builtin"
-    (ov / "presets").mkdir(parents=True)
-    (ov / "presets" / "p.toml").write_text('[env]\nX = "y"\n')
+    (ov / "packs").mkdir(parents=True)
+    (ov / "packs" / "p.toml").write_text('[env]\nX = "y"\n')
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", str(ov))
     with pytest.raises(ConfigError, match="reserved 'builtin' tier qualifier"):
-        load_presets()
+        load_packs()
 
 
 def test_duplicate_basename_qualifier_rejected(xdg, monkeypatch):
@@ -335,17 +335,17 @@ def test_duplicate_basename_qualifier_rejected(xdg, monkeypatch):
     import os
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.paths import config_dir
-    from credproxy_cli.core.model.presets import load_presets
+    from credproxy_cli.core.model.packs import load_packs
     a = config_dir() / "a" / "base"
     b = config_dir() / "b" / "base"        # same basename -> b gets `base#2`
-    (a / "presets").mkdir(parents=True)
-    (b / "presets").mkdir(parents=True)
+    (a / "packs").mkdir(parents=True)
+    (b / "packs").mkdir(parents=True)
     _pack_file(b, "setup.d/x.sh")
-    (b / "presets" / "dup.toml").write_text(
+    (b / "packs" / "dup.toml").write_text(
         '[[mount]]\noverlay = "setup.d/x.sh"\ntarget = "/opt/x.sh"\n')
     monkeypatch.setenv("CREDPROXY_OVERLAY_PATH", os.pathsep.join([str(a), str(b)]))
     with pytest.raises(ConfigError, match="order-dependent duplicate-basename"):
-        load_presets()
+        load_packs()
 
 
 # ---- Finding 5: recreate hint gated on ACTUAL stamped content -----------------
@@ -364,9 +364,9 @@ def test_qualified_source_empty_subpath_rejected(xdg):
 
 
 def test_container_only_pack_rejects_provider(xdg):
-    _install_cont_preset()          # no [[part]] -> pure container
+    _install_cont_pack()          # no [[part]] -> pure container
     ws = _make_ws("w", _WS_MIN)
-    code, out, err = _run(["workspace", "w", "preset", "add", "cont",
+    code, out, err = _run(["workspace", "w", "pack", "add", "cont",
                            "--provider", "env"])
     assert code == 1
     assert "container-only" in (out + err) and "needs no credential" in (out + err)
@@ -389,14 +389,14 @@ def _rconfig(ws):
 
 
 def test_reference_expands_container_half(xdg):
-    """A container-half pack referenced via `preset add` merges its mounts/env/
+    """A container-half pack referenced via `pack add` merges its mounts/env/
     setup into the resolved config (the expansion lives in the lock, not the TOML)."""
-    _install_cont_preset("cont", with_binding=True)
+    _install_cont_pack("cont", with_binding=True)
     ws = _make_ws("w", _WS_MIN + '\nsetup = [\n  "echo pre",\n]\n')
-    code, out, err = _run(["workspace", "w", "preset", "add", "cont",
+    code, out, err = _run(["workspace", "w", "pack", "add", "cont",
                            "--provider", "env", "--secret", "GITHUB_TOKEN"])
     assert code == 0, out + err
-    assert "[[preset]]" in ws.config_path.read_text()
+    assert "[[pack]]" in ws.config_path.read_text()
     cfg = _rconfig(ws)
     assert cfg["env"] == {"C_VAR": "one"}
     assert {m["target"] for m in cfg["mounts"]} == {"/opt/c.sh"}
@@ -406,30 +406,30 @@ def test_reference_expands_container_half(xdg):
 
 
 def test_double_add_guard(xdg):
-    _install_cont_preset()
+    _install_cont_pack()
     ws = _make_ws("w", _WS_MIN)
-    assert _run(["workspace", "w", "preset", "add", "cont"])[0] == 0
-    code, out, err = _run(["workspace", "w", "preset", "add", "cont"])
+    assert _run(["workspace", "w", "pack", "add", "cont"])[0] == 0
+    code, out, err = _run(["workspace", "w", "pack", "add", "cont"])
     assert code == 1 and "already referenced" in (out + err)
 
 
 def test_env_identical_value_skipped(xdg):
-    """A preset env key that matches an existing literal value merges cleanly
+    """A pack env key that matches an existing literal value merges cleanly
     (identical value is fine)."""
-    _install_cont_preset()
+    _install_cont_pack()
     ws = _make_ws("w", _WS_MIN + '\n[env]\nC_VAR = "one"\n')
-    code, out, err = _run(["workspace", "w", "preset", "add", "cont"])
+    code, out, err = _run(["workspace", "w", "pack", "add", "cont"])
     assert code == 0, out + err
     assert _rconfig(ws)["env"] == {"C_VAR": "one"}
 
 
 def test_attached_allows_binding_only_pack(xdg):
-    _write_preset("binonly",
+    _write_pack("binonly",
                   '[placeholder]\nprefix = "ghp_"\nlength = 40\ncharset = "alnumeric"\n'
                   '[[part]]\nsuffix = "api"\ninjector = "bearer"\n'
                   'hosts = ["api.github.com"]\n')
     ws = _make_ws("attd", 'attach = { container = "extbox" }\n')
-    code, out, err = _run(["workspace", "attd", "preset", "add", "binonly",
+    code, out, err = _run(["workspace", "attd", "pack", "add", "binonly",
                            "--provider", "env", "--secret", "TOK"])
     assert code == 0, out + err
     assert {b.name for b in _rbindings(ws)} == {"binonly-api"}

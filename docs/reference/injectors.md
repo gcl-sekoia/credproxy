@@ -7,7 +7,7 @@ This is the reference for the credential-shaping schemes — `bearer`, `basic`,
 you need a scheme the guide did not cover, when a service wants its credential in
 an unusual shape, or when you are writing a scripted injector. For the everyday
 `bearer`/`basic` cases, [the guide](../guide/04-first-credential.md) and
-[presets](../guide/06-presets.md) are enough.
+[packs](../guide/06-packs.md) are enough.
 
 An **injector** defines *how* a credential is shaped into a request for a
 service: which typed **scheme** the proxy runs, the scheme's params, and the
@@ -191,7 +191,7 @@ request for the proxy to re-sign.
 
 `bearer` doubles as the scaffold template for new injectors. A GitHub PAT, which
 is `bearer` on `api.github.com` but HTTP `basic` on `github.com`/`ghcr.io`, is
-generated as a coordinated set by `preset add github` (the three
+generated as a coordinated set by `pack add github` (the three
 bindings share one bare-token placeholder) — see
 [configuration.md](configuration.md#bindings).
 
