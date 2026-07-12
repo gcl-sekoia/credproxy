@@ -7,5 +7,8 @@ pyyaml>=6.0
 # deadline rides on the call-path check_cancelled kwarg when present (feature-
 # detected, so an older release that lacks it still works, just unbounded).
 starlark-pyo3>=2025.2.5
-pytest>=7.0
+# Test deps: baked into the image so `credproxy dev test --container` runs the
+# suite against the exact deployed artifact. Kept in lockstep with pyproject's
+# `proxy`+`dev` groups by tests/cli/test_dep_sync.py.
+pytest>=8
 pytest-aiohttp>=1.0
