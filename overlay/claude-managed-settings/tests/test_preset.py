@@ -9,7 +9,7 @@ parse its own file directly.
 """
 from pathlib import Path
 
-from credproxy_cli.core.presets import _parse_preset
+from credproxy_cli.core.model.presets import _parse_preset
 
 PACK = Path(__file__).resolve().parent.parent / "presets" / "claude-managed-settings.toml"
 

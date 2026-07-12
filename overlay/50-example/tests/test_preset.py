@@ -5,9 +5,9 @@ leaves as a no-op). Resolved off the mounted overlay chain and expanded the way
 """
 import tomllib
 
-from credproxy_cli.core.config import _overlay_source
+from credproxy_cli.core.model.config import _overlay_source
 from credproxy_cli.core.paths import resolve_singleton
-from credproxy_cli.core.presets import build_preset, load_preset_sources
+from credproxy_cli.core.model.presets import build_preset, load_preset_sources
 
 
 def test_oracle_agent_ships_via_the_profile_template():

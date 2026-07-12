@@ -4,7 +4,7 @@ plus the static definition (`get_preset`) for the option/requires halves that
 don't expand into a workspace TOML. (The opinionated `claude-managed-settings`
 pack lives in the `50-example` overlay, tested there.)
 """
-from credproxy_cli.core.presets import build_preset, get_preset, load_preset_sources
+from credproxy_cli.core.model.presets import build_preset, get_preset, load_preset_sources
 
 
 def test_base_packs_resolve_from_the_base_overlay():
