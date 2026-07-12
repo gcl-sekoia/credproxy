@@ -109,8 +109,8 @@ setup = [
 # or more hosts. The real secret never enters the workspace -- the proxy
 # swaps the placeholder for the real value on requests to these hosts.
 # Add them with `credproxy workspace NAME binding add` (or, for a coordinated
-# set like github, `credproxy workspace NAME preset add PRESET` -- see
-# `credproxy preset list`), or uncomment and edit:
+# set like github, `credproxy workspace NAME pack add PACK` -- see
+# `credproxy pack list`), or uncomment and edit:
 # [[binding]]
 # injector = "bearer"            # a scheme; see `credproxy injector list`
 # provider = "env"               # a value source; see `credproxy provider list`

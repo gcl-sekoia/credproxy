@@ -159,21 +159,21 @@ never persisted — so multiple workspaces run at once without coordination. If 
 port error does appear, it is about your own image's published ports, not
 credproxy's admin port.
 
-## A preset's definition changed but my workspace didn't
+## A pack's definition changed but my workspace didn't
 
-Expected. A `[[preset]]` block in your config is a durable **reference**, and its
+Expected. A `[[pack]]` block in your config is a durable **reference**, and its
 expansion is a **snapshot** pinned in the lockfile at the moment you added it. A
 pack whose definition changes upstream (a new host, an added rule, a dropped
 part) is **inert** until you re-expand it on your own clock:
 
 ```sh
-credproxy workspace NAME preset refresh github --check   # preview the diff, writes nothing
-credproxy workspace NAME preset refresh github           # re-snapshot the expansion
+credproxy workspace NAME pack refresh github --check   # preview the diff, writes nothing
+credproxy workspace NAME pack refresh github           # re-snapshot the expansion
 ```
 
 Omit the pack name to refresh every reference in the file. (Editing the
-reference's **own** inputs — `provider`, `secret`, `[preset.options]`, `disable`,
-`[preset.override.*]` — re-expands automatically on the next resolve; only a
+reference's **own** inputs — `provider`, `secret`, `[pack.options]`, `disable`,
+`[pack.override.*]` — re-expands automatically on the next resolve; only a
 change to the pack *definition* needs `refresh`.)
 
 ## `inspect` says "reality-drift"
@@ -193,8 +193,8 @@ covers both.
 ## I deleted `lock.json`
 
 No harm — it holds only regenerable machine data. The next resolve (any `start`,
-`push`, `apply`, `binding add`, `binding test`, `resolve`, or `preset` command)
-re-mints each binding's placeholder and re-expands every `[[preset]]` reference
+`push`, `apply`, `binding add`, `binding test`, `resolve`, or `pack` command)
+re-mints each binding's placeholder and re-expands every `[[pack]]` reference
 from its **current** definition, then re-snapshots everything. The one visible
 consequence is that a regenerated placeholder value differs from the old one, so
 a workspace that is already running wants a fresh `apply` to pick it up. Your

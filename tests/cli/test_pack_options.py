@@ -3,9 +3,9 @@
 An option supplies the ENTIRE value of a host-half field (a mount `bind`/`volume`
 source, a `[[requires]]` path) via a STRUCTURAL `{ option = "id" }` marker -- never
 a token inside a string. It resolves at expansion time: explicit `--opt id=value`
-(or a template `[preset.options]` table) -> prompt (loose+TTY only) -> declared
-`default` -> fail with the structured `{preset, missing}` error. The option value
-is recorded in the `[[preset]]` reference (`[preset.options]`) and the resolved
+(or a template `[pack.options]` table) -> prompt (loose+TTY only) -> declared
+`default` -> fail with the structured `{pack, missing}` error. The option value
+is recorded in the `[[pack]]` reference (`[pack.options]`) and the resolved
 whole value lands as literal config in the lock snapshot's expansion; the marker
 never reaches the workspace TOML or the snapshot.
 """
@@ -22,9 +22,9 @@ from test_porcelain import _run, _run_loose
 # ---- helpers -----------------------------------------------------------------
 
 
-def _write_preset(name: str, toml: str):
+def _write_pack(name: str, toml: str):
     from credproxy_cli.core.paths import config_dir
-    d = config_dir() / "presets"
+    d = config_dir() / "packs"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{name}.toml").write_text(textwrap.dedent(toml))
     return d / f"{name}.toml"
@@ -56,7 +56,7 @@ def _mount_source(name: str, target: str):
 
 # A container-only pack whose mount source is supplied by a `sock_dir` option and
 # whose `[[requires]]` path reuses the same option (the git-signing shape).
-_OPT_PRESET = """
+_OPT_PACK = """
     [[option]]
     id = "sock_dir"
     type = "string"
@@ -94,12 +94,12 @@ _OPT_REQUIRED = """
 
 
 def _load(name):
-    from credproxy_cli.core.model.presets import get_preset
-    return get_preset(name)
+    from credproxy_cli.core.model.packs import get_pack
+    return get_pack(name)
 
 
 def test_option_parses_string_enum_bool(xdg):
-    _write_preset("p", """
+    _write_pack("p", """
         [[option]]
         id = "s"
         type = "string"
@@ -126,8 +126,8 @@ def test_option_parses_string_enum_bool(xdg):
 
 def test_enum_default_must_be_member(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "e"
         type = "enum"
@@ -138,13 +138,13 @@ def test_enum_default_must_be_member(xdg):
         target = "/x"
     """)
     with pytest.raises(ConfigError, match="not one of the choices"):
-        load_presets()
+        load_packs()
 
 
 def test_enum_requires_nonempty_choices(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "e"
         type = "enum"
@@ -153,13 +153,13 @@ def test_enum_requires_nonempty_choices(xdg):
         target = "/x"
     """)
     with pytest.raises(ConfigError, match="non-empty 'choices'"):
-        load_presets()
+        load_packs()
 
 
 def test_bool_default_must_be_bool(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "flag"
         type = "bool"
@@ -169,13 +169,13 @@ def test_bool_default_must_be_bool(xdg):
         target = "/x"
     """)
     with pytest.raises(ConfigError, match="default must be a boolean"):
-        load_presets()
+        load_packs()
 
 
 def test_duplicate_option_id_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "x"
         type = "string"
@@ -187,13 +187,13 @@ def test_duplicate_option_id_rejected(xdg):
         target = "/x"
     """)
     with pytest.raises(ConfigError, match="duplicate .*option.* id"):
-        load_presets()
+        load_packs()
 
 
 def test_option_unknown_key_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "x"
         type = "string"
@@ -203,14 +203,14 @@ def test_option_unknown_key_rejected(xdg):
         target = "/x"
     """)
     with pytest.raises(ConfigError, match="unknown key"):
-        load_presets()
+        load_packs()
 
 
 def test_marker_in_container_half_field_rejected(xdg):
     """An option marker in a container-half field (mount `target`) is rejected."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "x"
         type = "string"
@@ -220,13 +220,13 @@ def test_marker_in_container_half_field_rejected(xdg):
         target = { option = "x" }
     """)
     with pytest.raises(ConfigError, match="container-half"):
-        load_presets()
+        load_packs()
 
 
 def test_marker_undefined_option_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "x"
         type = "string"
@@ -236,13 +236,13 @@ def test_marker_undefined_option_rejected(xdg):
         target = "/x"
     """)
     with pytest.raises(ConfigError, match="undefined option 'nope'"):
-        load_presets()
+        load_packs()
 
 
 def test_marker_on_overlay_source_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "x"
         type = "string"
@@ -252,13 +252,13 @@ def test_marker_on_overlay_source_rejected(xdg):
         target = "/x"
     """)
     with pytest.raises(ConfigError, match="overlay"):
-        load_presets()
+        load_packs()
 
 
 def test_bool_option_cannot_supply_a_source(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "flag"
         type = "bool"
@@ -268,13 +268,13 @@ def test_bool_option_cannot_supply_a_source(xdg):
         target = "/x"
     """)
     with pytest.raises(ConfigError, match="bool"):
-        load_presets()
+        load_packs()
 
 
 def test_malformed_marker_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "x"
         type = "string"
@@ -284,44 +284,44 @@ def test_malformed_marker_rejected(xdg):
         target = "/x"
     """)
     with pytest.raises(ConfigError, match="extra key"):
-        load_presets()
+        load_packs()
 
 
 def test_option_only_pack_is_not_a_pack(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "x"
         type = "string"
         default = "y"
     """)
     with pytest.raises(ConfigError, match="needs at least one"):
-        load_presets()
+        load_packs()
 
 
 # ---- resolution order (core) -------------------------------------------------
 
 
 def test_resolve_explicit_beats_default(xdg):
-    from credproxy_cli.core.model.presets import resolve_options
-    _write_preset("gitsign", _OPT_PRESET)
+    from credproxy_cli.core.model.packs import resolve_options
+    _write_pack("gitsign", _OPT_PACK)
     spec = _load("gitsign")
     vals, missing = resolve_options(spec, {"sock_dir": "/tmp/a"})
     assert missing == [] and vals == {"sock_dir": "/tmp/a"}
 
 
 def test_resolve_default_used(xdg):
-    from credproxy_cli.core.model.presets import resolve_options
-    _write_preset("gitsign", _OPT_PRESET)
+    from credproxy_cli.core.model.packs import resolve_options
+    _write_pack("gitsign", _OPT_PACK)
     spec = _load("gitsign")
     vals, missing = resolve_options(spec, {})
     assert missing == [] and vals == {"sock_dir": "~/.ssh/credproxy-agent"}
 
 
 def test_resolve_missing_required(xdg):
-    from credproxy_cli.core.model.presets import resolve_options
-    _write_preset("gitsign", _OPT_REQUIRED)
+    from credproxy_cli.core.model.packs import resolve_options
+    _write_pack("gitsign", _OPT_REQUIRED)
     spec = _load("gitsign")
     vals, missing = resolve_options(spec, {})
     assert vals == {} and [o.id for o in missing] == ["sock_dir"]
@@ -329,16 +329,16 @@ def test_resolve_missing_required(xdg):
 
 def test_resolve_unknown_opt_id_errors(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import resolve_options
-    _write_preset("gitsign", _OPT_PRESET)
+    from credproxy_cli.core.model.packs import resolve_options
+    _write_pack("gitsign", _OPT_PACK)
     spec = _load("gitsign")
     with pytest.raises(ConfigError, match="unknown option"):
         resolve_options(spec, {"nope": "x"})
 
 
 def test_resolve_prompt_supplies_value(xdg):
-    from credproxy_cli.core.model.presets import resolve_options
-    _write_preset("gitsign", _OPT_REQUIRED)
+    from credproxy_cli.core.model.packs import resolve_options
+    _write_pack("gitsign", _OPT_REQUIRED)
     spec = _load("gitsign")
     vals, missing = resolve_options(
         spec, {}, prompt=lambda opt: "/prompted")
@@ -348,22 +348,22 @@ def test_resolve_prompt_supplies_value(xdg):
 # ---- whole-field substitution: literal in the reference, marker gone ---------
 
 
-def test_preset_add_records_literal_from_default(xdg):
-    _write_preset("gitsign", _OPT_PRESET)
+def test_pack_add_records_literal_from_default(xdg):
+    _write_pack("gitsign", _OPT_PACK)
     _make_ws("w")
-    code, out, err = _run(["workspace", "w", "preset", "add", "gitsign"])
+    code, out, err = _run(["workspace", "w", "pack", "add", "gitsign"])
     assert code == 0, out + err
-    # The resolved value comes from the option default; the `[[preset]]` reference
-    # records it explicitly in `[preset.options]` (the expansion lives in the lock).
+    # The resolved value comes from the option default; the `[[pack]]` reference
+    # records it explicitly in `[pack.options]` (the expansion lives in the lock).
     assert _mount_source("w", "/ssh-agent") == "~/.ssh/credproxy-agent"
     text = _config_text("w")
-    assert "[preset.options]" in text and "credproxy-agent" in text
+    assert "[pack.options]" in text and "credproxy-agent" in text
 
 
-def test_preset_add_opt_overrides_default(xdg):
-    _write_preset("gitsign", _OPT_PRESET)
+def test_pack_add_opt_overrides_default(xdg):
+    _write_pack("gitsign", _OPT_PACK)
     _make_ws("w")
-    code, out, err = _run(["workspace", "w", "preset", "add", "gitsign",
+    code, out, err = _run(["workspace", "w", "pack", "add", "gitsign",
                            "--opt", "sock_dir=/tmp/agent"])
     assert code == 0, out + err
     assert _mount_source("w", "/ssh-agent") == "/tmp/agent"
@@ -371,9 +371,9 @@ def test_preset_add_opt_overrides_default(xdg):
 
 
 def test_bad_opt_syntax_fails(xdg):
-    _write_preset("gitsign", _OPT_PRESET)
+    _write_pack("gitsign", _OPT_PACK)
     _make_ws("w")
-    code, out, err = _run(["workspace", "w", "preset", "add", "gitsign",
+    code, out, err = _run(["workspace", "w", "pack", "add", "gitsign",
                            "--opt", "noeq"])
     assert code == 1
     assert "id=value" in (out + err)
@@ -383,41 +383,41 @@ def test_bad_opt_syntax_fails(xdg):
 
 
 def test_missing_required_strict_fails(xdg):
-    _write_preset("req", _OPT_REQUIRED)
+    _write_pack("req", _OPT_REQUIRED)
     _make_ws("w")
-    code, out, err = _run(["workspace", "w", "preset", "add", "req"])
+    code, out, err = _run(["workspace", "w", "pack", "add", "req"])
     assert code == 1
     assert "sock_dir" in (out + err)
 
 
 def test_missing_required_json_shape(xdg):
-    _write_preset("req", _OPT_REQUIRED)
+    _write_pack("req", _OPT_REQUIRED)
     _make_ws("w")
-    code, out, err = _run(["--json", "workspace", "w", "preset", "add", "req"])
+    code, out, err = _run(["--json", "workspace", "w", "pack", "add", "req"])
     assert code == 1
     obj = json.loads(out)["error"]
-    assert obj["type"] == "PresetOptionsError"
-    assert obj["preset"] == "req"
+    assert obj["type"] == "PackOptionsError"
+    assert obj["pack"] == "req"
     assert obj["missing"] == [
         {"id": "sock_dir", "type": "string", "description": "host socket dir (required)"}]
 
 
 def test_missing_required_loose_no_tty_fails(xdg):
-    _write_preset("req", _OPT_REQUIRED)
+    _write_pack("req", _OPT_REQUIRED)
     _make_ws("w")
     # loose but stdin is NOT a TTY -> no prompt, structured fail-closed.
-    code, out, err = _run_loose(["workspace", "w", "preset", "add", "req"],
+    code, out, err = _run_loose(["workspace", "w", "pack", "add", "req"],
                                 stdin_text="", stdin_isatty=False)
     assert code == 1
     assert "sock_dir" in (out + err)
 
 
 def test_missing_required_loose_tty_prompts(xdg, monkeypatch):
-    _write_preset("req", _OPT_REQUIRED)
+    _write_pack("req", _OPT_REQUIRED)
     _make_ws("w")
     from credproxy_cli.porcelain import prompt as prompt_mod
     monkeypatch.setattr(prompt_mod, "ask_option", lambda opt: "/from-prompt")
-    code, out, err = _run_loose(["workspace", "w", "preset", "add", "req"],
+    code, out, err = _run_loose(["workspace", "w", "pack", "add", "req"],
                                 stdin_text="", stdin_isatty=True)
     assert code == 0, out + err
     assert _mount_source("w", "/ssh-agent") == "/from-prompt"
@@ -425,18 +425,18 @@ def test_missing_required_loose_tty_prompts(xdg, monkeypatch):
 
 def test_strict_never_prompts_even_with_tty(xdg, monkeypatch):
     """Prompting is loose-only: strict fails structured even on a TTY."""
-    _write_preset("req", _OPT_REQUIRED)
+    _write_pack("req", _OPT_REQUIRED)
     _make_ws("w")
     from credproxy_cli.porcelain import prompt as prompt_mod
     called = []
     monkeypatch.setattr(prompt_mod, "ask_option",
                         lambda opt: called.append(opt) or "/x")
-    code, out, err = _run(["workspace", "w", "preset", "add", "req"],
+    code, out, err = _run(["workspace", "w", "pack", "add", "req"],
                           stdin_text="", stdin_isatty=True)
     assert code == 1 and not called
 
 
-# ---- template [preset.options] -----------------------------------------------
+# ---- template [pack.options] -----------------------------------------------
 
 
 def _template(toml: str) -> None:
@@ -450,11 +450,11 @@ _MIN = 'image = "python:3.12-slim"\n'
 
 
 def test_template_options_supply_value(xdg):
-    _write_preset("gitsign", _OPT_PRESET)
+    _write_pack("gitsign", _OPT_PACK)
     _template(_MIN + textwrap.dedent("""
-        [[preset]]
+        [[pack]]
         name = "gitsign"
-        [preset.options]
+        [pack.options]
         sock_dir = "/tmpl/agent"
     """))
     code, out, err = _run(["workspace", "create", "proj"])
@@ -463,20 +463,20 @@ def test_template_options_supply_value(xdg):
 
 
 def test_template_missing_required_option_fails_json(xdg):
-    _write_preset("req", _OPT_REQUIRED)
-    _template(_MIN + '\n[[preset]]\nname = "req"\n')
+    _write_pack("req", _OPT_REQUIRED)
+    _template(_MIN + '\n[[pack]]\nname = "req"\n')
     code, out, err = _run(["--json", "workspace", "create", "proj"])
     assert code == 1
     obj = json.loads(out)["error"]
-    assert obj["type"] == "PresetOptionsError" and obj["preset"] == "req"
+    assert obj["type"] == "PackOptionsError" and obj["pack"] == "req"
     # all-or-nothing: nothing written
     from credproxy_cli.core.paths import workspaces_config_dir
     assert not (workspaces_config_dir() / "proj.toml").exists()
 
 
 def test_template_option_prompt_loose_tty(xdg, monkeypatch):
-    _write_preset("req", _OPT_REQUIRED)
-    _template(_MIN + '\n[[preset]]\nname = "req"\n')
+    _write_pack("req", _OPT_REQUIRED)
+    _template(_MIN + '\n[[pack]]\nname = "req"\n')
     from credproxy_cli.porcelain import prompt as prompt_mod
     monkeypatch.setattr(prompt_mod, "ask_option", lambda opt: "/tmpl-prompt")
     code, out, err = _run_loose(["workspace", "create", "proj"],
@@ -502,13 +502,13 @@ _BINDING_NODEFAULT = """
 
 
 def test_provider_secret_prompt_loose_tty(xdg, monkeypatch):
-    _write_preset("svc", _BINDING_NODEFAULT)
+    _write_pack("svc", _BINDING_NODEFAULT)
     _make_ws("w")
     from credproxy_cli.porcelain import prompt as prompt_mod
     monkeypatch.setattr(prompt_mod, "ask_provider", lambda default: "env")
     monkeypatch.setattr(prompt_mod, "ask_secret",
                         lambda provider, default, slots=(): "SVC_TOKEN")
-    code, out, err = _run_loose(["workspace", "w", "preset", "add", "svc"],
+    code, out, err = _run_loose(["workspace", "w", "pack", "add", "svc"],
                                 stdin_text="", stdin_isatty=True)
     assert code == 0, out + err
     text = _config_text("w")
@@ -516,13 +516,13 @@ def test_provider_secret_prompt_loose_tty(xdg, monkeypatch):
 
 
 def test_provider_secret_strict_never_prompts(xdg, monkeypatch):
-    _write_preset("svc", _BINDING_NODEFAULT)
+    _write_pack("svc", _BINDING_NODEFAULT)
     _make_ws("w")
     from credproxy_cli.porcelain import prompt as prompt_mod
     called = []
     monkeypatch.setattr(prompt_mod, "ask_provider",
                         lambda default: called.append("p") or "env")
-    code, out, err = _run(["workspace", "w", "preset", "add", "svc"],
+    code, out, err = _run(["workspace", "w", "pack", "add", "svc"],
                           stdin_text="", stdin_isatty=True)
     assert code == 1 and not called
     assert "provider" in (out + err)
@@ -551,10 +551,10 @@ def test_eof_at_required_prompt_aborts_no_loop(xdg):
     """A genuine EOF (closed stdin) at a required-value prompt ABORTS cleanly
     rather than spinning forever re-prompting (S1). The real `ask_option` runs
     against an exhausted stdin (readline() -> "" every call)."""
-    _write_preset("req", _OPT_REQUIRED)
+    _write_pack("req", _OPT_REQUIRED)
     _make_ws("w")
     # loose + TTY -> prompting is ON; stdin is empty so the first read is EOF.
-    code, out, err = _run_loose(["workspace", "w", "preset", "add", "req"],
+    code, out, err = _run_loose(["workspace", "w", "pack", "add", "req"],
                                 stdin_text="", stdin_isatty=True)
     assert code == 1
     assert "EOF" in (out + err) or "aborted" in (out + err)
@@ -569,7 +569,7 @@ def test_eof_distinct_from_empty_line(xdg, monkeypatch):
     from credproxy_cli.porcelain import prompt as prompt_mod
     import io
     import sys
-    _write_preset("req", _OPT_REQUIRED)
+    _write_pack("req", _OPT_REQUIRED)
     spec = _load("req")
     monkeypatch.setattr(sys, "stdin", io.StringIO("\n/second-try\n"))
     val = prompt_mod.ask_option(spec.options[0])
@@ -627,16 +627,16 @@ _NOPE_B = """
 """
 
 
-def test_multi_preset_create_with_missing_bind_sources(xdg):
-    """A multi-`[[preset]]` template create succeeds even when entry 1 stamps a
+def test_multi_pack_create_with_missing_bind_sources(xdg):
+    """A multi-`[[pack]]` template create succeeds even when entry 1 stamps a
     bind source that doesn't exist yet -- entry 2's validation re-load must not
     existence-check it (S4b)."""
-    _write_preset("nopea", _NOPE_A)
-    _write_preset("nopeb", _NOPE_B)
+    _write_pack("nopea", _NOPE_A)
+    _write_pack("nopeb", _NOPE_B)
     _template(_MIN + textwrap.dedent("""
-        [[preset]]
+        [[pack]]
         name = "nopea"
-        [[preset]]
+        [[pack]]
         name = "nopeb"
     """))
     code, out, err = _run(["workspace", "create", "proj"])
@@ -645,15 +645,15 @@ def test_multi_preset_create_with_missing_bind_sources(xdg):
     assert _mount_source("proj", "/b") == "/nope/b"
 
 
-def test_second_preset_add_with_missing_bind_source(xdg):
-    """A second `preset add` on a workspace whose FIRST pack stamped a not-yet-
+def test_second_pack_add_with_missing_bind_source(xdg):
+    """A second `pack add` on a workspace whose FIRST pack stamped a not-yet-
     existing bind source succeeds -- the add's validation re-load defers bind
     existence to `start` (S4c)."""
-    _write_preset("nopea", _NOPE_A)
-    _write_preset("nopeb", _NOPE_B)
+    _write_pack("nopea", _NOPE_A)
+    _write_pack("nopeb", _NOPE_B)
     _make_ws("w")
-    assert _run(["workspace", "w", "preset", "add", "nopea"])[0] == 0
-    code, out, err = _run(["workspace", "w", "preset", "add", "nopeb"])
+    assert _run(["workspace", "w", "pack", "add", "nopea"])[0] == 0
+    code, out, err = _run(["workspace", "w", "pack", "add", "nopeb"])
     assert code == 0, out + err
     assert _mount_source("w", "/a") == "/nope/a"
     assert _mount_source("w", "/b") == "/nope/b"
@@ -665,13 +665,13 @@ def test_second_preset_add_with_missing_bind_source(xdg):
 def test_yes_suppresses_prompt_for_required_option(xdg, monkeypatch):
     """Under `--yes` on loose+TTY, a required option must NOT prompt -- it takes
     the structured fail (explicit -> default -> fail), never asking (N1)."""
-    _write_preset("req", _OPT_REQUIRED)
+    _write_pack("req", _OPT_REQUIRED)
     _make_ws("w")
     from credproxy_cli.porcelain import prompt as prompt_mod
     called = []
     monkeypatch.setattr(prompt_mod, "ask_option",
                         lambda opt: called.append(opt) or "/x")
-    code, out, err = _run_loose(["workspace", "w", "preset", "add", "req", "--yes"],
+    code, out, err = _run_loose(["workspace", "w", "pack", "add", "req", "--yes"],
                                 stdin_text="", stdin_isatty=True)
     assert code == 1 and not called
     assert "sock_dir" in (out + err)
@@ -679,13 +679,13 @@ def test_yes_suppresses_prompt_for_required_option(xdg, monkeypatch):
 
 def test_yes_takes_default_without_prompt(xdg, monkeypatch):
     """Under `--yes`, a defaulted option takes its default silently (no prompt)."""
-    _write_preset("gitsign", _OPT_PRESET)
+    _write_pack("gitsign", _OPT_PACK)
     _make_ws("w")
     from credproxy_cli.porcelain import prompt as prompt_mod
     called = []
     monkeypatch.setattr(prompt_mod, "ask_option",
                         lambda opt: called.append(opt) or "/x")
-    code, out, err = _run_loose(["workspace", "w", "preset", "add", "gitsign",
+    code, out, err = _run_loose(["workspace", "w", "pack", "add", "gitsign",
                                  "--yes"], stdin_text="", stdin_isatty=True)
     assert code == 0, out + err
     assert not called
@@ -696,16 +696,16 @@ def test_yes_takes_default_without_prompt(xdg, monkeypatch):
 
 
 def test_require_summary_renders_option_marker(xdg):
-    from credproxy_cli.core.model.presets import get_preset, require_summary
-    _write_preset("gitsign", _OPT_PRESET)
-    spec = get_preset("gitsign")
+    from credproxy_cli.core.model.packs import get_pack, require_summary
+    _write_pack("gitsign", _OPT_PACK)
+    spec = get_pack("gitsign")
     rq = next(r for r in spec.requires if r.kind == "path")
     assert require_summary(rq)["path"] == "{option=sock_dir}"
 
 
-def test_preset_list_json_shows_option_marker_path(xdg):
-    _write_preset("gitsign", _OPT_PRESET)
-    code, out, err = _run(["--json", "preset", "list"])
+def test_pack_list_json_shows_option_marker_path(xdg):
+    _write_pack("gitsign", _OPT_PACK)
+    code, out, err = _run(["--json", "pack", "list"])
     assert code == 0, out + err
     rows = json.loads(out)
     gs = next(r for r in rows if r["name"] == "gitsign")
@@ -745,24 +745,24 @@ def test_provider_prompt_reprompts_on_unknown(xdg, monkeypatch):
     assert got == "env"
 
 
-# ---- N5: [preset . options] with TOML-legal spacing is stripped --------------
+# ---- N5: [pack . options] with TOML-legal spacing is stripped --------------
 
 
-def test_template_preset_options_tolerates_spacing(xdg):
-    _write_preset("gitsign", _OPT_PRESET)
+def test_template_pack_options_tolerates_spacing(xdg):
+    _write_pack("gitsign", _OPT_PACK)
     _template(_MIN + textwrap.dedent("""
-        [[preset]]
+        [[pack]]
         name = "gitsign"
-        [preset . options]
+        [pack . options]
         sock_dir = "/spaced/agent"
     """))
     code, out, err = _run(["workspace", "create", "proj"])
     assert code == 0, out + err
     assert _mount_source("proj", "/ssh-agent") == "/spaced/agent"
-    # The `[[preset]]` reference SURVIVES (config-v2), with a canonical
-    # `[preset.options]` sub-table carrying the resolved value.
+    # The `[[pack]]` reference SURVIVES (config-v2), with a canonical
+    # `[pack.options]` sub-table carrying the resolved value.
     text = _config_text("proj")
-    assert "[[preset]]" in text and "[preset.options]" in text
+    assert "[[pack]]" in text and "[pack.options]" in text
 
 
 # ---- N6: unreferenced option surfaced to the pack author ---------------------
@@ -786,16 +786,16 @@ _UNREF_OPT = """
 
 
 def test_unreferenced_option_reported(xdg):
-    from credproxy_cli.core.model.presets import describe_presets
-    _write_preset("p", _UNREF_OPT)
-    rows = describe_presets()
+    from credproxy_cli.core.model.packs import describe_packs
+    _write_pack("p", _UNREF_OPT)
+    rows = describe_packs()
     p = next(r for r in rows if r["name"] == "p")
     assert p["unreferenced_options"] == ["unused"]
 
 
-def test_preset_list_notes_unreferenced_option(xdg):
-    _write_preset("p", _UNREF_OPT)
-    code, out, err = _run(["preset", "list"])
+def test_pack_list_notes_unreferenced_option(xdg):
+    _write_pack("p", _UNREF_OPT)
+    code, out, err = _run(["pack", "list"])
     assert code == 0, out + err
     assert "inert" in out and "unused" in out
 
@@ -805,8 +805,8 @@ def test_preset_list_notes_unreferenced_option(xdg):
 
 def test_marker_in_env_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "x"
         type = "string"
@@ -818,13 +818,13 @@ def test_marker_in_env_rejected(xdg):
         FOO = { option = "x" }
     """)
     with pytest.raises(ConfigError, match="env.FOO must be a non-empty string"):
-        load_presets()
+        load_packs()
 
 
 def test_marker_in_setup_run_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "x"
         type = "string"
@@ -834,13 +834,13 @@ def test_marker_in_setup_run_rejected(xdg):
         order = 1
     """)
     with pytest.raises(ConfigError, match="run` is required and must be a non-empty string"):
-        load_presets()
+        load_packs()
 
 
 def test_marker_in_setup_order_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("p", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("p", """
         [[option]]
         id = "x"
         type = "string"
@@ -850,7 +850,7 @@ def test_marker_in_setup_order_rejected(xdg):
         order = { option = "x" }
     """)
     with pytest.raises(ConfigError, match="order` must be an integer"):
-        load_presets()
+        load_packs()
 
 
 _ENUM_BOOL = """
@@ -873,32 +873,32 @@ _ENUM_BOOL = """
 
 
 def test_opt_enum_rejects_non_choice(xdg):
-    _write_preset("p", _ENUM_BOOL)
+    _write_pack("p", _ENUM_BOOL)
     _make_ws("w")
-    code, out, err = _run(["workspace", "w", "preset", "add", "p",
+    code, out, err = _run(["workspace", "w", "pack", "add", "p",
                            "--opt", "mode=zzz", "--opt", "flag=false"])
     assert code == 1
     assert "not one of the choices" in (out + err)
 
 
 def test_opt_bool_rejects_garbage(xdg):
-    _write_preset("p", _ENUM_BOOL)
+    _write_pack("p", _ENUM_BOOL)
     _make_ws("w")
-    code, out, err = _run(["workspace", "w", "preset", "add", "p",
+    code, out, err = _run(["workspace", "w", "pack", "add", "p",
                            "--opt", "mode=/opt/a", "--opt", "flag=garbage"])
     assert code == 1
     assert "true/false" in (out + err)
 
 
 def test_opt_bool_accepts_uppercase_true(xdg):
-    from credproxy_cli.core.model.presets import resolve_options
-    _write_preset("p", _ENUM_BOOL)
+    from credproxy_cli.core.model.packs import resolve_options
+    _write_pack("p", _ENUM_BOOL)
     spec = _load("p")
     vals, missing = resolve_options(spec, {"mode": "/opt/a", "flag": "TRUE"})
     assert missing == [] and vals["flag"] is True
 
 
 def test_opt_duplicate_id_last_wins(xdg):
-    from credproxy_cli.porcelain.cmd_preset import _parse_opt_flags
+    from credproxy_cli.porcelain.cmd_pack import _parse_opt_flags
     out = _parse_opt_flags(["mode=/opt/a", "mode=/opt/b"])
     assert out["mode"] == "/opt/b"

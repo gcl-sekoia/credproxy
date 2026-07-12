@@ -51,7 +51,7 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     if a.injector is None:
         fail("`binding add` needs --injector (coordinated multi-binding sets and "
-             "guardrails live in `workspace NAME preset add PRESET`)")
+             "guardrails live in `workspace NAME pack add PACK`)")
 
     if not a.host:
         fail("`binding add --injector` needs at least one --host")
@@ -271,7 +271,7 @@ def _do_binding_test_adhoc(ctx: Ctx, name: str | None, a: argparse.Namespace) ->
 def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     p = parent.add_parser("add")
     # Single-binding path. Coordinated multi-binding sets + guardrails are the
-    # `preset` noun's job (`workspace NAME preset add PRESET`), not a flag here.
+    # `pack` noun's job (`workspace NAME pack add PACK`), not a flag here.
     p.add_argument("--injector", default=None)
     p.add_argument("--provider", default=None)
     # Repeatable: a single bare REF is single-slot; one or more `slot=ref`

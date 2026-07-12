@@ -1,7 +1,7 @@
 """Tests for core/model/lock.py: the machine-owned workspace lockfile.
 
 The lock is canonical JSON, atomic, and MUST round-trip unknown top-level keys
-(issues #63/#65 add `presets`/`applied` sections an older code path must not
+(issues #63/#65 add `packs`/`applied` sections an older code path must not
 clobber)."""
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def test_save_is_canonical_json(xdg, workspaces_dir):
 
 
 def test_unknown_top_level_keys_round_trip(xdg, workspaces_dir):
-    """A future section (`presets`/`applied`) written by newer code survives a
+    """A future section (`packs`/`applied`) written by newer code survives a
     load+save cycle by older code that only touches `placeholders`."""
     from credproxy_cli.core.model.lock import load_lock, save_lock
     ws = _ws(workspaces_dir)
@@ -49,17 +49,17 @@ def test_unknown_top_level_keys_round_trip(xdg, workspaces_dir):
     ws.lock_json_path.write_text(json.dumps({
         "version": 1,
         "placeholders": {"a": "ph_a"},
-        "presets": {"github": {"rev": "abc"}},   # unknown to this issue
+        "packs": {"github": {"rev": "abc"}},   # unknown to this issue
         "applied": {"bindings": ["a"]},          # unknown to this issue
     }))
     lock = load_lock(ws)
-    assert lock["presets"] == {"github": {"rev": "abc"}}
+    assert lock["packs"] == {"github": {"rev": "abc"}}
     # Mutate only placeholders, save, and confirm the unknown sections persist.
     lock["placeholders"]["a"] = "ph_a2"
     save_lock(ws, lock)
     again = load_lock(ws)
     assert again["placeholders"] == {"a": "ph_a2"}
-    assert again["presets"] == {"github": {"rev": "abc"}}
+    assert again["packs"] == {"github": {"rev": "abc"}}
     assert again["applied"] == {"bindings": ["a"]}
 
 
@@ -82,27 +82,27 @@ def test_update_sets_only_its_section(xdg, workspaces_dir):
     assert lock["version"] == 1
 
 
-def test_applied_write_preserves_placeholders_and_presets_byte_for_byte(
+def test_applied_write_preserves_placeholders_and_packs_byte_for_byte(
         xdg, workspaces_dir):
     """The #65 acceptance invariant, direction 1: an engine `update("applied", …)`
-    preserves the resolver's `placeholders`/`presets` byte-for-byte."""
+    preserves the resolver's `placeholders`/`packs` byte-for-byte."""
     from credproxy_cli.core.model.lock import save_lock, update
     ws = _ws(workspaces_dir)
-    # Resolver persists placeholders + presets.
+    # Resolver persists placeholders + packs.
     save_lock(ws, {
         "version": 1,
         "placeholders": {"gh": "ghp_x"},
-        "presets": {"github": {"rev": "abc123", "sha": "def456"}},
+        "packs": {"github": {"rev": "abc123", "sha": "def456"}},
     })
     before = ws.lock_json_path.read_text()
     # Engine records applied state.
     update(ws, "applied", {"spec": {"image": "x"}, "config_generation": 2})
     after = ws.lock_json_path.read_text()
-    # The placeholders/presets lines are unchanged; only `applied` was added.
+    # The placeholders/packs lines are unchanged; only `applied` was added.
     import json
     a = json.loads(after)
     assert a["placeholders"] == {"gh": "ghp_x"}
-    assert a["presets"] == {"github": {"rev": "abc123", "sha": "def456"}}
+    assert a["packs"] == {"github": {"rev": "abc123", "sha": "def456"}}
     assert a["applied"] == {"spec": {"image": "x"}, "config_generation": 2}
     # And the pre-existing sections are byte-for-byte identical in the re-serialized
     # canonical JSON (deleting `applied` from `after` reproduces `before`).

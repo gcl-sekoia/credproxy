@@ -1,7 +1,7 @@
 """Declarative `[[requires]]` host-prerequisite checks (#58).
 
 Covers the parse/validate matrix per kind, the four check kinds' pass/fail
-against a controlled environment, `preset add`'s advisory exit-0-with-warnings
+against a controlled environment, `pack add`'s advisory exit-0-with-warnings
 behavior + `--json` shape, and `doctor`'s authoritative marker-discovered
 re-check with `--fetch` gating.
 """
@@ -18,9 +18,9 @@ from test_porcelain import _run
 # ---- helpers -----------------------------------------------------------------
 
 
-def _write_preset(name: str, toml: str):
+def _write_pack(name: str, toml: str):
     from credproxy_cli.core.paths import config_dir
-    d = config_dir() / "presets"
+    d = config_dir() / "packs"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{name}.toml").write_text(textwrap.dedent(toml))
     return d / f"{name}.toml"
@@ -35,9 +35,9 @@ def _make_ws(name: str, content: str = 'image = "python:3.12-slim"\n'):
     return Workspace(name)
 
 
-# A binding preset (`env` provider) plus one `path` requires. The provider
+# A binding pack (`env` provider) plus one `path` requires. The provider
 # check needs the pack to have bindings.
-_BINDING_PRESET = """
+_BINDING_PACK = """
     [placeholder]
     prefix = "ghp_"
     length = 40
@@ -60,8 +60,8 @@ _BINDING_PRESET = """
 
 
 def test_parse_all_kinds(xdg):
-    from credproxy_cli.core.model.presets import get_preset
-    _write_preset("allkinds", """
+    from credproxy_cli.core.model.packs import get_pack
+    _write_pack("allkinds", """
         [[part]]
         suffix = "api"
         injector = "bearer"
@@ -90,7 +90,7 @@ def test_parse_all_kinds(xdg):
         fetch = true
         hint = "gh auth login"
     """)
-    spec = get_preset("allkinds")
+    spec = get_pack("allkinds")
     kinds = [r.kind for r in spec.requires]
     assert kinds == ["path", "command", "env", "provider"]
     assert spec.requires[0].path == "~/.ssh/x" and spec.requires[0].hint == "make it"
@@ -101,8 +101,8 @@ def test_parse_all_kinds(xdg):
 
 def test_parse_rejects_unknown_kind(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("badkind", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("badkind", """
         [[rule]]
         suffix = "r"
         action = "block"
@@ -113,15 +113,15 @@ def test_parse_rejects_unknown_kind(xdg):
         hint = "nope"
     """)
     with pytest.raises(ConfigError, match="'kind' must be one of"):
-        load_presets()
+        load_packs()
 
 
 @pytest.mark.parametrize("kind,field", [("path", "path"), ("command", "command"),
                                         ("env", "var")])
 def test_parse_missing_payload_field(xdg, kind, field):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("nofield", f"""
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("nofield", f"""
         [[rule]]
         suffix = "r"
         action = "block"
@@ -131,13 +131,13 @@ def test_parse_missing_payload_field(xdg, kind, field):
         kind = "{kind}"
     """)
     with pytest.raises(ConfigError, match=f"needs a non-empty '{field}'"):
-        load_presets()
+        load_packs()
 
 
 def test_parse_fetch_on_nonprovider_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("badfetch", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("badfetch", """
         [[rule]]
         suffix = "r"
         action = "block"
@@ -149,15 +149,15 @@ def test_parse_fetch_on_nonprovider_rejected(xdg):
         fetch = true
     """)
     with pytest.raises(ConfigError, match="'fetch' applies only to a 'provider'"):
-        load_presets()
+        load_packs()
 
 
 def test_parse_provider_check_on_pure_container_rejected(xdg):
     """A provider check needs [[part]] bindings -- there's nothing to fetch on a
     pure-rule / pure-container pack, so it's a definition error."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("purerule", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("purerule", """
         [[rule]]
         suffix = "r"
         action = "block"
@@ -167,13 +167,13 @@ def test_parse_provider_check_on_pure_container_rejected(xdg):
         kind = "provider"
     """)
     with pytest.raises(ConfigError, match="needs the pack to have \\[\\[part\\]\\]"):
-        load_presets()
+        load_packs()
 
 
 def test_parse_unknown_key_rejected(xdg):
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("extrakey", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("extrakey", """
         [[rule]]
         suffix = "r"
         action = "block"
@@ -185,27 +185,27 @@ def test_parse_unknown_key_rejected(xdg):
         bogus = "y"
     """)
     with pytest.raises(ConfigError, match="unknown key"):
-        load_presets()
+        load_packs()
 
 
 def test_parse_requires_only_pack_rejected(xdg):
     """A pack that is ONLY [[requires]] has nothing to stamp -- rejected as empty."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("reqonly", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("reqonly", """
         [[requires]]
         kind = "command"
         command = "gh"
     """)
     with pytest.raises(ConfigError, match="at least one"):
-        load_presets()
+        load_packs()
 
 
 # ---- the four check kinds ----------------------------------------------------
 
 
 def _req(kind, **kw):
-    from credproxy_cli.core.model.presets import _Require
+    from credproxy_cli.core.model.packs import _Require
     return _Require(kind=kind, **kw)
 
 
@@ -282,13 +282,13 @@ def test_check_provider_unknown_fails(xdg):
     assert not r.ok
 
 
-# ---- preset add: advisory (exit 0), --json shape -----------------------------
+# ---- pack add: advisory (exit 0), --json shape -----------------------------
 
 
-def test_preset_add_reports_failed_requires_but_exits_0(xdg, tmp_path):
-    _write_preset("gitsign", _BINDING_PRESET.format(path=str(tmp_path / "absent")))
+def test_pack_add_reports_failed_requires_but_exits_0(xdg, tmp_path):
+    _write_pack("gitsign", _BINDING_PACK.format(path=str(tmp_path / "absent")))
     ws = _make_ws("w")
-    code, out, err = _run(["workspace", "w", "preset", "add", "gitsign",
+    code, out, err = _run(["workspace", "w", "pack", "add", "gitsign",
                            "--provider", "env", "--secret", "TOK"])
     blob = out + err
     assert code == 0, blob                       # advisory: still exit 0
@@ -298,10 +298,10 @@ def test_preset_add_reports_failed_requires_but_exits_0(xdg, tmp_path):
     assert {b.name for b in resolve_workspace(ws).bindings} == {"gitsign-api"}
 
 
-def test_preset_add_json_requires_array(xdg, tmp_path):
-    _write_preset("gitsign", _BINDING_PRESET.format(path=str(tmp_path / "absent")))
+def test_pack_add_json_requires_array(xdg, tmp_path):
+    _write_pack("gitsign", _BINDING_PACK.format(path=str(tmp_path / "absent")))
     _make_ws("w")
-    code, out, err = _run(["--json", "workspace", "w", "preset", "add", "gitsign",
+    code, out, err = _run(["--json", "workspace", "w", "pack", "add", "gitsign",
                            "--provider", "env", "--secret", "TOK"])
     assert code == 0, out + err
     data = json.loads(out)
@@ -311,11 +311,11 @@ def test_preset_add_json_requires_array(xdg, tmp_path):
     assert reqs[0]["hint"] == "create the socket dir"
 
 
-def test_preset_add_provider_fetch_failure_reported(xdg, monkeypatch):
+def test_pack_add_provider_fetch_failure_reported(xdg, monkeypatch):
     """acceptance #2: an unauthenticated provider fetch is reported with its
     hint at add time (still exit 0)."""
     monkeypatch.delenv("UNSET_TOK", raising=False)
-    _write_preset("gh", """
+    _write_pack("gh", """
         [placeholder]
         prefix = "ghp_"
         length = 40
@@ -332,7 +332,7 @@ def test_preset_add_provider_fetch_failure_reported(xdg, monkeypatch):
         hint = "authenticate: gh auth login"
     """)
     _make_ws("w")
-    code, out, err = _run(["workspace", "w", "preset", "add", "gh",
+    code, out, err = _run(["workspace", "w", "pack", "add", "gh",
                            "--provider", "env", "--secret", "UNSET_TOK"])
     blob = out + err
     assert code == 0, blob
@@ -343,10 +343,10 @@ def test_preset_add_provider_fetch_failure_reported(xdg, monkeypatch):
 
 
 def _add_gitsign(ws_name: str, tmp_path):
-    """Stamp the `gitsign` binding preset (failing path requires) into a fresh
+    """Stamp the `gitsign` binding pack (failing path requires) into a fresh
     workspace, returning the workspace."""
     ws = _make_ws(ws_name)
-    code, out, err = _run(["workspace", ws_name, "preset", "add", "gitsign",
+    code, out, err = _run(["workspace", ws_name, "pack", "add", "gitsign",
                            "--provider", "env", "--secret", "TOK"])
     assert code == 0, out + err
     return ws
@@ -354,12 +354,12 @@ def _add_gitsign(ws_name: str, tmp_path):
 
 def test_doctor_reports_stamped_requires(xdg, tmp_path):
     """acceptance #1: doctor shows the failing path check (with its hint) until
-    the dir exists; discovered via the `[[preset]]` reference + lock snapshot."""
-    _write_preset("gitsign", _BINDING_PRESET.format(path=str(tmp_path / "absent")))
+    the dir exists; discovered via the `[[pack]]` reference + lock snapshot."""
+    _write_pack("gitsign", _BINDING_PACK.format(path=str(tmp_path / "absent")))
     _add_gitsign("w", tmp_path)
     from credproxy_cli.core.engine import doctor
     checks = {c.id: c for c in doctor.run("w")}
-    cid = "ws:w:preset:gitsign:requires[0]"
+    cid = "ws:w:pack:gitsign:requires[0]"
     assert cid in checks
     assert not checks[cid].ok
     assert checks[cid].hint == "create the socket dir"
@@ -371,25 +371,25 @@ def test_doctor_reports_stamped_requires(xdg, tmp_path):
 
 
 def test_doctor_check_id_and_message(xdg, tmp_path):
-    _write_preset("gitsign", _BINDING_PRESET.format(path=str(tmp_path / "absent")))
+    _write_pack("gitsign", _BINDING_PACK.format(path=str(tmp_path / "absent")))
     _add_gitsign("w", tmp_path)
     from credproxy_cli.core.engine import doctor
-    c = {c.id: c for c in doctor.run("w")}["ws:w:preset:gitsign:requires[0]"]
-    assert "[w] preset 'gitsign' requires (path)" in c.message
+    c = {c.id: c for c in doctor.run("w")}["ws:w:pack:gitsign:requires[0]"]
+    assert "[w] pack 'gitsign' requires (path)" in c.message
 
 
 def test_doctor_unresolvable_pack_skip_note(xdg, tmp_path):
     """A marker naming a pack that no longer resolves -> ok=True skip-note."""
-    path_file = _write_preset("gitsign",
-                              _BINDING_PRESET.format(path=str(tmp_path / "x")))
+    path_file = _write_pack("gitsign",
+                              _BINDING_PACK.format(path=str(tmp_path / "x")))
     ws = _add_gitsign("w", tmp_path)
     path_file.unlink()  # pack gone from the registry, but its marker stays
     from credproxy_cli.core.engine import doctor
     checks = {c.id: c for c in doctor.run("w")}
-    note = checks["ws:w:preset:gitsign"]
+    note = checks["ws:w:pack:gitsign"]
     assert note.ok and "no longer resolves" in note.message
     # No per-requires checks for a vanished pack.
-    assert not any(cid.startswith("ws:w:preset:gitsign:requires")
+    assert not any(cid.startswith("ws:w:pack:gitsign:requires")
                    for cid in checks)
 
 
@@ -397,7 +397,7 @@ def test_doctor_fetch_gating(xdg, monkeypatch, tmp_path):
     """acceptance #3: a fetch=true provider check runs only under --fetch. Without
     it (incl. a scan-all), the provider is never fetched (degrades to resolve)."""
     monkeypatch.delenv("UNSET_TOK", raising=False)
-    _write_preset("gh", """
+    _write_pack("gh", """
         [placeholder]
         prefix = "ghp_"
         length = 40
@@ -414,12 +414,12 @@ def test_doctor_fetch_gating(xdg, monkeypatch, tmp_path):
         hint = "gh auth login"
     """)
     ws = _make_ws("w")
-    code, out, err = _run(["workspace", "w", "preset", "add", "gh",
+    code, out, err = _run(["workspace", "w", "pack", "add", "gh",
                            "--provider", "env", "--secret", "UNSET_TOK"])
     assert code == 0, out + err
 
     from credproxy_cli.core.engine import doctor
-    cid = "ws:w:preset:gh:requires[0]"
+    cid = "ws:w:pack:gh:requires[0]"
     # No --fetch: resolve-only, so the unfetchable secret still passes.
     plain = {c.id: c for c in doctor.run("w")}[cid]
     assert plain.ok and "fetch skipped" in plain.message
@@ -432,11 +432,11 @@ def test_doctor_fetch_gating(xdg, monkeypatch, tmp_path):
 
 
 def test_doctor_no_requires_no_checks(xdg):
-    """A workspace with no stamped presets emits no preset-requires checks."""
+    """A workspace with no stamped packs emits no pack-requires checks."""
     _make_ws("plain")
     from credproxy_cli.core.engine import doctor
     ids = {c.id for c in doctor.run("plain")}
-    assert not any(":preset:" in cid for cid in ids)
+    assert not any(":pack:" in cid for cid in ids)
 
 
 # ---- review follow-ups (#58) -------------------------------------------------
@@ -460,8 +460,8 @@ def test_parse_rejects_relative_path(xdg):
     (nondeterministic across doctor runs) -- rejected at definition time. An
     absolute or `~`/`$VAR`-rooted path is accepted."""
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.model.presets import load_presets
-    _write_preset("relpath", """
+    from credproxy_cli.core.model.packs import load_packs
+    _write_pack("relpath", """
         [[rule]]
         suffix = "r"
         action = "block"
@@ -472,14 +472,14 @@ def test_parse_rejects_relative_path(xdg):
         path = "foo/bar"
     """)
     with pytest.raises(ConfigError, match="must be absolute or"):
-        load_presets()
+        load_packs()
 
 
 def test_parse_accepts_rooted_paths(xdg):
     """`~`/`$VAR`-rooted and absolute paths are accepted (finding 7) -- even a
     `$VAR`-rooted one whose var is currently unset (it resolves at check time)."""
-    from credproxy_cli.core.model.presets import get_preset
-    _write_preset("rooted", """
+    from credproxy_cli.core.model.packs import get_pack
+    _write_pack("rooted", """
         [[rule]]
         suffix = "r"
         action = "block"
@@ -497,21 +497,21 @@ def test_parse_accepts_rooted_paths(xdg):
         kind = "path"
         path = "/opt/abs"
     """)
-    spec = get_preset("rooted")
+    spec = get_pack("rooted")
     assert [r.path for r in spec.requires] == \
         ["$DEFINITELY_UNSET_VAR_ZZZ/sock", "~/.ssh/x", "/opt/abs"]
 
 
-def test_doctor_malformed_registry_preset_reports_not_aborts(xdg, tmp_path):
-    """Finding 1: one unparseable registry preset must NOT abort the whole doctor
+def test_doctor_malformed_registry_pack_reports_not_aborts(xdg, tmp_path):
+    """Finding 1: one unparseable registry pack must NOT abort the whole doctor
     sweep -- it reports a failing load check while every other check still runs."""
-    _write_preset("gitsign", _BINDING_PRESET.format(path=str(tmp_path / "absent")))
+    _write_pack("gitsign", _BINDING_PACK.format(path=str(tmp_path / "absent")))
     _add_gitsign("w", tmp_path)
-    # A WIP/broken preset unrelated to the workspace.
-    _write_preset("broken", "this is = not = valid = toml [[[\n")
+    # A WIP/broken pack unrelated to the workspace.
+    _write_pack("broken", "this is = not = valid = toml [[[\n")
     from credproxy_cli.core.engine import doctor
     checks = {c.id: c for c in doctor.run("w")}
-    assert "ws:w:presets:load" in checks and not checks["ws:w:presets:load"].ok
+    assert "ws:w:packs:load" in checks and not checks["ws:w:packs:load"].ok
     # The rest of the sweep still ran (report-all, not raise).
     assert checks["ws:w:config"].ok
     assert "ws:w:bindings" in checks
@@ -520,7 +520,7 @@ def test_doctor_malformed_registry_preset_reports_not_aborts(xdg, tmp_path):
 def test_doctor_provider_check_uses_stamped_provider_not_default(xdg):
     """Finding 8: doctor's provider requires check must use the provider CHOSEN at
     stamp time, not the pack's `default_provider` (which here doesn't resolve)."""
-    _write_preset("gh", """
+    _write_pack("gh", """
         default_provider = "bogus-default-zzz"
 
         [placeholder]
@@ -537,10 +537,10 @@ def test_doctor_provider_check_uses_stamped_provider_not_default(xdg):
         kind = "provider"
     """)
     ws = _make_ws("w")
-    assert _run(["workspace", "w", "preset", "add", "gh",
+    assert _run(["workspace", "w", "pack", "add", "gh",
                  "--provider", "env", "--secret", "TOK"])[0] == 0
     from credproxy_cli.core.engine import doctor
-    c = {c.id: c for c in doctor.run("w")}["ws:w:preset:gh:requires[0]"]
+    c = {c.id: c for c in doctor.run("w")}["ws:w:pack:gh:requires[0]"]
     assert c.ok                                    # 'env' resolves; default would not
     assert "'env'" in c.message and "bogus-default-zzz" not in c.message
 
@@ -572,7 +572,7 @@ def test_doctor_fetch_dedupes_provider_invocation(xdg, tmp_path):
     requires layer reuses the binding fetch's outcome (one exec, not two)."""
     counter = tmp_path / "count"
     _counting_provider("countprov", counter)
-    _write_preset("gh", """
+    _write_pack("gh", """
         [placeholder]
         prefix = "ghp_"
         length = 40
@@ -588,13 +588,13 @@ def test_doctor_fetch_dedupes_provider_invocation(xdg, tmp_path):
         fetch = true
     """)
     ws = _make_ws("w")
-    assert _run(["workspace", "w", "preset", "add", "gh",
+    assert _run(["workspace", "w", "pack", "add", "gh",
                  "--provider", "countprov", "--secret", "TOK"])[0] == 0
     counter.write_text("")                         # reset the add-time invocations
 
     from credproxy_cli.core.engine import doctor
     checks = {c.id: c for c in doctor.run("w", fetch=True)}
-    req = checks["ws:w:preset:gh:requires[0]"]
+    req = checks["ws:w:pack:gh:requires[0]"]
     assert req.ok and "covered by this workspace's binding check" in req.message
     # Exactly ONE provider exec for the whole --fetch run (binding fetch), not two.
     assert counter.read_text().count("x") == 1

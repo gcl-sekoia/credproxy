@@ -1,7 +1,7 @@
-"""`preset refresh` (config-v2, #64): re-expand `[[preset]]` references from their
+"""`pack refresh` (config-v2, #64): re-expand `[[pack]]` references from their
 CURRENT definitions and diff the result against the locked snapshots.
 
-This is small by construction. A preset is a durable reference whose expansion is
+This is small by construction. A pack is a durable reference whose expansion is
 snapshotted in `lock.json`; a changed definition is inert until the operator asks
 for it. Refresh is that ask: for each targeted reference it FORCE-re-expands from
 the current definition -- reusing the ONE re-expand implementation the resolver
@@ -11,7 +11,7 @@ one and (unless `--check`) persists the fresh snapshot.
 
 There is no stamped text to hand-edit anymore, so the old sha-forensics /
 three-way / skipped-edited machinery is gone: a hand change is expressed through
-`disable` / `[preset.override.<suffix>]` in the reference (which are the ref's
+`disable` / `[pack.override.<suffix>]` in the reference (which are the ref's
 INPUTS, so they survive a refresh). A vanished definition part simply disappears
 from the new snapshot -- the diff's "removed" case, no `--prune` flag.
 
@@ -31,7 +31,7 @@ import tomllib
 from ..errors import ConfigError
 from . import lock as lock_mod
 from . import resolver as resolver_mod
-from .presets import get_preset, parse_preset_refs, preset_ref_inputs
+from .packs import get_pack, parse_pack_refs, pack_ref_inputs
 
 if TYPE_CHECKING:
     from .resolver import ResolvedWorkspace
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class EntryDiff:
-    """One structural change in a preset's expansion. `kind` is the entry family
+    """One structural change in a pack's expansion. `kind` is the entry family
     (`binding`/`rule`/`mount`/`env`/`setup`); `name` is its identity within the
     pack (a binding/rule name, a mount target, an env key, a setup `order`);
     `action` is `added`/`removed`/`changed`; `diff` is a unified-diff string of the
@@ -64,10 +64,10 @@ class EntryDiff:
 
 
 @dataclass(frozen=True)
-class PresetRefresh:
-    """The per-preset refresh outcome: whether its expansion changed, the old/new
+class PackRefresh:
+    """The per-pack refresh outcome: whether its expansion changed, the old/new
     `definition_rev`, and the entry-level diff."""
-    preset: str
+    pack: str
     changed: bool
     old_rev: str | None
     new_rev: str
@@ -75,7 +75,7 @@ class PresetRefresh:
 
     def to_dict(self) -> dict:
         return {
-            "preset": self.preset,
+            "pack": self.pack,
             "changed": self.changed,
             "definition_rev": {"old": self.old_rev, "new": self.new_rev},
             "entries": [e.to_dict() for e in self.entries],
@@ -88,7 +88,7 @@ class RefreshResult:
     content to persist (the caller writes it unless `--check` or `not dirty`);
     `resolved` is the re-validated merged model (for the caller's host advisories);
     `container_half_changed` flags a mount/env/setup change (spec-drift hint)."""
-    presets: tuple[PresetRefresh, ...]
+    packs: tuple[PackRefresh, ...]
     new_lock: dict
     resolved: "ResolvedWorkspace"
     changed: bool
@@ -97,11 +97,11 @@ class RefreshResult:
 
 
 def compute_refresh(ws: "Workspace",
-                    preset_name: str | None = None) -> RefreshResult:
-    """Re-expand `preset_name` (or every `[[preset]]` reference when None) from the
+                    pack_name: str | None = None) -> RefreshResult:
+    """Re-expand `pack_name` (or every `[[pack]]` reference when None) from the
     current definition, diff against the locked snapshots, and RE-VALIDATE the
     merged model -- all without writing. Raises `ConfigError` (naming both sides)
-    if the refresh would introduce a collision, or if a named `preset_name` isn't
+    if the refresh would introduce a collision, or if a named `pack_name` isn't
     referenced in the intent file. The caller persists `new_lock` when `dirty`."""
     if not ws.exists():
         raise ConfigError(
@@ -111,39 +111,39 @@ def compute_refresh(ws: "Workspace",
     raw = tomllib.loads(text)
     lock = lock_mod.load_lock(ws)
 
-    refs = parse_preset_refs(raw, source)
+    refs = parse_pack_refs(raw, source)
     by_name = {r.name: r for r in refs}
-    if preset_name is not None:
-        if preset_name not in by_name:
+    if pack_name is not None:
+        if pack_name not in by_name:
             referenced = ", ".join(f"'{n}'" for n in by_name) or "(none)"
             raise ConfigError(
-                f"preset '{preset_name}' is not referenced in {source} "
+                f"pack '{pack_name}' is not referenced in {source} "
                 f"-- referenced pack(s): {referenced}")
-        targets = [by_name[preset_name]]
+        targets = [by_name[pack_name]]
     else:
         targets = list(refs)
 
-    old_presets: dict = lock.get("presets", {})
+    old_packs: dict = lock.get("packs", {})
     new_lock = deepcopy(lock)
-    new_presets = new_lock.setdefault("presets", {})
+    new_packs = new_lock.setdefault("packs", {})
 
-    diffs: list[PresetRefresh] = []
+    diffs: list[PackRefresh] = []
     for ref in targets:
-        old_entry = old_presets.get(ref.name)
+        old_entry = old_packs.get(ref.name)
         old_exp = old_entry.get("expansion", {}) \
             if isinstance(old_entry, dict) else {}
         old_rev = old_entry.get("definition_rev") \
             if isinstance(old_entry, dict) else None
-        inputs = preset_ref_inputs(ref)
-        spec = get_preset(ref.name)          # CredproxyError on an unknown pack
+        inputs = pack_ref_inputs(ref)
+        spec = get_pack(ref.name)          # CredproxyError on an unknown pack
         # FORCE re-expand -- the ONE re-expand implementation the resolver uses,
         # so refresh and resolve can never diverge on what an expansion is (the
         # shared placeholder is reused from `old_entry`, never rotated).
         new_entry = resolver_mod._expand_ref(spec, ref, inputs, old_entry or {})
-        new_presets[ref.name] = new_entry
+        new_packs[ref.name] = new_entry
         entries = _diff_expansion(old_exp, new_entry["expansion"])
-        diffs.append(PresetRefresh(
-            preset=ref.name, changed=bool(entries), old_rev=old_rev,
+        diffs.append(PackRefresh(
+            pack=ref.name, changed=bool(entries), old_rev=old_rev,
             new_rev=new_entry["definition_rev"], entries=tuple(entries)))
 
     # Re-validate the merged model against the refreshed lock. Because the refs'
@@ -153,29 +153,29 @@ def compute_refresh(ws: "Workspace",
     resolved = resolver_mod._resolve_from(
         text, new_lock, source, check_bind_exists=False)
 
-    # A NAMED `preset refresh A` still persists any OTHER pack whose ref inputs
+    # A NAMED `pack refresh A` still persists any OTHER pack whose ref inputs
     # were edited in the TOML (the final resolve re-expands it, and `dirty` covers
     # the whole lock). Behavior-neutral (any resolve would), but out of the named
     # scope -- so surface a note per non-targeted pack whose lock snapshot changed
     # as a side effect. (An inputs-UNCHANGED pack whose definition merely drifted
-    # is reused inert; the resolver already emits its own "run preset refresh"
+    # is reused inert; the resolver already emits its own "run pack refresh"
     # note there, and its snapshot is unchanged, so it isn't caught here.)
-    if preset_name is not None:
-        final_presets: dict = resolved.lock.get("presets", {})
-        for pname, new_e in final_presets.items():
-            if pname == preset_name:
+    if pack_name is not None:
+        final_packs: dict = resolved.lock.get("packs", {})
+        for pname, new_e in final_packs.items():
+            if pname == pack_name:
                 continue
-            if old_presets.get(pname) != new_e:
+            if old_packs.get(pname) != new_e:
                 resolved.notes.append(
-                    f"preset '{pname}' inputs changed -- re-expanded "
-                    f"(run 'preset refresh {pname}' to review)")
+                    f"pack '{pname}' inputs changed -- re-expanded "
+                    f"(run 'pack refresh {pname}' to review)")
 
     container_half_changed = any(
         e.kind in ("mount", "env", "setup")
         for d in diffs for e in d.entries)
 
     return RefreshResult(
-        presets=tuple(diffs),
+        packs=tuple(diffs),
         new_lock=resolved.lock,
         resolved=resolved,
         changed=any(d.changed for d in diffs),

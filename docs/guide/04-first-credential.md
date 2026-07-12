@@ -117,7 +117,7 @@ else builds on this: more services, real secret managers, and guardrails.
 > 1Password, the macOS Keychain, or your `gh` login. Swapping the provider is a
 > one-flag change → [05 · Secret managers](05-secret-managers.md). To wire a
 > whole service (all of GitHub's hosts) in one command →
-> [06 · Presets](06-presets.md).
+> [06 · Packs](06-packs.md).
 
 ---
 

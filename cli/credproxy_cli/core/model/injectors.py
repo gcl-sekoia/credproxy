@@ -107,12 +107,12 @@ class Injector:
 def validate_placeholder(p: dict | None, label: str) -> Placeholder:
     """Validate a `[placeholder]` sub-table (None -> defaults) into a Placeholder.
 
-    Shared by injector AND preset parsing so a bad charset or a length that
+    Shared by injector AND pack parsing so a bad charset or a length that
     doesn't exceed the prefix fails at LOAD with a clear error -- rather than
     later as a `KeyError` inside `generate()` (unknown charset) or, worse, a
     silent ZERO-ENTROPY sentinel (length <= prefix yields just the prefix,
     identical across workspaces, defeating placeholder uniqueness). `label`
-    prefixes the message (e.g. "injector 'x'" or "preset 'y' (path)")."""
+    prefixes the message (e.g. "injector 'x'" or "pack 'y' (path)")."""
     if p is None:
         return Placeholder(DEFAULT_PREFIX, DEFAULT_LENGTH, DEFAULT_CHARSET)
     if not isinstance(p, dict):

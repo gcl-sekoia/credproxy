@@ -8,8 +8,8 @@ Two lints sweep README.md + docs/**/*.md:
    hand-rolled top-level dispatch mirrored from the same module's constants).
    Both the subcommand *path* (verb resolves) and every `--flag` (known to the
    resolved subparser or a global) are checked. This is the guard that would
-   have caught the retired `binding add --preset` flag surviving in the docs
-   (see `test_regression_stale_preset_flag`).
+   have caught the retired `binding add --pack` flag surviving in the docs
+   (see `test_regression_stale_pack_flag`).
 
 2. **Link + anchor lint** -- every relative markdown link resolves to a file,
    and every `#anchor` (cross-file or same-file) matches a heading under
@@ -74,7 +74,7 @@ def _subparser_choices(parser: argparse.ArgumentParser) -> dict:
 
 
 # The one big real parser: the whole workspace-scoped verb tree
-# (enter/.../binding/rule/mount/preset and their sub-actions).
+# (enter/.../binding/rule/mount/pack and their sub-actions).
 _LEAF = _cli._build_leaf_parser()
 
 
@@ -125,8 +125,8 @@ def _resolve(surface: str, rest: list[str]) -> tuple[set[str], str | None]:
         return _resolve_workspace(tail)
     if head in ("injector", "provider"):
         return _resolve_def(head, tail)
-    if head == "preset":
-        return _resolve_preset(tail)
+    if head == "pack":
+        return _resolve_pack(tail)
     if head == "script":
         return _resolve_script(tail)
     if head == "dev":
@@ -179,14 +179,14 @@ def _resolve_def(kind: str, tail: list[str]) -> tuple[set[str], str | None]:
     return None, f"unknown {kind} command {sub!r}"
 
 
-def _resolve_preset(tail: list[str]) -> tuple[set[str], str | None]:
-    # Mirrors _dispatch_preset: `list` (definitional) or add/refresh/remove
+def _resolve_pack(tail: list[str]) -> tuple[set[str], str | None]:
+    # Mirrors _dispatch_pack: `list` (definitional) or add/refresh/remove
     # (-> leaf tree).
     if not tail or tail[0] == "list":
         return _GLOBALS, None
     if tail[0] in ("add", "refresh", "remove"):
-        return _walk_leaf(["preset", *tail])
-    return None, f"unknown preset command {tail[0]!r}"
+        return _walk_leaf(["pack", *tail])
+    return None, f"unknown pack command {tail[0]!r}"
 
 
 def _resolve_script(tail: list[str]) -> tuple[set[str], str | None]:
@@ -361,12 +361,12 @@ def test_doc_commands_valid():
     assert not failures, "stale/invalid CLI command(s) in docs:\n" + "\n".join(failures)
 
 
-def test_regression_stale_preset_flag():
+def test_regression_stale_pack_flag():
     """The historical staleness the whole lint exists to catch: `binding add
-    --preset` was retired but survived in the README quickstart. Prove the
+    --pack` was retired but survived in the README quickstart. Prove the
     validator rejects it on both surfaces, and accepts the valid replacement."""
-    stale_loose = shlex.split("credp binding add --preset github")
-    stale_strict = shlex.split("credproxy workspace w binding add --preset github")
+    stale_loose = shlex.split("credp binding add --pack github")
+    stale_strict = shlex.split("credproxy workspace w binding add --pack github")
     assert _lint_command("credp", stale_loose) is not None
     assert _lint_command("credproxy", stale_strict) is not None
 
@@ -375,8 +375,8 @@ def test_regression_stale_preset_flag():
         "--secret GITHUB_TOKEN --host api.github.com"
     )
     assert _lint_command("credp", valid) is None
-    # and the preset noun that replaced it
-    assert _lint_command("credp", shlex.split("credp preset add github")) is None
+    # and the pack noun that replaced it
+    assert _lint_command("credp", shlex.split("credp pack add github")) is None
 
 
 # =============================================================================
@@ -470,7 +470,7 @@ def test_doc_links_resolve():
 
 def test_slug_known_tricky_case():
     """The `+`-with-surrounding-spaces case that must survive slugging."""
-    assert _slug("Distributing a policy: script + preset") == "distributing-a-policy-script--preset"
+    assert _slug("Distributing a policy: script + pack") == "distributing-a-policy-script--pack"
     assert _slug("Interception is a union -- a rule can flip a host to intercepted") \
         .startswith("interception-is-a-union")
 

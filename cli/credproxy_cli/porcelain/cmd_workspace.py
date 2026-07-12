@@ -1,5 +1,5 @@
 """The `workspace` noun's non-lifecycle verbs: create/use/current/list/info/
-bind-dir/edit/delete-adjacent inspect+config, plus the create-time template-preset
+bind-dir/edit/delete-adjacent inspect+config, plus the create-time template-pack
 expansion and the `create` argv helpers."""
 from __future__ import annotations
 
@@ -19,10 +19,10 @@ from .common import (
     Ctx, _resolve_ws, _require_exists, _confirm_destructive, _is_default,
     _LeafParser,
 )
-from .cmd_preset import (
-    _PRESET_BLOCK_RE, _PRESET_CHILD_RE, _PRESET_REF_RE,
-    _expansion_summary, _newly_intercepted, _render_preset_ref_block,
-    _resolve_preset_option_values, _resolve_preset_credential_interactive,
+from .cmd_pack import (
+    _PACK_BLOCK_RE, _PACK_CHILD_RE, _PACK_REF_RE,
+    _expansion_summary, _newly_intercepted, _render_pack_ref_block,
+    _resolve_pack_option_values, _resolve_pack_credential_interactive,
 )
 
 
@@ -40,7 +40,7 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
         name = core_workspace.derive_workspace_name(directory)
         say(f"derived workspace name '{name}' from {directory}")
     ws = for_name(name)  # reserved-name / charset check happens here
-    # Fail fast on an existing workspace BEFORE any template render / preset
+    # Fail fast on an existing workspace BEFORE any template render / pack
     # expansion, so create stays all-or-nothing (nothing resolved or written for a
     # name that's already taken). create_*_workspace_files re-checks under its own
     # write, closing the (host-single-user) race.
@@ -59,12 +59,12 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
         base_text = core_config.render_attach_template(ws.name, selector)
     else:
         base_text = core_config.render_template(ws.name)
-    # Resolve any template-declared `[[preset]]` references (#57, config-v2) IN
+    # Resolve any template-declared `[[pack]]` references (#57, config-v2) IN
     # MEMORY -- prompt/default the credential + options and rewrite each block with
     # explicit values; the references SURVIVE into the stamped config (the
     # expansion is minted into the lock on the first resolve). All-or-nothing: any
     # failure raises/exits here, before a single byte is written.
-    final_text, preset_announces, prereq_inputs = _expand_template_presets(
+    final_text, pack_announces, prereq_inputs = _expand_template_packs(
         ctx, base_text, source)
     if attach is not None:
         containers.create_attached_workspace_files(ws, selector, text=final_text)
@@ -75,12 +75,12 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
     # aborts. Advisory -- the reference is durable, host state is fixable afterward.
     if prereq_inputs:
         from ..core.model import prereqs
-        for announce, (spec, provider, secret) in zip(preset_announces,
+        for announce, (spec, provider, secret) in zip(pack_announces,
                                                        prereq_inputs):
             announce["requires"] = [prereqs.summary(r) for r in prereqs.evaluate(
                 spec.requires, provider=provider, secret=secret, do_fetch=True)]
     render.OUT.created(ws.name, str(ws.config_path), attached=attach is not None,
-                       presets=preset_announces)
+                       packs=pack_announces)
     # Optional cwd-association (`--here`/`--dir`): record the directory this
     # workspace is "for" so `credp <verb>` resolves it from there (dirmatch).
     if directory is not None:
@@ -101,16 +101,16 @@ def do_create(ctx: Ctx, name: str | None, directory: str | None = None,
         say(f"set '{ws.name}' as the default workspace")
 
 
-def _rewrite_template_preset_blocks(text: str, blocks: list[str]) -> str:
-    """Replace each `[[preset]]` block in `text` (in file order) with the
+def _rewrite_template_pack_blocks(text: str, blocks: list[str]) -> str:
+    """Replace each `[[pack]]` block in `text` (in file order) with the
     canonical reference `blocks[i]` (resolved provider/secret/options written
     explicitly), via the same span machinery `remove_binding` uses. Folds one
     preceding blank separator into each replacement's leading blank so spacing
-    stays tidy. `blocks` is 1:1 with the `[[preset]]` headers in `text`."""
+    stays tidy. `blocks` is 1:1 with the `[[pack]]` headers in `text`."""
     from ..core.model.bindings import _block_spans
 
     lines = text.splitlines(keepends=True)
-    spans = _block_spans(text, _PRESET_BLOCK_RE, _PRESET_CHILD_RE)
+    spans = _block_spans(text, _PACK_BLOCK_RE, _PACK_CHILD_RE)
     for (start, end), block in reversed(list(zip(spans, blocks))):
         if start > 0 and lines[start - 1].strip() == "":
             start -= 1
@@ -118,10 +118,10 @@ def _rewrite_template_preset_blocks(text: str, blocks: list[str]) -> str:
     return "".join(lines)
 
 
-def _expand_template_presets(ctx: Ctx, base_text: str, source: str):
-    """Resolve template-declared `[[preset]]` references (#57, config-v2) at
+def _expand_template_packs(ctx: Ctx, base_text: str, source: str):
+    """Resolve template-declared `[[pack]]` references (#57, config-v2) at
     `create` time: prompt/default the credential + options NOW and rewrite each
-    surviving `[[preset]]` block with the resolved values written explicitly (the
+    surviving `[[pack]]` block with the resolved values written explicitly (the
     expansion itself lands in the lock on the first resolve, never in the TOML).
     Returns `(final_text, announces, prereq_inputs)` -- `announces` is the
     per-entry render metadata (built from an in-memory expansion, display only)
@@ -131,11 +131,11 @@ def _expand_template_presets(ctx: Ctx, base_text: str, source: str):
     All-or-nothing: everything is composed + validated in memory (`validate_text`)
     and every failure raises/exits before the caller writes, so a bad entry leaves
     no partial config."""
-    from ..core.errors import PresetTemplateError
+    from ..core.errors import PackTemplateError
     from ..core.model.bindings import _block_spans
-    from ..core.model.presets import (
-        apply_option_values, build_preset, expansion_to_lock, get_preset,
-        parse_template_presets,
+    from ..core.model.packs import (
+        apply_option_values, build_pack, expansion_to_lock, get_pack,
+        parse_template_packs,
     )
     from ..core.model import prereqs
     from ..core.model.resolver import validate_text
@@ -144,60 +144,60 @@ def _expand_template_presets(ctx: Ctx, base_text: str, source: str):
     try:
         raw = tomllib.loads(base_text)
     except tomllib.TOMLDecodeError as e:
-        if _PRESET_REF_RE.search(base_text):
-            fail(f"{source}: template is malformed TOML ({e}); its preset "
-                 f"entries can't be expanded -- fix the template's `[[preset]]` "
+        if _PACK_REF_RE.search(base_text):
+            fail(f"{source}: template is malformed TOML ({e}); its pack "
+                 f"entries can't be expanded -- fix the template's `[[pack]]` "
                  f"syntax")
         return base_text, [], []
 
-    if "preset" not in raw:
+    if "pack" not in raw:
         return base_text, [], []
 
-    entries = parse_template_presets(raw, source)   # ConfigError on a bad entry
+    entries = parse_template_packs(raw, source)   # ConfigError on a bad entry
 
-    # Require the documented `[[preset]]` block form (the rewrite only touches
-    # `[[preset]]` HEADER blocks; an inline `preset = [...]` would survive).
-    n_blocks = len(_block_spans(base_text, _PRESET_BLOCK_RE))
+    # Require the documented `[[pack]]` block form (the rewrite only touches
+    # `[[pack]]` HEADER blocks; an inline `pack = [...]` would survive).
+    n_blocks = len(_block_spans(base_text, _PACK_BLOCK_RE))
     if n_blocks != len(entries):
-        fail(f"{source}: declare template presets as `[[preset]]` blocks, not an "
-             f"inline `preset = [...]` array/table")
+        fail(f"{source}: declare template packs as `[[pack]]` blocks, not an "
+             f"inline `pack = [...]` array/table")
     if not entries:
-        fail(f"{source}: the `preset` key is empty; remove it, or declare "
-             f"template presets as `[[preset]]` blocks")
+        fail(f"{source}: the `pack` key is empty; remove it, or declare "
+             f"template packs as `[[pack]]` blocks")
 
-    from ..core.model.presets import PresetRef
+    from ..core.model.packs import PackRef
 
     announces: list[dict] = []
     ref_blocks: list[str] = []
     prereq_inputs: list[tuple] = []      # (literal_spec, provider, secret) per entry
     accum_hosts: list[str] = []
     for entry in entries:
-        spec = get_preset(entry.name)               # CredproxyError on unknown pack
-        option_values = _resolve_preset_option_values(
+        spec = get_pack(entry.name)               # CredproxyError on unknown pack
+        option_values = _resolve_pack_option_values(
             ctx, spec, dict(entry.options or {}))
         provider = secret = None
         if spec.needs_credential:
             def _missing(missing, _entry=entry):
-                raise PresetTemplateError(_entry.name, missing)
+                raise PackTemplateError(_entry.name, missing)
 
-            provider, secret = _resolve_preset_credential_interactive(
+            provider, secret = _resolve_pack_credential_interactive(
                 ctx, spec, entry.provider, entry.secret, on_missing=_missing)
             find_provider(provider)                 # ProviderError if it doesn't resolve
         elif entry.provider or entry.secret:
             shape = "container-only (mounts/env/setup)" if spec.has_container_half \
                 else "pure-rule"
-            fail(f"template preset '{entry.name}' is a {shape} pack with no "
+            fail(f"template pack '{entry.name}' is a {shape} pack with no "
                  f"bindings -- it needs no provider/secret; remove those fields "
-                 f"from its `[[preset]]` entry")
+                 f"from its `[[pack]]` entry")
         ref_blocks.append(
-            _render_preset_ref_block(entry.name, provider, secret, option_values))
+            _render_pack_ref_block(entry.name, provider, secret, option_values))
 
         # In-memory expansion for the announce (display only; the lock is minted on
         # the first resolve). `disable`/`override` aren't template-expressible, so a
-        # bare PresetRef suffices.
-        exp = build_preset(entry.name, provider, secret, options=option_values)
+        # bare PackRef suffices.
+        exp = build_pack(entry.name, provider, secret, options=option_values)
         expansion = expansion_to_lock(
-            exp, PresetRef(entry.name, provider, secret, option_values, (), {}))
+            exp, PackRef(entry.name, provider, secret, option_values, (), {}))
         summary = _expansion_summary(entry.name, {"expansion": expansion})
         # `create` writes NO lock, so the shared placeholder above is a discarded
         # sentinel -- the real one is minted at the first persisting resolve. Omit
@@ -214,7 +214,7 @@ def _expand_template_presets(ctx: Ctx, base_text: str, source: str):
             if spec.options else spec
         prereq_inputs.append((literal_spec, provider, secret))
 
-    final_text = _rewrite_template_preset_blocks(base_text, ref_blocks)
+    final_text = _rewrite_template_pack_blocks(base_text, ref_blocks)
 
     # All-or-nothing: the composed config must resolve (references expand,
     # collisions clean) before the caller writes a single byte.
@@ -338,7 +338,7 @@ def do_info(ctx: Ctx) -> None:
     surface-agnostic."""
     from collections import Counter
     from ..core import paths
-    from ..core.model import presets as core_presets
+    from ..core.model import packs as core_packs
     from ..core.model.injectors import list_injectors
     from ..core.providers import list_providers
     from ..core.model.scripts import list_scripts
@@ -355,7 +355,7 @@ def do_info(ctx: Ctx) -> None:
         "injectors": tiers(Counter(i.source for i in list_injectors())),
         "providers": tiers(Counter(p.source for p in list_providers())),
         "scripts": tiers(Counter(s.source_origin for s in list_scripts())),
-        "presets": tiers(Counter(core_presets.load_preset_sources().values())),
+        "packs": tiers(Counter(core_packs.load_pack_sources().values())),
     }
 
     overlays = paths.overlay_dirs()
@@ -454,7 +454,7 @@ def do_config(ctx: Ctx, name: str | None, declared: bool) -> None:
     if declared:
         cfg = core_config.declared_config(ws)
     else:
-        # Effective view: fold in any `[[preset]]` container half (config-v2) via
+        # Effective view: fold in any `[[pack]]` container half (config-v2) via
         # the resolver, then fill exec-time defaults.
         from ..core.model.resolver import resolve_workspace
         cfg = sessions.effective_config(

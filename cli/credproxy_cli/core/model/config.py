@@ -62,7 +62,7 @@ KNOWN_KEYS = frozenset({
     "image", "home", "directory", "mounts", "env", "setup", "user", "workdir",
     "enter_prelude", "shell", "exec_flags", "forward_env", "run_flags",
     "map_host_user", "user_uid", "auto_stop", "binding", "rule", "attach",
-    "preset",
+    "pack",
 })
 
 # The `attach` selector keys. Exactly one must be present. `compose_project` is
@@ -179,8 +179,8 @@ def _qualified_overlay_source(rel: str, where: str) -> str:
     basename or the literal `user`/`builtin` (see `_tier_roots`), `REL` a path
     under exactly that root. Confinement (no `..`/symlink escape) and the
     must-exist check apply per root, as for an unqualified source. This is how a
-    preset pins its shipped files to its own owning tier, immune to overlay
-    reordering/shadowing (see core/presets.py)."""
+    pack pins its shipped files to its own owning tier, immune to overlay
+    reordering/shadowing (see core/packs.py)."""
     tier, _, sub = rel.partition(":")
     roots = _tier_roots()
     base = roots.get(tier)
@@ -247,9 +247,9 @@ def _parse_mount(m, where: str, *, expand_bind: bool = True) -> dict:
     `bind`/`volume`/`overlay`, plus an absolute `target` and optional `readonly`
     (overlay mounts default to read-only -- they ship static assets).
 
-    The ONE mount parser -- both `load_config` (workspace TOML) and the preset
+    The ONE mount parser -- both `load_config` (workspace TOML) and the pack
     parser call it, so mount validation lives in a single place. `expand_bind`
-    (default True) is the one preset-path knob: a preset carries a host-bind
+    (default True) is the one pack-path knob: a pack carries a host-bind
     SOURCE as a literal v1 default (e.g. `~/.ssh/agent`) that need not exist on
     the machine that loads the pack -- it is existence-checked when the stamped
     workspace config is loaded at `start`, not at pack-parse time. With
@@ -326,10 +326,10 @@ def _parse_setup_table(entry: dict, where: str, *, require_order: bool) -> dict:
     """Validate one typed `setup` TABLE and normalize it to
     `{"run": str, "user": "workspace"|"root", "order": int}` (defaults filled).
     The ONE typed-setup-step validator -- both the workspace-config setup parser
-    (`_parse_setup`, `require_order=False`) and the preset parser (which passes
+    (`_parse_setup`, `require_order=False`) and the pack parser (which passes
     `require_order=True`) call it, so the field rules live in a single place.
 
-    `require_order`: a preset `[[setup]]` step MUST declare `order` (packs are
+    `require_order`: a pack `[[setup]]` step MUST declare `order` (packs are
     explicit about cross-pack ordering; there is no per-workspace declaration
     index to fall back on when several packs' steps interleave). A workspace
     config defaults an omitted order to 0."""
@@ -346,7 +346,7 @@ def _parse_setup_table(entry: dict, where: str, *, require_order: bool) -> dict:
             f'{where} `user` must be "workspace" or "root", got {user!r}')
     if require_order and "order" not in entry:
         raise ConfigError(
-            f"{where} `order` is required in a preset setup step "
+            f"{where} `order` is required in a pack setup step "
             f"(a pack must be explicit about ordering)")
     order = entry.get("order", 0)
     # bool is an int subclass -- reject `order = true` explicitly.
@@ -390,7 +390,7 @@ def validate_mount_set(mounts: list[dict], config_path, user: str | None) -> Non
     """Cross-mount validation on a set of NORMALIZED mount records (`_parse_mount`
     output): no two mounts on the same target, no two volumes with the same name,
     and a `user_owned` volume requires a non-root `user` (it is chowned to it).
-    Factored so both `load_config` and the preset-add merge check (existing +
+    Factored so both `load_config` and the pack-add merge check (existing +
     stamped mounts) run identical rules."""
     seen_targets: set[str] = set()
     seen_vols: set[str] = set()
@@ -434,7 +434,7 @@ def load_config_from_text(text: str, source: str, *,
     """The text-based core of `load_config`: validate a workspace-config TOML
     STRING into the normalized dict. `source` is the path/label used in error
     messages. Used both by `load_config` (from disk) and by `create`'s in-memory
-    all-or-nothing preset expansion (which validates the composed text before any
+    all-or-nothing pack expansion (which validates the composed text before any
     file exists).
 
     `check_bind_exists` (default True) is the resolver knob: the normal load path
@@ -453,10 +453,10 @@ def load_config_from_text(text: str, source: str, *,
     if not isinstance(raw, dict):
         raise ConfigError(f"{source}: top level must be a table")
 
-    # `[[preset]]` is a durable REFERENCE (config-v2): the CLI's resolver expands
+    # `[[pack]]` is a durable REFERENCE (config-v2): the CLI's resolver expands
     # it at resolve time and snapshots the expansion in the lock. `load_config`
     # (the container-half loader) IGNORES it here -- the resolver is the one seam
-    # that reads preset refs (`presets.parse_preset_refs`). It is a known key
+    # that reads pack refs (`packs.parse_pack_refs`). It is a known key
     # (`KNOWN_KEYS`), so it does not trip the unknown-key path below.
 
     # Reject unknown top-level keys (a typo silently no-ops otherwise). Mirror the

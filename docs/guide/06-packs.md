@@ -1,22 +1,22 @@
 ← [05 · Secret managers](05-secret-managers.md) · [index](../README.md) · [07 · Rules](07-rules.md) →
 
-# 06 · Presets
+# 06 · Packs
 
 One credential often needs to work across several hosts of the same service, and
 each host may want it in a different form. A GitHub token is a `bearer` token to
 `api.github.com` but HTTP `basic` auth to `github.com` and `ghcr.io`. Wiring
-that by hand is three bindings. A [preset](../concepts.md#preset) does it in one
+that by hand is three bindings. A [pack](../concepts.md#pack) does it in one
 command.
 
 ## See the expansion first
 
-`credproxy preset list` shows every preset and exactly what it expands to, so
+`credproxy pack list` shows every pack and exactly what it expands to, so
 you know before you apply:
 
 ```console
-$ credproxy preset list
+$ credproxy pack list
 Service setup packs (bindings + guardrails). Apply with:
-  credproxy workspace NAME preset add NAME [--provider P --secret REF]
+  credproxy workspace NAME pack add NAME [--provider P --secret REF]
 
 github  (3 bindings, 0 rules)  [builtin]
   binding github-api     bearer  api.github.com  env GITHUB_TOKEN
@@ -24,17 +24,17 @@ github  (3 bindings, 0 rules)  [builtin]
   binding github-ghcr    basic   ghcr.io
 ```
 
-The `github` preset makes three bindings from one token: `bearer` on the API
+The `github` pack makes three bindings from one token: `bearer` on the API
 host, `basic` on the two git/registry hosts.
 
 ## Apply it
 
-The `github` preset defaults its provider to `gh-cli`, which reads your existing
+The `github` pack defaults its provider to `gh-cli`, which reads your existing
 `gh` login. So if you have run `gh auth login`, the whole thing is flagless:
 
 ```console
-$ credp preset add github
-applied preset 'github' to workspace 'myproject': 3 binding(s), 0 rule(s)
+$ credp pack add github
+applied pack 'github' to workspace 'myproject': 3 binding(s), 0 rule(s)
   binding github-api       bearer  api.github.com
   binding github-git       basic   github.com
   binding github-ghcr      basic   ghcr.io
@@ -46,19 +46,19 @@ run `credproxy workspace myproject start` (or `apply`) to push it to the proxy
 pass `--provider` and `--secret` just like a binding:
 
 ```sh
-credp preset add github --provider op --secret 'op://Private/GitHub/token'
+credp pack add github --provider op --secret 'op://Private/GitHub/token'
 ```
 
 ## What the reference expands to
 
-A preset is a durable **reference**: `preset add` appends a small `[[preset]]`
+A pack is a durable **reference**: `pack add` appends a small `[[pack]]`
 block to your config file, and credproxy expands it — into ordinary bindings,
 rules, and container config — every time it resolves the workspace. The proxy
-never hears the word "preset"; it only ever sees the expanded bindings. Look in
+never hears the word "pack"; it only ever sees the expanded bindings. Look in
 the TOML and you will find just the reference:
 
 ```toml
-[[preset]]
+[[pack]]
 name     = "github"
 provider = "gh-cli"
 secret   = "github.com"
@@ -71,18 +71,18 @@ everywhere and any client-side token-shape check still passes. The full
 expansion (names, hosts, the shared placeholder) is snapshotted in the workspace
 lockfile (`lock.json`), never written into your hand-owned TOML. `credp binding
 list` shows the expanded bindings like any other; to change them, edit the
-`[[preset]]` block's own inputs (below) — you don't hand-edit the expansion.
+`[[pack]]` block's own inputs (below) — you don't hand-edit the expansion.
 
 
 ## Multi-slot credentials
 
 Some injectors take more than one secret. AWS `sigv4` signs with an
 `access_key_id` **and** a `secret_access_key`; OVH's signer takes three. A pack's
-parts all share one credential, so `preset add --secret` mirrors `binding add`
+parts all share one credential, so `pack add --secret` mirrors `binding add`
 exactly — repeat `--secret SLOT=REF`, once per slot:
 
 ```sh
-credp preset add aws --provider env \
+credp pack add aws --provider env \
     --secret access_key_id=AWS_ACCESS_KEY_ID \
     --secret secret_access_key=AWS_SECRET_ACCESS_KEY
 ```
@@ -90,7 +90,7 @@ credp preset add aws --provider env \
 The reference records the slot map as a table:
 
 ```toml
-[[preset]]
+[[pack]]
 name     = "aws"
 provider = "env"
 secret   = { access_key_id = "AWS_ACCESS_KEY_ID", secret_access_key = "AWS_SECRET_ACCESS_KEY" }
@@ -99,21 +99,21 @@ secret   = { access_key_id = "AWS_ACCESS_KEY_ID", secret_access_key = "AWS_SECRE
 Because every part of a pack shares that one credential, **every part's injector
 must declare the same slots**. A `--secret` slot set that doesn't match the
 injectors' — or a pack whose parts disagree on their slots — fails the whole
-`preset add` before anything is written. Multi-slot packs have no `--secret`
+`pack add` before anything is written. Multi-slot packs have no `--secret`
 default and aren't prompted (on the loose surface): always pass the explicit
 `--secret SLOT=REF` flags.
 
-## Presets can carry rules too
+## Packs can carry rules too
 
-A preset is a whole **service setup pack**, not just credentials. It may also
+A pack is a whole **service setup pack**, not just credentials. It may also
 ship credential-free [rules](../concepts.md#rule) — guardrails like "block
-`DELETE` on this host" — and a preset can be rules only, with no credential at
+`DELETE` on this host" — and a pack can be rules only, with no credential at
 all. Rules are the next chapter.
 
-## Presets can carry the container half too
+## Packs can carry the container half too
 
 A service often needs more than a token: a setup script, an env var, a mounted
-file. A preset can ship those as well — `[[mount]]`, `[env]`, and `[[setup]]`
+file. A pack can ship those as well — `[[mount]]`, `[env]`, and `[[setup]]`
 sections that the resolver merges into the container-side of your effective
 workspace config, right alongside the bindings. A pack can be *only* container config, with no
 credential at all. A `github-auth` pack might look like this:
@@ -143,8 +143,8 @@ Applying it references the pack; the resolver merges the mount and the setup ste
 into your effective container config, alongside the bindings:
 
 ```console
-$ credp preset add github-auth
-applied preset 'github-auth' to workspace 'myproject': 1 binding(s), 0 rule(s), 1 mount(s), 1 setup step(s)
+$ credp pack add github-auth
+applied pack 'github-auth' to workspace 'myproject': 1 binding(s), 0 rule(s), 1 mount(s), 1 setup step(s)
   binding github-auth-api    bearer  api.github.com
   mount   overlay user:setup.d/github-auth.sh -> /opt/github-auth.sh
   setup   [45] bash /opt/github-auth.sh
@@ -152,7 +152,7 @@ applied preset 'github-auth' to workspace 'myproject': 1 binding(s), 0 rule(s), 
 
 The container half (`mounts`/`env`/`setup`) changes the workspace spec, so if
 the container already exists credproxy tells you to `start` again to apply it.
-A second `preset add` of the same pack is refused (a `[[preset]]` block already
+A second `pack add` of the same pack is refused (a `[[pack]]` block already
 names it) rather than duplicated. An
 [attached workspace](../advanced/composability.md) — whose container credproxy
 does not manage — refuses a container-half pack; binding/rule-only packs still
@@ -170,50 +170,50 @@ host, an added rule, a dropped part) is **inert** until you ask for it —
 credproxy surfaces a note that the definition drifted but keeps serving the
 snapshot.
 
-Re-expanding a snapshot on your own clock is `preset refresh`:
+Re-expanding a snapshot on your own clock is `pack refresh`:
 
 ```console
-$ credp preset refresh github --check      # preview; writes nothing
-preset 'github': 1 added
+$ credp pack refresh github --check      # preview; writes nothing
+pack 'github': 1 added
   binding github-ghcr  added
-$ credp preset refresh github              # apply: re-snapshot the expansion
-preset 'github': 1 added
+$ credp pack refresh github              # apply: re-snapshot the expansion
+pack 'github': 1 added
   binding github-ghcr  added
 ```
 
-`preset refresh` force-re-expands the reference against the **current** pack
+`pack refresh` force-re-expands the reference against the **current** pack
 definition and structurally diffs the new expansion against the locked one
 (per entry: `added` / `removed` / `changed`, with a field-level diff for a change).
 A dropped definition part simply becomes a `removed` entry — there is no `--prune`
 flag. `--check` prints the same diff **without writing** (a preview, and the
 CI-friendly "is anything stale?" probe; it exits 0 whether or not anything
-changed). Omitting the pack name refreshes **every** `[[preset]]` reference in the
+changed). Omitting the pack name refreshes **every** `[[pack]]` reference in the
 file. Identity is preserved exactly: the shared placeholder is reused (never
 rotated — rotating it would break placeholder-consuming state and cross-binding
 sharing), and a refresh that would collide with a literal entry (or another
-preset) fails atomically, naming both sides, with nothing written.
+pack) fails atomically, naming both sides, with nothing written.
 
-You *can* also change a pack's inputs yourself: edit the `[[preset]]` block's
-own fields — `provider`, `secret`, `[preset.options]`, `disable`, or
-`[preset.override.<suffix>]` — and the next resolve re-expands automatically
+You *can* also change a pack's inputs yourself: edit the `[[pack]]` block's
+own fields — `provider`, `secret`, `[pack.options]`, `disable`, or
+`[pack.override.<suffix>]` — and the next resolve re-expands automatically
 against the current definition (you touched the reference; that is your clock).
 **That is also how you keep a hand change across a refresh:** there is no stamped
 text to edit, so express the customization as a `disable` or
-`[preset.override.<suffix>]` on the reference — those are the reference's own
+`[pack.override.<suffix>]` on the reference — those are the reference's own
 inputs, so a refresh preserves them.
 
-To drop a pack entirely, `preset remove PRESET` deletes its `[[preset]]` block
-(and any `[preset.options]` / `[preset.override.*]` sub-tables) and its lock
+To drop a pack entirely, `pack remove PACK` deletes its `[[pack]]` block
+(and any `[pack.options]` / `[pack.override.*]` sub-tables) and its lock
 snapshot, reporting what leaves the effective model:
 
 ```console
-$ credp preset remove github
-removed preset 'github' from workspace 'myproject': 3 binding(s), 0 rule(s) left the effective model
+$ credp pack remove github
+removed pack 'github' from workspace 'myproject': 3 binding(s), 0 rule(s) left the effective model
   binding github-api       bearer  api.github.com
   ...
 ```
 
-`preset refresh` (when it has real changes) and `preset remove` are both gated
+`pack refresh` (when it has real changes) and `pack remove` are both gated
 like the destructive set on the loose surface when they target an implicitly-
 resolved workspace: they confirm first (`--yes` bypasses, and they fail closed
 without a terminal). `--check` never gates.
@@ -261,17 +261,17 @@ hosts    = [{ option = "gitlab_host" }]
 ```
 
 The resolved host is validated like any binding/rule host (a bad glob fails the
-add) and joins the intercept set — `preset add` announces it as newly intercepted.
+add) and joins the intercept set — `pack add` announces it as newly intercepted.
 
 Values resolve at expansion time in one order: an explicit `--opt id=value`
 (repeatable) → a prompt (only on the loose `credp` surface, in a terminal) → the
 declared `default` → otherwise the add fails listing the missing options.
 
 ```console
-$ credp preset add git-signing --opt sock_dir=/run/user/1000/gcr
+$ credp pack add git-signing --opt sock_dir=/run/user/1000/gcr
 ```
 
-The resolved value is written explicitly into the reference's `[preset.options]`
+The resolved value is written explicitly into the reference's `[pack.options]`
 sub-table (`sock_dir = "/run/user/1000/gcr"`) and substituted into the expanded
 mount source; the `{ option = … }` marker itself never reaches your workspace
 file. On the strict `credproxy` surface (and on `credp` without a terminal), a
@@ -320,12 +320,12 @@ because nothing pack-authored executes. The one sanctioned host-executable is a
 protocol for the `provider` kind (and `fetch = true`, like `binding test`, may
 prompt or unlock a vault).
 
-Checks are **advisory** at `preset add` / `create` time and **authoritative** at
+Checks are **advisory** at `pack add` / `create` time and **authoritative** at
 `doctor` time:
 
 ```console
-$ credp preset add git-signing
-applied preset 'git-signing' to workspace 'myproject': 1 binding(s), 0 rule(s)
+$ credp pack add git-signing
+applied pack 'git-signing' to workspace 'myproject': 1 binding(s), 0 rule(s)
   binding git-signing-key   ...
 unmet prerequisite (path): /home/you/.ssh/credproxy-agent does not exist -- run credproxy-signing-agent to create the socket dir
 1 unmet prerequisite(s) above -- fix them, then `credproxy doctor myproject` to re-check
@@ -337,13 +337,13 @@ fix the prerequisite, `credproxy doctor myproject` goes green:
 
 ```console
 $ credproxy doctor myproject
-✗ [myproject] preset 'git-signing' requires (path): /home/you/.ssh/credproxy-agent does not exist  → run credproxy-signing-agent ...
+✗ [myproject] pack 'git-signing' requires (path): /home/you/.ssh/credproxy-agent does not exist  → run credproxy-signing-agent ...
 $ credproxy-signing-agent            # create the socket dir
 $ credproxy doctor myproject
-✓ [myproject] preset 'git-signing' requires (path): /home/you/.ssh/credproxy-agent exists
+✓ [myproject] pack 'git-signing' requires (path): /home/you/.ssh/credproxy-agent exists
 ```
 
-`doctor` discovers which packs a workspace uses from its `[[preset]]` references
+`doctor` discovers which packs a workspace uses from its `[[pack]]` references
 and the lock snapshot, so it re-checks exactly the packs you applied. A
 `fetch = true` provider check runs only under `doctor NAME --fetch` (it resolves
 a secret, which can prompt) — a plain `doctor` degrades it to a resolve-only
@@ -357,7 +357,7 @@ provider check and never fetches.
 > custom image may not. [Chapter 08](08-going-further.md) covers custom images.
 
 > [!TIP]
-> Presets live in the same layered registry as providers and injectors, so your
+> Packs live in the same layered registry as providers and injectors, so your
 > team can ship its own — an internal artifact registry, a vault-backed service —
 > and everyone applies it with one command → [Overlays](../advanced/overlays.md).
 > Otherwise, continue.

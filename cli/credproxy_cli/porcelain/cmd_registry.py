@@ -1,6 +1,6 @@
 """Definition/registry commands: injector & provider scaffolds and listings, the
 scripted-injector authoring helpers (`injector api`/`injector check`), the
-top-level `preset list`, `provider show`, and `script check`."""
+top-level `pack list`, `provider show`, and `script check`."""
 from __future__ import annotations
 
 import sys
@@ -44,10 +44,10 @@ def do_def_list(ctx: Ctx, kind: str) -> None:
     render.OUT.def_list(kind, rows)
 
 
-def do_preset_list(ctx: Ctx) -> None:
-    from ..core.model.presets import describe_presets
+def do_pack_list(ctx: Ctx) -> None:
+    from ..core.model.packs import describe_packs
 
-    render.OUT.preset_list(describe_presets())
+    render.OUT.pack_list(describe_packs())
 
 
 def do_provider_show(ctx: Ctx, name: str) -> None:

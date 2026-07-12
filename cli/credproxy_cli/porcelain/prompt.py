@@ -1,8 +1,8 @@
-"""Loose-surface interactive prompting for preset expansion (#59).
+"""Loose-surface interactive prompting for pack expansion (#59).
 
 Prompting is loose-surface-only by constitution (the strict surface never
 prompts -- a standing architecture decision). These are the injectable seam the
-`preset add` / `create` handlers reach for when, and only when, prompting is
+`pack add` / `create` handlers reach for when, and only when, prompting is
 enabled (`prompting_enabled(ctx)` -- loose AND stdin is a TTY). Every prompt
 writes to STDERR and reads a line from stdin, mirroring the `_confirm_*` /
 `ensure_proxy_image` gates (so a `--json` stdout stream is never corrupted).
@@ -50,7 +50,7 @@ def ask_option(opt):
     (the caller passes it straight through -- `resolve_options` does not re-coerce
     a prompted value). Loops until valid. `string` = free text (empty accepts the
     default when one exists, else re-asks); `enum` = numbered pick; `bool` = y/n."""
-    from ..core.model.presets import coerce_option_value
+    from ..core.model.packs import coerce_option_value
 
     desc = f" ({opt.description})" if opt.description else ""
     if opt.type == "bool":

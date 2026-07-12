@@ -1,4 +1,4 @@
-← [04 · Your first credential](04-first-credential.md) · [index](../README.md) · [06 · Presets](06-presets.md) →
+← [04 · Your first credential](04-first-credential.md) · [index](../README.md) · [06 · Packs](06-packs.md) →
 
 # 05 · Secret managers
 
@@ -133,5 +133,5 @@ re-signs each request rather than swapping a token. The
 
 ---
 
-**Next:** [06 · Presets](06-presets.md) — wire every host of a service with one
+**Next:** [06 · Packs](06-packs.md) — wire every host of a service with one
 command.

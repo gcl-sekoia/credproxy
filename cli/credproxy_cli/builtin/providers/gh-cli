@@ -18,7 +18,7 @@ Returns the GitHub auth token for an already-logged-in `gh` session.
   ref:     a GitHub hostname (github.com, or an Enterprise host). An empty ref
            uses gh's default host. The real token never enters the workspace.
   example: --provider gh-cli --secret github.com
-Pairs with the `github` preset (`preset add github`, which defaults
+Pairs with the `github` pack (`pack add github`, which defaults
 its provider to gh-cli): one already-authenticated session wires API (bearer) +
 git + ghcr (basic). Requires `gh` on PATH and an existing login (`gh auth
 login`). `gh auth token` is non-interactive -- it reads gh's own keyring, never

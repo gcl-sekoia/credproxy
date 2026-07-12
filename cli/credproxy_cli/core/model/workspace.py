@@ -11,7 +11,7 @@ Storage layout (XDG):
   State:   $XDG_STATE_HOME/credproxy/workspaces/<name>/
              auth.token         -- bearer token for the proxy API
              lock.json          -- machine-owned state: generated placeholders,
-                                   presets, and the `applied` section (last-applied
+                                   packs, and the `applied` section (last-applied
                                    spec, pushed bindings/rules metadata,
                                    config_generation, setup-completed container id)
              lifecycle.lock     -- the per-workspace flock (serializes lifecycle
@@ -58,7 +58,7 @@ RESERVED_NAMES = frozenset({
     "create", "use", "list", "enter", "exec", "edit", "start", "stop", "recreate",
     "delete", "apply", "inspect", "config", "logs", "bind-dir", "push", "resolve",
     # sub-nouns
-    "binding", "mount", "rule", "preset",
+    "binding", "mount", "rule", "pack",
     # top-level meta commands (no workspace argument)
     "current", "info", "doctor", "version", "emit-compose",
 })
@@ -94,7 +94,7 @@ class Workspace:
     def lock_json_path(self) -> Path:
         """The machine-owned state lockfile (`lock.json`): generated data the CLI
         must NOT write back into the hand-owned TOML -- binding placeholders and
-        presets (resolver-written) plus the `applied` section (engine-written:
+        packs (resolver-written) plus the `applied` section (engine-written:
         last-applied spec, pushed bindings/rules metadata, config_generation, and
         the setup-completed container id). Distinct from `lock_path` -- that is
         the flock (a concurrency primitive), this is durable state."""
