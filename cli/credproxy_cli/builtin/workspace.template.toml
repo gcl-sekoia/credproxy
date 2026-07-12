@@ -61,6 +61,15 @@ user_uid = 1000
 # (e.g. a working dir or env). credproxy keeps control of -i/-t/-d. Exec-only.
 # exec_flags = ["--workdir", "/srv"]
 
+# Extra host env vars forwarded into the workspace on `enter`/`exec` when set on
+# your host (bare names -- copied if present, skipped if not). credproxy always
+# forwards a safe set of terminal capability hints (COLORTERM, WT_SESSION, ...);
+# these four are added here because they can misbehave on a MINIMAL image and are
+# safe on the default one: TERM needs its terminfo entry present (or curses apps
+# error), and the locale vars need the locale generated (or you get setlocale
+# warnings). Trim this line if you switch to a stripped-down image. Exec-only.
+forward_env = ["TERM", "LANG", "LC_ALL", "LC_CTYPE"]
+
 # Escape hatch: extra flags spliced into the workspace `docker run`. Unlike
 # exec_flags these shape the container, so changing them recreates it on the
 # next `start`. credproxy's --name/labels/--network/home volume win on conflict.
