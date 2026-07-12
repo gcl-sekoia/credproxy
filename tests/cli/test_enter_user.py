@@ -16,10 +16,13 @@ def _cmd(cfg, *, user_override=None, isatty=True, cmd=None):
 
 def test_plain_no_user_no_flags():
     out = _cmd({})
-    # session-control prefix + container, then the env-shim-wrapped command.
-    assert out[:6] == ["docker", "exec", "--interactive=true", "--tty=true",
-                       "--detach=false", "ctr"]
-    assert out[6:8] == ["sh", "-c"]
+    assert out[:2] == ["docker", "exec"]
+    # The forwarded host env (`-e VAR`) sits between `docker exec` and the
+    # session-control booleans, which stay LAST-before-container as explicit
+    # booleans, then the env-shim-wrapped command.
+    ctr = out.index("ctr")
+    assert out[ctr - 3:ctr] == ["--interactive=true", "--tty=true", "--detach=false"]
+    assert out[ctr + 1:ctr + 3] == ["sh", "-c"]
     assert out[-2:] == ["credproxy-enter", "bash"]
 
 

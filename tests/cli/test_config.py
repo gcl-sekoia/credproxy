@@ -683,7 +683,8 @@ def test_spec_hash_ignores_user_and_exec_flags(xdg):
 
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     withuser = {**base, "user": "dev", "exec_flags": ["--workdir", "/srv"],
-                "workdir": "/code", "enter_prelude": "export X=1", "shell": ["zsh"]}
+                "workdir": "/code", "enter_prelude": "export X=1", "shell": ["zsh"],
+                "forward_env": ["MY_VAR"]}
     assert workspace_spec_hash(base, "p") == workspace_spec_hash(withuser, "p")
 
 
@@ -740,6 +741,59 @@ def test_load_config_exec_flags_not_list_of_strings(xdg, workspaces_dir):
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nexec_flags = [1, 2]\n')
     with pytest.raises(ConfigError, match="`exec_flags` must be an array of strings"):
+        load_config(Workspace("b"))
+
+
+# ---- forward_env -------------------------------------------------------------
+
+
+def test_load_config_forward_env(xdg, workspaces_dir):
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
+
+    _write(workspaces_dir, "f", """
+        image = "alpine:3"
+        forward_env = ["MY_VAR", "OTHER"]
+    """)
+    assert load_config(Workspace("f"))["forward_env"] == ["MY_VAR", "OTHER"]
+
+
+def test_load_config_forward_env_default_empty(xdg, workspaces_dir):
+    from credproxy_cli.core.model.config import load_config
+    from credproxy_cli.core.model.workspace import Workspace
+
+    _write(workspaces_dir, "d", 'image = "alpine:3"\n')
+    assert load_config(Workspace("d"))["forward_env"] == []
+
+
+def test_load_config_forward_env_not_list_of_strings(xdg, workspaces_dir):
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nforward_env = [1]\n')
+    with pytest.raises(ConfigError, match="`forward_env` must be an array of strings"):
+        load_config(Workspace("b"))
+
+
+def test_load_config_forward_env_rejects_value_form(xdg, workspaces_dir):
+    """Bare names only -- a `VAR=value` entry is a config error (that's what
+    `exec_flags`/`env` are for)."""
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nforward_env = ["FOO=bar"]\n')
+    with pytest.raises(ConfigError, match="bare env var names"):
+        load_config(Workspace("b"))
+
+
+def test_load_config_forward_env_rejects_glob(xdg, workspaces_dir):
+    """A trailing `*` is a podman prefix-glob (`LC_*` forwards every LC_ var) --
+    rejected as a name so it can't silently over-forward on podman."""
+    from credproxy_cli.core.model.config import ConfigError, load_config
+    from credproxy_cli.core.model.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nforward_env = ["LC_*"]\n')
+    with pytest.raises(ConfigError, match="bare env var names"):
         load_config(Workspace("b"))
 
 
