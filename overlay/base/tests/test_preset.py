@@ -9,7 +9,7 @@ from credproxy_cli.core.model.presets import build_preset, get_preset, load_pres
 
 def test_base_packs_resolve_from_the_base_overlay():
     src = load_preset_sources()
-    for name in ("proxy-ca", "toolchain", "cache", "claude-code", "github-auth", "git-signing", "gcloud"):
+    for name in ("proxy-ca", "toolchain", "cache", "claude-code", "codex", "github-auth", "git-signing", "gcloud"):
         assert src.get(name) == "overlay:base", f"{name} resolved from {src.get(name)!r}"
 
 
@@ -96,6 +96,31 @@ def test_claude_code_is_the_umbrella_enablement_pack():
             "/opt/session-context.d/20-tools.sh"} <= targets
     # Keeps the claude CLI on the latest release.
     assert dict(exp.env)["MISE_MINIMUM_RELEASE_AGE_EXCLUDES"] == "claude"
+
+
+def test_codex_injects_the_openai_api_key():
+    # The claude-code sibling, one auth family simpler: OpenAI's long-lived
+    # credential is a plain API key, so a single bearer part + the login-seed step.
+    exp = build_preset("codex", provider="bw", secret="openai-api-key")
+    (b,) = exp.bindings
+    assert b.name == "codex-api" and b.injector == "bearer"
+    assert b.hosts == ("api.openai.com",) and b.env == "OPENAI_API_KEY"
+    assert b.provider == "bw" and b.secret == "openai-api-key"
+    # sk- so a client-side format sniff passes; the proxy swaps it in transit.
+    assert b.placeholder.startswith("sk-credproxy-") and len(b.placeholder) == 64
+    # Neutral: no baked-in vault (no universal OpenAI token source).
+    spec = get_preset("codex")
+    assert spec.default_provider is None and spec.default_secret is None
+    # The auth.json-seeding login step, as the workspace user.
+    (setup,) = exp.setup
+    assert setup["order"] == 20 and setup["user"] == "workspace"
+    assert "codex-setup.sh" in setup["run"]
+    (mount,) = exp.mounts
+    assert mount.target == "/opt/codex-setup.sh"
+    # Carries no [env]: MISE_MINIMUM_RELEASE_AGE_EXCLUDES would collide with the
+    # claude-code pack's, so the two packs stay composable.
+    assert exp.env == ()
+    assert exp.rules == ()
 
 
 def test_toolchain_is_pure_container_half():
