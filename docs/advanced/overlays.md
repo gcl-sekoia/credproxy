@@ -156,6 +156,14 @@ travel together in the overlay, so a workspace applies the whole policy with one
 credential-free policy bundle; a **pure-container** pack (mounts/env/setup only)
 ships a service's setup without a credential.
 
+**Multi-slot packs.** A pack's parts all share one credential, so a pack for a
+multi-slot injector (AWS `sigv4`, OVH) just gives each `[[part]]` that injector —
+**every part's injector must declare the same slots**. The operator supplies the
+credential once with repeated `preset add --secret SLOT=REF` flags (the reference
+records a `secret = { slot = "ref", … }` table). `default_secret` is single-slot
+only, so a multi-slot pack has no secret default and always takes the explicit
+flags.
+
 **A pack's files ride the pack's tier.** A `[[mount]]` in a preset that names an
 `overlay = "setup.d/x.sh"` source resolves within the pack's *own* tier — the
 expansion records the qualified form `overlay = "<tier>:setup.d/x.sh"` (the tier
@@ -168,11 +176,12 @@ never written into the TOML), so re-referencing the same pack is refused rather
 than duplicated.
 
 **Parameterize the host half with `[[option]]`.** A host-half value that differs
-per operator — a socket dir, an op:// path — is declared as an option and
-referenced as the **whole value** of a host-half field with a structural
-`{ option = "id" }` marker (a mount `bind`/`volume` source, or a `[[requires]]`
-`path`). It is never a token inside a string, and never a container-half field
-(`target`, `[env]` values, `[[setup]]`):
+per operator — a socket dir, an op:// path, **the hostname of a self-hosted
+service** — is declared as an option and referenced as the **whole value** of a
+host-half field with a structural `{ option = "id" }` marker. The sinks are a
+mount `bind`/`volume` source, a `[[requires]]` `path`, and a `[[part]]`/`[[rule]]`
+`hosts` **element**. It is never a token inside a string, and never a
+container-half field (`target`, `[env]` values, `[[setup]]`):
 
 ```toml
 [[option]]
@@ -192,6 +201,37 @@ A value resolves at expansion time — explicit `--opt id=value` / a template
 resolved value is written into the reference's `[preset.options]` sub-table and
 substituted into the expanded field (the `{ option = … }` marker never reaches the
 workspace TOML).
+
+**Generic self-hosted-service packs.** Because a `hosts` element can be an option
+marker, one pack serves any org's instance of a self-hosted service (GitLab,
+Artifactory, Vault, an internal gateway) — the hostname is the per-operator value,
+supplied at add time instead of forked into every overlay. A `hosts` array may mix
+literals and markers, and a credential pack and its rule guardrail can point at the
+same option so both scope to the same instance:
+
+```toml
+[[option]]
+id          = "gitlab_host"
+type        = "string"
+description = "your GitLab instance's hostname"
+
+[[part]]
+suffix   = "api"
+injector = "bearer"
+hosts    = [{ option = "gitlab_host" }]
+
+[[rule]]
+suffix = "readonly"
+hosts  = [{ option = "gitlab_host" }]
+action = "block"
+methods = ["DELETE"]
+```
+
+The resolved host goes through the same `hostmatch` validation as any binding/rule
+host (a bad glob like `*.com` fails the add atomically), and joins the intercept
+set like any other — `preset add` announces a newly TLS-intercepted host. A refresh
+recovers the value from `[preset.options]`, never re-prompting. `preset list` shows
+an unresolved host as `{option=gitlab_host}`.
 
 **Declare your pack's host prerequisites.** A pack often needs host state its
 container half can't provide — the `gh` CLI installed, a signing-agent socket

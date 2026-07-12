@@ -198,6 +198,35 @@ def test_template_entry_supplies_provider_secret(xdg):
     assert b0["provider"] == "env" and b0["secret"] == "SVC_TOKEN"
 
 
+_AWS = """
+    [placeholder]
+    prefix = "aws_"
+    length = 20
+    charset = "hex"
+    [[part]]
+    suffix = "sts"
+    injector = "sigv4"
+    hosts = ["sts.amazonaws.com"]
+"""
+
+
+def test_template_entry_multislot_table_secret(xdg):
+    """A template `[[preset]]` may carry a `{slot = ref}` table secret (#71),
+    which `create` writes into the reference and the first resolve expands."""
+    _preset("aws", _AWS)
+    _template(_MIN + '\n[[preset]]\nname = "aws"\nprovider = "env"\n'
+              'secret = { access_key_id = "AWS_KEY", '
+              'secret_access_key = "AWS_SECRET" }\n')
+    obj = json.loads(_run(["--json", "workspace", "create", "proj"])[1])
+    b0 = obj["presets"][0]["bindings"][0]
+    assert b0["provider"] == "env"
+    assert b0["secret"] == {"access_key_id": "AWS_KEY",
+                           "secret_access_key": "AWS_SECRET"}
+    # The written reference carries the table verbatim (round-trips on resolve).
+    text = _config_text("proj")
+    assert "access_key_id" in text and "secret_access_key" in text
+
+
 # ---- missing required fields (no prompting in v1) ----------------------------
 
 
@@ -270,7 +299,7 @@ def test_unknown_preset_aborts(xdg):
 @pytest.mark.parametrize("entry, needle", [
     ('provider = "env"\n', "'name' must be a non-empty string"),   # missing name
     ('name = "github"\nbogus = "x"\n', "unknown key(s): bogus"),   # unknown key
-    ('name = "github"\nsecret = 123\n', "'secret' must be a non-empty string"),
+    ('name = "github"\nsecret = 123\n', "'secret' must be a string or a {slot = ref} table"),
     ('name = "github"\nprovider = 1\n', "'provider' must be a non-empty string"),
 ])
 def test_entry_validation(xdg, entry, needle):
