@@ -107,3 +107,16 @@ The proxy swapped in your real token. Watch the swap happen with
   network, the placeholder swap, and why the secret stays out of the workspace.
 - **[Reference](docs/README.md)** — the full docs map: configuration, providers,
   injectors, rules, security, troubleshooting, and advanced topics.
+
+## Development
+
+Using the CLI needs no install. To hack on the repo and run its suites:
+
+```sh
+uv sync --group proxy      # full test stack into .venv (plain `uv sync` = CLI suite only)
+credproxy dev test         # CLI + proxy + overlay suites, on-host when deps import
+```
+
+No environment setup is required — the suites self-provision. See
+[docs/dev-environment.md](docs/dev-environment.md) for details, working without a
+Docker daemon, and expected-in-a-sandbox failures.

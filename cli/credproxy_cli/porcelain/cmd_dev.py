@@ -128,8 +128,8 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
 
     if not force_container:
         say(f"proxy deps not importable on host ({', '.join(missing)}); running the "
-            f"proxy suite in the image. Install them (see proxy/requirements.txt) "
-            f"for the faster on-host path.")
+            f"proxy suite in the image. For the faster on-host path install them "
+            f"with: uv sync --group proxy")
     meta = ImageEnv.load()
 
     # Mounts + CREDPROXY_OVERLAY_PATH rewrite for the whole overlay chain: each
