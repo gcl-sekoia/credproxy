@@ -1,95 +1,82 @@
-# Developing credproxy without Docker (cloud / sandboxed environments)
+# Developing credproxy
 
-Notes for working on this repo in an environment without a Docker daemon —
-e.g. Claude Code on the web, CI sandboxes, or any container where `docker`
-exists but no daemon is reachable. Everything here was verified on a
-Claude Code web session (Debian-based container, python3.12, root).
+Setting up the dev/test loop. Using the CLI needs **no** install (`bin/credproxy`
+runs the stdlib-only package directly); this is only for hacking on the repo and
+running its suites.
 
-## What doesn't work, and what replaces it
+## Setup
 
-| Normally | Without a daemon |
-|---|---|
-| `credproxy dev test` (container fallback) | run pytest directly via a venv (below) |
-| `credproxy dev build`, workspace lifecycle | unavailable — static work + tests only |
-| proxy suite inside the image (ENV baked in) | export the ENV contract by hand (below) |
-
-## One-time setup: a venv with the proxy runtime deps
-
-The system python has none of the deps, and installing to it fails anyway:
-mitmproxy pins `pyperclip==1.9.0` (sdist-only), whose build breaks under the
-Debian-patched system setuptools (`AttributeError: install_layout`). A clean
-venv sidesteps that patch entirely — inside a venv the same sdist builds fine.
+One command provisions the full test stack into a uv-managed `.venv`:
 
 ```sh
-python3 -m venv ~/.venv-credproxy
-~/.venv-credproxy/bin/pip install -q --upgrade pip setuptools wheel
-~/.venv-credproxy/bin/pip install -q -r proxy/requirements.txt   # includes pytest
+uv sync --group proxy
 ```
 
-Do NOT `pip install` to the system python; that's where the pyperclip build
-failure lives.
+- Plain `uv sync` installs only the CLI + pytest — enough for the CLI suite
+  (`tests/cli`), and deliberately stdlib-only otherwise (the CLI is stdlib-only
+  by design). The `proxy` group adds the proxy + overlay suites' runtime deps
+  (mitmproxy, aiohttp, pyyaml, starlark-pyo3, pytest-aiohttp).
+- **Use the group, not an ad-hoc install.** `uv pip install -r
+  proxy/requirements.txt` works once but the next `uv sync` prunes it back to the
+  lock — only `--group proxy` is durable. (The two dep lists are kept in lockstep
+  by `tests/cli/test_dep_sync.py`; `proxy/requirements.txt` remains the image's
+  pip source.)
 
 ## Running the suites
 
-CLI suite (host-side, needs only pytest):
-
 ```sh
-~/.venv-credproxy/bin/python -m pytest tests/cli -q
+credproxy dev test          # CLI + proxy + overlay suites (on-host when deps import)
 ```
 
-Proxy suite on-host: `proxy/constants.py` reads the `CREDPROXY_*` values from
-the process environment with no defaults (in the image they come from the
-Dockerfile `ENV` declarations — the single source of truth; keep these in sync
-with `proxy/Dockerfile` if they ever change):
+`dev test` runs everything **on-host** when the proxy deps are importable (fast;
+`--container` forces the image). It needs no environment setup: `tests/conftest.py`
+puts the proxy dir on `sys.path` and supplies the `CREDPROXY_*` constants contract
+(parsed from `proxy/Dockerfile`, the single source of truth). Run individual suites
+directly the same way:
 
 ```sh
-env CREDPROXY_MITMPROXY_UID=31337 \
-    CREDPROXY_HTTP_PORT=39998 \
-    CREDPROXY_PROXY_PORT=39999 \
-    CREDPROXY_SENTINEL_IP=169.254.1.1 \
-    CREDPROXY_TOKEN_PATH=/run/secrets-ro/auth.token \
-    CREDPROXY_TMPFS=/run/secrets \
-    PYTHONPATH="$PWD/proxy" \
-    ~/.venv-credproxy/bin/python -m pytest tests/ --ignore tests/cli -q
+uv run pytest tests/cli -q                        # CLI suite
+uv run pytest tests/ --ignore tests/cli -q        # proxy suite (conftest self-provisions)
 ```
 
-`credproxy dev test`'s on-host path works too if you run it *with the venv
-python* (it checks imports in the running interpreter) and export the env vars
-above — but the two direct pytest commands are simpler and equivalent.
+## Working without a Docker daemon
 
-## Script checking and overlay tests without Docker
+On Claude Code on the web, CI sandboxes, or any container where no engine is
+reachable: everything above still works — `dev test` runs on-host and never needs
+the daemon. What's unavailable is `credproxy dev build`, workspace lifecycle
+(`start`/`enter`/…), and `dev test --container`.
 
-`credproxy script check [NAME]` compiles `.star` scripts in the proxy runtime.
-On-host it needs only the Starlark dep (in the venv), no daemon and no CREDPROXY_*
-env — the compile builds a `ScriptedScheme` (which imports `starlark`, not
-`constants`). So `~/.venv-credproxy/bin/credproxy script check` works here; only
-when Starlark is *not* importable does it fall back to `docker run`. `credproxy
-doctor NAME` reuses that on-host compile for a workspace's scripted injectors and
-**skips with a note** (never fails) when the runtime isn't importable, so doctor
-stays daemon-free.
+`credproxy script check` and the overlay suites are also daemon-free: they compile
+`.star` scripts / drive the testkit in the on-host runtime (needs only the venv's
+`starlark`/`mitmproxy`, no `CREDPROXY_*` env — the compile imports `starlark`, not
+`constants`). `doctor NAME` reuses that on-host compile and skips-with-a-note when
+the runtime isn't importable, so it stays daemon-free too. To run an overlay's
+tests directly (rather than via `dev test`, which handles them), they need the
+proxy dir on the path since they carry no conftest:
 
-Overlay tests (`<overlay>/tests/`, discovered by `dev test`) run on-host the same
-way — via the testkit (`proxy/testkit.py`), which imports `starlark`/`mitmproxy`
-from the venv. Point `CREDPROXY_OVERLAY_PATH` at the overlay and run its
-`tests/` directly with the same `env … PYTHONPATH="$PWD/proxy"` prefix as the
-proxy suite.
+```sh
+CREDPROXY_OVERLAY_PATH=/path/to/overlay \
+  PYTHONPATH="$PWD/proxy:$PWD/cli" uv run pytest overlay/<name>/tests -q
+```
 
-## Known environmental failure (not a real bug)
+## Expected failures without a container engine
 
-`tests/cli/test_providers.py::test_sh_provider_ref_with_space_not_split`
-fails in these containers: the test sets an env var whose *name* contains a
-space (`My Token`), and the container's `/bin/sh` drops such variables from
-the environment it passes to children, so the sh provider under test never
-sees it. It passes on typical dev machines. If it is the only CLI-suite
-failure, the suite is effectively green — don't chase it, don't "fix" it.
+A green run in a no-engine sandbox still shows a few failures that are purely
+environmental — if these are the *only* ones, the suite is effectively green:
 
-Reference baseline (2026-07, for calibration): CLI suite 708 passed /
-1 failed (the above) / 3 skipped; proxy suite 325 passed.
+- `tests/cli/test_lifecycle.py::test_workspace_volumes_label_isolates_name_prefix_siblings`
+  and `tests/cli/test_doctor.py::test_doctor_missing_overlay_is_failing_check` —
+  need `docker` on PATH.
+- `tests/cli/test_providers.py::test_sh_provider_ref_with_space_not_split` — the
+  test sets an env var whose *name* contains a space; some containers' `/bin/sh`
+  drops such variables before the sh provider sees them. Passes on a normal shell.
+
+Don't "fix" these — they pass in a full environment.
 
 ## Misc
 
-- Outbound HTTPS goes through the session's agent proxy; `pip` works as-is.
-  Never disable TLS verification — see `/root/.ccr/README.md` in-session.
-- If this setup should become automatic, a Claude Code `SessionStart` hook
-  running the venv setup is the supported mechanism; so far it's manual to
-  keep local sessions unaffected.
+- Outbound HTTPS goes through the session's agent proxy; `uv`/`pip` work as-is.
+  Never disable TLS verification.
+- To automate setup in a Claude Code session, a `SessionStart` hook running
+  `uv sync --group proxy` is the supported mechanism (kept manual by default so
+  local sessions are unaffected).
