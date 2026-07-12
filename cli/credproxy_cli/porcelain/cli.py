@@ -40,6 +40,7 @@ import argparse
 import sys
 
 from ..core.errors import CredproxyError
+from ..core.suggest import did_you_mean
 from . import render
 from .render import fail, say
 from .common import Ctx, _LeafParser
@@ -194,8 +195,13 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
 # ---- top-level dispatch ------------------------------------------------------
 
 
-def _print_help(loose: bool = False) -> None:
-    say(_LOOSE_HELP if loose else _STRICT_HELP)
+def _print_help(loose: bool = False, show_all: bool = False) -> None:
+    # Strict always prints its complete listing; loose prints the funnel unless
+    # `help all` asked for the full inventory (issue #74 A).
+    if not loose:
+        say(_STRICT_HELP)
+    else:
+        say(_LOOSE_HELP_ALL if show_all else _LOOSE_HELP)
 
 
 _STRICT_HELP = (
@@ -239,7 +245,32 @@ _STRICT_HELP = (
 )
 
 
+# The bare-`credp` funnel: journey-ordered, aimed at a user who knows there are
+# packs and bindings but not the exact flags (issue #74 A). Kept short; the full
+# inventory is `credp help all` (_LOOSE_HELP_ALL). Strict keeps its complete
+# listing (_STRICT_HELP) -- the funnel is a loose-surface concern.
 _LOOSE_HELP = (
+    "credp -- the human surface for credproxy. Omit NAME to target the current\n"
+    "directory's workspace, then the default (both announced on stderr).\n"
+    "\n"
+    "Start here:\n"
+    "  credp create --here      scaffold a workspace for this directory\n"
+    "  credp enter              open a shell in it (starts it if needed)\n"
+    "\n"
+    "Give it credentials (fewest flags first):\n"
+    f"  credp {render.EX_PACK_ADD}          a ready-made service pack (e.g. GitHub)\n"
+    f"  credp {render.EX_BINDING_ADD}\n"
+    "\n"
+    "See what's going on:\n"
+    "  credp list               your workspaces (running status + image)\n"
+    "  credp inspect            one workspace's state, bindings, and drift\n"
+    "  credp logs               follow the proxy's traffic log\n"
+    "\n"
+    "Full command list: `credp help all`  (or add --help to any command)."
+)
+
+
+_LOOSE_HELP_ALL = (
     "credp -- human surface for credproxy (credproxy --loose).\n"
     "\n"
     "An omitted workspace resolves to the current default (announced on\n"
@@ -691,6 +722,27 @@ def _run_ws_verb(
     if _wants_help(verb_argv):
         say(_verb_help(verb_argv))
         return
+    # Bare noun (`binding`/`rule`/`pack`/`mount` with no subcommand) -> show
+    # state + teach verbs, instead of leaking argparse's raw `<noun>cmd is
+    # required` (issue #74 B / observed #2). The bare noun runs `list` for the
+    # resolved workspace (the list renderer prints an add-form footer); `pack`
+    # list is definitional, `mount` has no list so it shows its usage.
+    if len(verb_argv) == 1:
+        head = verb_argv[0]
+        if head == "binding":
+            do_binding_list(ctx, name)
+            return
+        if head == "rule":
+            do_rule_list(ctx, name)
+            return
+        if head == "pack":
+            do_pack_list(ctx)
+            return
+        if head == "mount":
+            # No list to show; teach the one verb, surface-aware (mount has only
+            # `add`). `mount add --help` still gives the full reference.
+            say(f"add one: `{render.cmd(render.EX_MOUNT_ADD)}`")
+            return
     a = _build_leaf_parser().parse_args(verb_argv)
     verb = a.verb
     if verb == "enter":
@@ -765,6 +817,14 @@ _ALIAS_TO_WS_VERB = {
     "resolve",
 }
 
+# Candidate sets for did-you-mean on an unknown top-level command (issue #74 C).
+# Strict knows only its top-level nouns; loose adds the aliases + create/use.
+_TOP_LEVEL_STRICT = {
+    "workspace", "injector", "provider", "pack", "script", "dev", "push",
+    "emit-compose", "version", *_META_COMMANDS,
+}
+_TOP_LEVEL_LOOSE = _TOP_LEVEL_STRICT | _ALIAS_TO_WS_VERB | {"create", "use"}
+
 
 def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -> None:
     """Loose-only top-level aliases. `head` is the alias verb already consumed;
@@ -818,7 +878,8 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
         _run_ws_verb(ctx, name, [head, *verb_args], trailing)
         return
 
-    fail(f"unknown command '{head}'")
+    fail(f"unknown command '{head}'{did_you_mean(head, _TOP_LEVEL_LOOSE)} "
+         f"(see `credp help`)")
 
 
 # ---- main --------------------------------------------------------------------
@@ -837,9 +898,14 @@ def main(loose_default: bool = False) -> None:
     argv, trailing = _split_trailing(argv)
     argv, loose, as_json, assume_yes = _pop_global_flags(argv)
     loose = loose or loose_default
+    # Install the surface for every surface-aware hint (footers, empty states,
+    # command examples in errors) -- must precede any output, help included.
+    render.set_surface(loose)
 
     if not argv or argv[0] in ("-h", "--help", "help"):
-        _print_help(loose)
+        # `help all` / `--help all` unfurls the loose funnel to the full listing.
+        show_all = len(argv) > 1 and argv[1] in ("all", "--all")
+        _print_help(loose, show_all)
         sys.exit(0)
 
     if argv[0] in ("version", "--version"):
@@ -876,7 +942,8 @@ def main(loose_default: bool = False) -> None:
             _dispatch_alias(ctx, head, rest, trailing)
         else:
             fail(
-                f"unknown command '{head}' "
+                f"unknown command '{head}'"
+                f"{did_you_mean(head, _TOP_LEVEL_STRICT)} "
                 f"(strict surface; see `credproxy --help`)"
             )
     except CredproxyError as e:

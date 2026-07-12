@@ -787,8 +787,9 @@ def get_pack(name: str) -> PackSpec:
     packs = load_packs()
     spec = packs.get(name)
     if spec is None:
+        from ..suggest import did_you_mean
         raise CredproxyError(
-            f"unknown pack {name!r}; known packs: "
+            f"unknown pack {name!r}{did_you_mean(name, packs)}; known packs: "
             f"{', '.join(sorted(packs)) or '(none)'}"
         )
     return spec

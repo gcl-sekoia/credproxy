@@ -177,8 +177,27 @@ def find_provider(name: str) -> Provider:
                 f"provider '{name}' found at {base / name} but is not an "
                 f"executable file or a directory with an executable `run`"
             )
+    from .suggest import did_you_mean
     where = ", ".join(str(b) for _, b in searched)
-    raise ProviderError(f"provider '{name}' not found (looked in {where})")
+    raise ProviderError(
+        f"provider '{name}' not found{did_you_mean(name, provider_names())} "
+        f"(looked in {where})"
+    )
+
+
+def provider_names() -> list[str]:
+    """Resolvable provider names across the layered dirs (a dir entry that
+    resolves to an executable via `_resolve_in`), unioned and sorted. Cheap
+    enumeration for did-you-mean/listings; `list_providers()` is the shadow-aware
+    parsed view."""
+    names: set[str] = set()
+    for _, base in layered_dirs("providers"):
+        if not base.is_dir():
+            continue
+        for entry in base.iterdir():
+            if _resolve_in(base, entry.name) is not None:
+                names.add(entry.name)
+    return sorted(names)
 
 
 def list_providers() -> list[Provider]:

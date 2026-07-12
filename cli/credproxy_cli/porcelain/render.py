@@ -29,13 +29,64 @@ def say(msg: str) -> None:
     print(f"[credproxy] {msg}", file=sys.stderr, flush=True)
 
 
+# ---- surface-aware command references (issue #74 E) --------------------
+#
+# The active surface (loose `credp` vs strict `credproxy`), installed by
+# set_surface() in main() alongside set_format(). Every user-facing hint that
+# names a command routes through cmd() so a single place decides the spelling --
+# `credp X` on loose, `credproxy workspace NAME X` on strict -- instead of each
+# hint string hand-picking one form (which left loose users staring at strict
+# incantations, issue #74 #5).
+
+_LOOSE = False
+
+
+def set_surface(loose: bool) -> None:
+    global _LOOSE
+    _LOOSE = loose
+
+
+def cmd(tail: str, *, ws: str | None = None, top_level: bool = False) -> str:
+    """Render a command reference in the active surface's spelling. `tail` is the
+    verb and its args (e.g. `"binding add --host H"`, `"pack add github"`).
+
+    Generic teaching example (no specific workspace -- a footer/skeleton/funnel):
+      - loose:  `credp <tail>`
+      - strict: `credproxy workspace NAME <tail>` (the literal `NAME` placeholder),
+        or `credproxy <tail>` for a top-level/definitional command (top_level).
+
+    Pass `ws` for a hint about a SPECIFIC, already-resolved workspace (a
+    push/start follow-up after acting on it) so the example is paste-runnable and
+    names the right box on both surfaces:
+      - loose:  `credp <tail> <ws>`  (valid only for the name-accepting
+        generic-alias verbs -- start/push/enter/...; the only ones we hint with a ws)
+      - strict: `credproxy workspace <ws> <tail>`"""
+    if _LOOSE:
+        return f"credp {tail} {ws}" if ws else f"credp {tail}"
+    if top_level:
+        return f"credproxy {tail}"
+    return f"credproxy workspace {ws or 'NAME'} {tail}"
+
+
+# Canonical example command tails, shared by the funnel help, the noun-alone
+# footers, empty states, and the `binding add` skeleton -- and validated against
+# the real parser tree by tests/cli/test_hint_commands.py, so an example can't
+# rot the way a stale doc line would.
+EX_BINDING_ADD = ("binding add --injector bearer --provider env "
+                  "--secret VAR --host api.example.com")
+EX_PACK_ADD = "pack add github"
+EX_RULE_ADD = "rule add block --host api.example.com"
+EX_MOUNT_ADD = "mount add --volume NAME --target PATH"
+EX_CREATE_HERE = "create --here"
+
+
 def _say_push_hint(ws: str, attached: bool) -> None:
     """The follow-up hint after a config edit (binding/rule/pack add): how to
     get it onto the proxy. Managed workspaces hint `start` (which pushes);
     ATTACHED workspaces have no `start` -- their verb is `push` (`apply` is its
     alias there, so mentioning it stays correct on both)."""
     verb = "push" if attached else "start"
-    say(f"run `credproxy workspace {ws} {verb}` (or `apply`) to push it to the proxy")
+    say(f"run `{cmd(verb, ws=ws)}` (or `apply`) to push it to the proxy")
 
 
 # ---- the renderer ------------------------------------------------------
@@ -67,6 +118,10 @@ class Renderer:
     def workspace_list(self, rows: list[dict]) -> None:
         if not rows:
             print("no workspaces")
+            # `create` is a noun-verb (`workspace create NAME`), not the
+            # `workspace NAME <verb>` shape cmd() renders, so spell it directly.
+            hint = "credp create --here" if _LOOSE else "credproxy workspace create NAME"
+            say(f"create one: `{hint}`")
             return
         import os
 
@@ -129,7 +184,8 @@ class Renderer:
         print()
         if "default_workspace" in d:  # loose surface only
             print(f"  default workspace   {d['default_workspace'] or '(none)'}")
-        print(f"  workspaces          {d['workspaces']}  (see `credproxy list`)")
+        print(f"  workspaces          {d['workspaces']}  "
+              f"(see `{cmd('list', top_level=True)}`)")
         print()
 
         p = d["paths"]
@@ -183,7 +239,7 @@ class Renderer:
         # An ATTACHED workspace has no `start` (its containers are external);
         # the follow-up there is a config push.
         verb = "push" if attached else "start"
-        say(f"edit {path}, then run `credproxy workspace {name} {verb}`")
+        say(f"edit {path}, then run `{cmd(verb, ws=name)}`")
 
     def used(self, name: str) -> None:
         print(f"default workspace is now '{name}'")
@@ -401,7 +457,7 @@ class Renderer:
             print("  preserved the previous container's data; "
                   "recreated and running")
         else:
-            say(f"run `credproxy workspace {ws} start` to apply "
+            say(f"run `{cmd('start', ws=ws)}` to apply "
                 f"(recreates the container; the volume starts empty)")
 
     # -- binding list --
@@ -409,6 +465,7 @@ class Renderer:
         from ..core.model.bindings import secret_display
         if not rows:
             print(f"no bindings in workspace '{ws}'")
+            say(f"add one: `{cmd(EX_PACK_ADD)}`  or  `{cmd(EX_BINDING_ADD)}`")
             return
         header = ("NAME", "INJECTOR", "PROVIDER", "SECRET", "HOSTS", "ENV", "PLACEHOLDER")
         table = [header]
@@ -421,6 +478,7 @@ class Renderer:
         for row in table:
             cells = [f"{row[i]:<{widths[i]}}" for i in range(len(widths))]
             print("  ".join(cells) + "  " + row[-1])
+        say(f"add one: `{cmd(EX_BINDING_ADD)}`")
 
     # -- binding test --
     def binding_test(self, results: list[dict]) -> None:
@@ -455,6 +513,8 @@ class Renderer:
     def rule_list(self, ws: str, rows: list[dict]) -> None:
         if not rows:
             print(f"no rules in workspace '{ws}'")
+            say(f"add one: `{cmd(EX_RULE_ADD)}`  "
+                f"(guardrails: block/respond/rewrite/script)")
             return
         header = ("NAME", "HOSTS", "METHODS", "PATH", "ACTION", "VISIBILITY")
         table = [header]
@@ -470,6 +530,7 @@ class Renderer:
         widths = [max(len(row[i]) for row in table) for i in range(len(header))]
         for row in table:
             print("  ".join(f"{row[i]:<{widths[i]}}" for i in range(len(header))).rstrip())
+        say(f"add one: `{cmd(EX_RULE_ADD)}`")
 
     @staticmethod
     def _rule_match_line(m: dict) -> str:
@@ -602,10 +663,11 @@ class Renderer:
     # -- pack list --
     def pack_list(self, rows: list[dict]) -> None:
         if not rows:
-            print("no packs")
+            print("no packs available")
+            say(f"packs ship with credproxy or an overlay; see `{cmd('info', top_level=True)}`")
             return
         print("Service setup packs (bindings + guardrails). Apply with:")
-        print("  credproxy workspace NAME pack add NAME [--provider P --secret REF]")
+        print(f"  {cmd('pack add NAME')} [--provider P --secret REF]")
         for p in rows:
             mounts = p.get("mounts") or []
             penv = p.get("env") or []
@@ -694,7 +756,7 @@ class Renderer:
             say(line)
         if unmet:
             say(f"{len(unmet)} unmet prerequisite(s) above -- fix them, then "
-                f"`credproxy doctor {ws}` to re-check")
+                f"`{cmd(f'doctor {ws}', top_level=True)}` to re-check")
 
     def pack_applied(self, ws: str, pack: str, bindings: list[dict],
                        rules: list[dict], newly_intercepted: list[str],
@@ -709,7 +771,7 @@ class Renderer:
                              setup or [], requires or [])
         if recreate:
             say("container-half config changed the workspace spec -- "
-                f"restart to apply: credproxy workspace {ws} start")
+                f"restart to apply: {cmd('start', ws=ws)}")
         _say_push_hint(ws, attached)
 
     # -- pack refresh --
@@ -745,7 +807,7 @@ class Renderer:
                   "cert error there until it does")
         if recreate:
             say("container-half config changed the workspace spec -- "
-                f"restart to apply: credproxy workspace {ws} start")
+                f"restart to apply: {cmd('start', ws=ws)}")
         if check:
             if any_changed:
                 say("preview (--check): nothing written -- re-run without "
@@ -792,7 +854,7 @@ class Renderer:
                 + ", ".join(no_longer_intercepted))
         if recreate:
             say("container-half config changed the workspace spec -- "
-                f"restart to apply: credproxy workspace {ws} start")
+                f"restart to apply: {cmd('start', ws=ws)}")
         else:
             _say_push_hint(ws, attached)
 
