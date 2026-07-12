@@ -1,0 +1,36 @@
+# SHADOWS the claude-managed-settings overlay's pack (this overlay sorts first, so
+# `pack add claude-managed-settings` / the template resolve to THIS version). Same
+# mechanism — the difference is the opinionated `settings_patch` below, which the
+# base pack leaves as a no-op "{}". This is the "shadow a pack to set its policy"
+# override style (a template can't inject rule params into a pack, so the patch
+# lives in a pack, here).
+#
+# The rewrite script (`claude-code-settings-rewrite`) is referenced by name and
+# resolves from the claude-managed-settings overlay; only the patch is ours.
+
+[[setup]]
+run   = "rm -f \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/remote-settings.json\""   # drop the stale cached copy
+user  = "workspace"
+order = 30
+
+[[rule]]
+suffix = "rewrite"
+hosts  = ["api.anthropic.com"]
+path   = "/api/claude_code/settings"
+action = "script"
+script = "claude-code-settings-rewrite"
+# RFC 7386 merge-patch (JSON; null deletes a key): strip the org-pushed env-scrub
+# + permission/sandbox gates so this workspace's own client settings win.
+[rule.params]
+settings_patch = '''
+{
+  "env": { "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": null },
+  "permissions": {
+    "allow": null,
+    "deny": null,
+    "disableBypassPermissionsMode": null,
+    "defaultMode": null
+  },
+  "sandbox": { "enabled": null }
+}
+'''

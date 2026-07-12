@@ -1,0 +1,42 @@
+# pack: cache — one managed volume of regenerable toolchain state, at /cache.
+# The sibling of `persist`, opposite contract: everything here rebuilds itself, so
+# it's safe to blow away (`recreate --reset-volume cache`) to reclaim space or fix a
+# corrupt install. What makes it discardable is that the `toolchain` pack's setup
+# step re-runs on recreate (setup is gated by the container id, so `--reset-volume`
+# — a recreate — re-runs `mise use -g` on the same recreate that wiped the volume,
+# repopulating it). `persist` has no such regenerator (reset it and the data is
+# gone) — which is exactly why these are two volumes, not one. Toggling
+# map_host_user/user_uid on an existing volume also leaves stale-uid files the
+# chown below won't heal; here that's a cheap `--reset-volume cache` away, another
+# reason to keep durable state off this volume. Pure container pack (no credential).
+#
+# It redirects two tiers onto the volume:
+#   - XDG_CACHE_HOME — the generic, XDG-honoring cache dir (mise's MISE_CACHE_DIR,
+#     uv's UV_CACHE_DIR, pip, …; NOT npm/cargo, which ignore XDG). Warms downloads
+#     across recreates. Safe to point wholesale here: the XDG contract for this dir
+#     is "non-essential, deletable".
+#   - the tools' DATA/install dirs (mise installs+shims, uv pythons/tools) — the
+#     compiled toolchains themselves. These live under XDG_DATA_HOME, NOT cache, so
+#     XDG_CACHE_HOME doesn't reach them; redirected scoped-per-tool (rather than
+#     moving XDG_DATA_HOME wholesale, which would sweep up real app state a future
+#     pack might write there). THIS is the tier that lets a recreate SKIP the
+#     re-install, not just re-download.
+#
+# A pre-setup root step chowns the fresh (root-owned) volume to the workspace user,
+# before the toolchain pack's order=10 install writes into it as that user — same
+# reason persist chowns pre-setup rather than using `user_owned` (too late, post-setup).
+
+[[mount]]
+volume = "cache"
+target = "/cache"
+
+[[setup]]
+run   = "chown \"$CREDPROXY_USER:\" /cache"           # colon = owner + primary group
+user  = "root"
+order = 5                                             # after proxy-ca (0), before toolchain (10)
+
+[env]
+XDG_CACHE_HOME        = "/cache/xdg"          # XDG-honoring cache tier (mise/uv/pip; not npm/cargo)
+MISE_DATA_DIR         = "/cache/mise"         # mise installs + shims survive recreate
+UV_PYTHON_INSTALL_DIR = "/cache/uv/python"    # uv-managed pythons survive recreate
+UV_TOOL_DIR           = "/cache/uv/tools"     # `uv tool` installs survive recreate

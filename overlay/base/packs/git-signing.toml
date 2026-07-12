@@ -1,0 +1,37 @@
+# pack: git-signing — sign git commits with an ssh key held in a dedicated,
+# forwarded ssh-agent. Pure container pack (no credential). Opt-in: it needs a
+# host agent socket dir (create it with bin/credproxy-signing-agent first).
+#
+# The KEY never enters the container — only the agent SOCKET (its directory) is
+# bind-mounted, and git reads the public key from the agent at commit time. The
+# host socket dir is per-operator, so it's an [[option]] (a whole-value host-half
+# parameter); the container path (target, SSH_AUTH_SOCK) is fixed.
+
+[[option]]
+id          = "sock_dir"
+type        = "string"
+default     = "~/.ssh/credproxy-agent"
+description = "host directory holding the signing agent's socket"
+
+[[mount]]
+bind   = { option = "sock_dir" }                      # whole source is the option's value
+target = "/ssh-agent"
+
+[[mount]]
+overlay = "setup.d/git-signing.sh"
+target  = "/opt/git-signing.sh"
+
+[[setup]]
+run   = "bash /opt/git-signing.sh"
+user  = "workspace"
+order = 40
+
+[env]
+SSH_AUTH_SOCK = "/ssh-agent/agent.sock"
+
+# The socket dir must exist on the host before `start` (else the bind fails).
+# Reuses the same option value, so a refresh reads it back from the stamped mount.
+[[requires]]
+kind = "path"
+path = { option = "sock_dir" }
+hint = "run bin/credproxy-signing-agent on the host to create + populate the socket dir"

@@ -1,0 +1,66 @@
+# pack: claude-code — everything to run Claude Code as a client through credproxy,
+# in one pack: the Anthropic OAuth token (injected on the wire), onboarding-skip +
+# client-settings merge, a SessionStart orientation hook, and keeping the CLI on the
+# latest release. Assumes the `claude` CLI is installed (add it to a toolchain
+# tools.d fragment — the 50-example profile's extras.list does).
+#
+# NEUTRAL: no default vault (there's no universal Anthropic token source), so supply
+# --provider/--secret (or a template [[pack]]); 50-example uses `bw`. The container
+# sees only a token-shaped placeholder in $CLAUDE_CODE_OAUTH_TOKEN; the proxy swaps
+# it. The client settings DEFAULTS are policy, left to the profile: mount a JSON at
+# /opt/claude-code/settings-defaults.json (50-example does) and the setup step
+# deep-merges it under the user's settings (existing values win).
+
+# sk-ant-oat01- + credproxy- marker + 17 alnum = 40 chars (a per-workspace sentinel).
+[placeholder]
+prefix  = "sk-ant-oat01-credproxy-"
+length  = 40
+charset = "alnumeric"
+
+[[part]]
+suffix   = "oauth"                                    # -> binding claude-code-oauth
+injector = "bearer"
+hosts    = ["api.anthropic.com"]
+env      = "CLAUDE_CODE_OAUTH_TOKEN"
+
+# Client config: skip onboarding (uses the token above), merge settings-defaults,
+# and install any agent manifests a profile mounts at /opt/claude-code/agents.d/*.md
+# into $CLAUDE_CONFIG_DIR/agents/ (base ships none; 50-example ships the oracle).
+[[mount]]
+overlay = "setup.d/claude-code-setup.sh"
+target  = "/opt/claude-code-setup.sh"
+
+[[setup]]
+run   = "bash /opt/claude-code-setup.sh"
+user  = "workspace"
+order = 20
+
+# SessionStart orientation: a Claude Code hook that concatenates every
+# /opt/session-context.d/*.sh fragment (this pack ships the credproxy `/setup`
+# summary, a redirected-CLAUDE_CONFIG_DIR note, and an installed-tools note read from
+# toolchain's lists; a profile can drop more, e.g. 50-example's example.sh).
+[[mount]]
+overlay = "session-context.sh"
+target  = "/opt/session-context.sh"
+
+[[mount]]
+overlay = "session-context.d/credproxy.sh"
+target  = "/opt/session-context.d/10-credproxy.sh"
+
+# Announce a redirected CLAUDE_CONFIG_DIR (e.g. the persist pack's /persist/claude);
+# inert when unset/default, so it ships in base regardless of which packs set it.
+[[mount]]
+overlay = "session-context.d/claude-config.sh"
+target  = "/opt/session-context.d/15-claude-config.sh"
+
+[[mount]]
+overlay = "session-context.d/tools.sh"
+target  = "/opt/session-context.d/20-tools.sh"
+
+[[setup]]
+run   = "bash /opt/session-context.sh --install"      # registers the hook in settings.json
+user  = "workspace"
+order = 50                                            # after the tools/config it describes
+
+[env]
+MISE_MINIMUM_RELEASE_AGE_EXCLUDES = "claude"   # Claude Code moves fast — keep its CLI latest
