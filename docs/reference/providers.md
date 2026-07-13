@@ -75,6 +75,26 @@ Every ref in the request must appear in `values` as a string, or the CLI treats
 it as a protocol error. Anything else on stdout (banners, debug logging,
 prompts) corrupts the response — see the note on interactive tools below.
 
+### Partial not-found (recommended)
+
+Because the CLI batches every binding on a provider into **one** invocation, a
+single missing ref must not be reported as if the whole batch failed. When one or
+more refs don't resolve, a provider **should** resolve the rest, add an `errors`
+object mapping each failed ref to a human reason, and exit `2`:
+
+```json
+{"values": {"<ref>": "<secret>", ...}, "errors": {"<ref>": "<why it failed>", ...}}
+```
+
+On exit `2` the CLI reads this body to name **exactly** which refs failed (with the
+provider's reason), rather than blaming every ref in the batch. `errors` is
+optional and the split is what matters, not the reason text: a provider that
+instead just omits the unresolved refs from `values` (and exits `2`) still gets
+precise attribution via the missing keys; one that returns nothing on exit `2`
+falls back to blaming the whole batch (correct only when it was a single ref). A
+backend failure that dooms the *whole* batch (vault locked, tool missing) is
+different — exit `1`, no partial body.
+
 ## Describe and help (optional)
 
 Two metadata ops let a provider document itself. Both **run the provider**, so
@@ -117,7 +137,7 @@ secret reference).
 |------|---------|
 | `0`  | success; a `{"values": {...}}` object covering every requested ref is on stdout |
 | `1`  | generic failure (backend unreachable, auth error, malformed request, …) |
-| `2`  | secret not found (a requested ref does not resolve) |
+| `2`  | secret not found (a requested ref does not resolve); stdout should carry a partial body naming which — see *Partial not-found* |
 | `3`  | unsupported `op` or `version` |
 
 The CLI maps `2` and `3` to specific diagnostics; any other nonzero code is a
@@ -170,8 +190,9 @@ request's `secrets` refs:
 ```sh
 #!/bin/sh
 # Request JSON on stdin: {"version":1,"op":"get","secrets":["GITHUB_TOKEN",...]}
-# Emits {"values":{"GITHUB_TOKEN":"<$GITHUB_TOKEN>",...}}, or exits 2 if any
-# var is unset.
+# Emits {"values":{"GITHUB_TOKEN":"<$GITHUB_TOKEN>",...}}. If any var is unset it
+# still returns the ones that resolved, adds them to `errors`, and exits 2 -- so
+# one missing var doesn't mask the rest of the batch.
 # NB: use `python3 -c`, not a `<<HEREDOC` -- a heredoc would consume the
 # stdin the request is delivered on.
 exec python3 -c '
@@ -179,13 +200,18 @@ import json, os, sys
 req = json.load(sys.stdin)
 if req.get("version") != 1 or req.get("op") != "get":
     sys.exit(3)
-values = {}
+values, errors = {}, {}
 for name in req.get("secrets") or []:
     val = os.environ.get(name)
     if val is None:
-        print(f"env provider: ${name} is not set", file=sys.stderr)
-        sys.exit(2)
-    values[name] = val
-json.dump({"values": values}, sys.stdout)
+        errors[name] = f"${name} is not set"
+    else:
+        values[name] = val
+resp = {"values": values}
+if errors:
+    resp["errors"] = errors
+json.dump(resp, sys.stdout)
+if errors:
+    sys.exit(2)
 '
 ```

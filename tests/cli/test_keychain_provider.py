@@ -74,8 +74,11 @@ def test_keychain_missing_binary_exits_1(tmp_path, monkeypatch):
 def test_keychain_not_found(fake_security):
     r = _run({"version": 1, "op": "get", "secrets": ["nope"]})
     assert r.returncode == 2
-    assert "no generic-password item" in r.stderr
-    assert "add-generic-password" in r.stderr  # tells the user how to store it
+    # The per-ref reason now travels in the response `errors` map (so a batch can
+    # name which ref failed), not stderr.
+    err = json.loads(r.stdout)["errors"]["nope"]
+    assert "no generic-password item" in err
+    assert "add-generic-password" in err  # tells the user how to store it
 
 
 def test_keychain_unsupported_version(fake_security):
