@@ -10,7 +10,9 @@ yq          yq        query/edit YAML, JSON, TOML
 
 # Installed for interactive (human) use, not advertised (no note):
 claude             claude
-# codex CLI — the `codex` pack authenticates it off an injected OpenAI API key:
-npm:@openai/codex  codex
+# codex CLI — the `codex` pack authenticates it off an injected OpenAI API key.
+# aqua backend (prebuilt GitHub-release binary), NOT npm: the npm backend needs
+# Node.js/npm, which this toolchain doesn't install.
+aqua:openai/codex  codex
 bat                bat
 pipx:icdiff        icdiff

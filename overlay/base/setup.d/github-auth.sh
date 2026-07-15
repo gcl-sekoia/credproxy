@@ -14,8 +14,15 @@
 # already set — no need to pull /exports.sh).
 set -euo pipefail
 
-# mise shims aren't on PATH in a non-login setup step; add them so `gh` resolves.
-export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+# `gh` is installed via mise, but mise is NOT activated in the non-interactive
+# login shell this setup step runs under (this image activates mise per interactive
+# shell — `mise activate` — rather than generating a shims dir, so the shims path
+# doesn't exist). Resolve gh's real bin dir via `mise which` and put it on PATH.
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v gh >/dev/null 2>&1 && command -v mise >/dev/null 2>&1; then
+    gh_bin="$(mise which gh 2>/dev/null || true)"
+    [ -n "$gh_bin" ] && export PATH="$(dirname "$gh_bin"):$PATH"
+fi
 
 # git-over-HTTPS auth: bridge to gh's credential helper. `!gh …` resolves gh by
 # PATH at push time (in the mise-activated login shell) rather than baking gh's

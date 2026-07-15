@@ -14,8 +14,15 @@
 # already the placeholder — no need to pull /exports.sh). Idempotent.
 set -euo pipefail
 
-# mise shims aren't on PATH in a non-login setup step; add them so `codex` resolves.
-export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+# `codex` is installed via mise, but mise is NOT activated in the non-interactive
+# login shell this setup step runs under (this image activates mise per interactive
+# shell — `mise activate` — rather than generating a shims dir, so the shims path
+# doesn't exist). Resolve codex's real bin dir via `mise which` and put it on PATH.
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v codex >/dev/null 2>&1 && command -v mise >/dev/null 2>&1; then
+    codex_bin="$(mise which codex 2>/dev/null || true)"
+    [ -n "$codex_bin" ] && export PATH="$(dirname "$codex_bin"):$PATH"
+fi
 
 # Best-effort: a workspace without the codex CLI (or without the api part) still
 # gets $OPENAI_API_KEY in its login shell — just skip seeding auth.json rather than
@@ -30,6 +37,6 @@ if command -v codex >/dev/null 2>&1 && [ -n "${OPENAI_API_KEY:-}" ]; then
     fi
 else
     echo "codex: codex CLI not found or \$OPENAI_API_KEY unset — skipped auth.json" \
-         "seeding. Install the CLI (toolchain tools.d: npm:@openai/codex) and check" \
+         "seeding. Install the CLI (toolchain tools.d: aqua:openai/codex) and check" \
          "the codex-api binding." >&2
 fi
