@@ -4,7 +4,8 @@
 # credential is a plain API key (bearer), so there's no OAuth reseal to do.
 #
 # Assumes the `codex` CLI is installed (add it to a toolchain tools.d fragment — the
-# 50-example profile's extras.list ships `npm:@openai/codex`).
+# 50-example profile's extras.list ships `aqua:openai/codex`, the prebuilt
+# GitHub-release binary; the npm backend needs Node.js, which the toolchain lacks).
 #
 # AUTH: Codex has two methods — "Sign in with ChatGPT" (browser OAuth, short-lived
 # rotating tokens; NOT proxyable) and an API key (long-lived, headless). This pack

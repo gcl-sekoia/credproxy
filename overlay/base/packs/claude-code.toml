@@ -43,6 +43,12 @@ order = 20
 overlay = "session-context.sh"
 target  = "/opt/session-context.sh"
 
+# Frame the sandbox first: a container with its engine + rootless-ness probed live, so
+# host-shaped advice can be runtime-appropriate. Foundational orientation, so 05.
+[[mount]]
+overlay = "session-context.d/environment.sh"
+target  = "/opt/session-context.d/05-environment.sh"
+
 [[mount]]
 overlay = "session-context.d/credproxy.sh"
 target  = "/opt/session-context.d/10-credproxy.sh"
