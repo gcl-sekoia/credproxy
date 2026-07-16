@@ -14,7 +14,15 @@
 # try to refresh (no token-endpoint traffic — the only intercepted host is the API
 # glob). Because the token is resolved at push time and held statically, it EXPIRES
 # after ~1h: re-run `credp push` to mint a fresh one.
+#
+# INTERACTIVE RE-LOGIN: minting fails when the host login has expired or is absent
+# (`gcloud auth print-access-token` can't reauth non-interactively). When invoked
+# with a controlling terminal (the usual `credp enter`/`push` case), this provider
+# offers to run the matching `gcloud auth login` on that terminal and retries once,
+# so an expired login is fixed in place instead of aborting the push. With no
+# terminal (CI, a future daemon) it fails closed as before.
 import json
+import os
 import subprocess
 import sys
 
@@ -32,7 +40,8 @@ Prints a short-lived Google access token from the host's gcloud login.
   credential (refresh token / SA key) never enters the workspace.
 Requires `gcloud` on PATH and a login (`gcloud auth login`, or
 `gcloud auth activate-service-account`, or `gcloud auth application-default login`
-for the 'adc' ref). `print-access-token` is non-interactive.
+for the 'adc' ref). When run with a terminal, an expired/absent login is offered
+an in-place `gcloud auth login` (retried once); with no terminal it fails closed.
 """
 
 # ════ fetch one secret (the only provider-specific logic) ═════════════
@@ -62,23 +71,84 @@ def _argv(ref):
     return ["gcloud", "auth", "print-access-token", ref]
 
 
-def get(ref):
-    ref = ref.strip()
-    if ref in _CACHE:
-        return _CACHE[ref]
+def _login_argv(ref):
+    """The `gcloud auth login` variant that re-establishes the credential `ref`
+    reads with. Impersonation rides the active user login, so re-login that."""
+    if ref == "adc":
+        return ["gcloud", "auth", "application-default", "login"]
+    if ref in ("", "default") or ref.startswith("impersonate:"):
+        return ["gcloud", "auth", "login"]
+    # a specific account email
+    return ["gcloud", "auth", "login", ref]
+
+
+def _tty_fd():
+    """A read/write fd on the controlling terminal, or None when there is none
+    (piped provider, CI, a future daemon). credproxy feeds the request JSON on
+    our stdin (so stdin is a pipe, not the terminal); an interactive provider
+    therefore talks to /dev/tty, exactly as `bw`/`getpass` do. Opened raw with
+    os.open (a terminal is not seekable, so buffered `open("/dev/tty","r+")`
+    would raise) and O_NOCTTY (never adopt it as a controlling tty); a failure
+    to open is the correct non-interactive probe -- fall back to failing."""
+    try:
+        return os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+    except OSError:
+        return None
+
+
+def _print_token(ref):
+    """Run `print-access-token` once. Returns (token, stderr_tail); token is
+    None on any failure. Raises GcloudError only if gcloud is not installed."""
     try:
         r = subprocess.run(_argv(ref), capture_output=True, text=True)
     except FileNotFoundError:
         raise GcloudError("`gcloud` is not on PATH (install the Google Cloud SDK)")
-    if r.returncode != 0:
-        who = repr(ref) if ref not in ("", "default") else "the active account"
-        raise NotFound(
-            f"gcloud could not mint a token for {who} "
-            f"(try `gcloud auth login`): {r.stderr.strip()}"
-        )
-    token = _CACHE[ref] = r.stdout.strip()
+    if r.returncode != 0 or not r.stdout.strip():
+        return None, r.stderr.strip()
+    return r.stdout.strip(), ""
+
+
+def _reauth(ref, detail):
+    """When minting failed and we have a terminal, offer to run the matching
+    `gcloud auth login` and retry. Returns True iff a login ran (caller retries
+    once). No terminal -> False, so a piped/CI/daemon invocation fails closed
+    exactly as before. gcloud's stdout is routed to OUR stderr so it can never
+    corrupt the JSON response we still owe on stdout."""
+    fd = _tty_fd()
+    if fd is None:
+        return False
+    try:
+        who = "the active account" if ref in ("", "default") else repr(ref)
+        argv = _login_argv(ref)
+        lines = [f"\n{NAME} provider: no valid Google token for {who}."]
+        if detail:
+            lines.append(f"  {detail.splitlines()[-1]}")
+        lines.append(f"Run `{' '.join(argv)}` now? [Y/n] ")
+        os.write(fd, "\n".join(lines).encode())
+        # Raw read (not a buffered readline): canonical mode returns the line at
+        # Enter, and reading no more than the answer avoids swallowing input the
+        # login subprocess will itself read from this same terminal.
+        if os.read(fd, 16).decode(errors="replace").strip().lower().startswith("n"):
+            return False
+        # Hand gcloud the terminal for its browser/verification-code prompts.
+        r = subprocess.run(argv, stdin=fd, stdout=sys.stderr, stderr=sys.stderr)
+        return r.returncode == 0
+    finally:
+        os.close(fd)
+
+
+def get(ref):
+    ref = ref.strip()
+    if ref in _CACHE:
+        return _CACHE[ref]
+    token, detail = _print_token(ref)
+    if not token and _reauth(ref, detail):
+        token, detail = _print_token(ref)
     if not token:
-        raise NotFound(f"gcloud returned an empty token for {ref or 'the active account'}")
+        who = repr(ref) if ref not in ("", "default") else "the active account"
+        msg = f"gcloud could not mint a token for {who} (try `gcloud auth login`)"
+        raise NotFound(f"{msg}: {detail}" if detail else msg)
+    _CACHE[ref] = token
     return token
 
 
