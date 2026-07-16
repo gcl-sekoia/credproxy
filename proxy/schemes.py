@@ -5,7 +5,8 @@ outbound request. Schemes split into two families:
 
   - **substitute** — the workspace holds an inert placeholder and sends it;
     the scheme finds it in its wire location and swaps in the real value,
-    decoding/re-encoding as the location dictates (`bearer`, `basic`, `body`).
+    decoding/re-encoding as the location dictates (`bearer`, `basic`, `body`,
+    `query`).
   - **sign** — no usable static value on the wire; the scheme holds a signing
     key and computes auth material per request (`sigv4`, … — added later).
 
@@ -36,7 +37,7 @@ import hmac
 import json
 import math
 from typing import Protocol
-from urllib.parse import unquote_to_bytes
+from urllib.parse import quote, unquote_to_bytes
 
 
 class _Ctx:
@@ -95,6 +96,14 @@ class RequestCtx(_Ctx):
         """The request target as sent: path plus `?query` if present."""
         return self._req.path
 
+    def set_path(self, target: str) -> None:
+        """Replace the raw request target (path plus `?query`). Byte-exact — the
+        string is written straight to mitmproxy's `request.path`, NOT round-tripped
+        through the parsed query multidict, so percent-encoding of untouched query
+        params survives unchanged (a query-signing scheme depends on this, same as
+        the SigV4 byte-exactness note below)."""
+        self._req.path = target
+
     @property
     def host(self) -> str:
         # pretty_host (Host header / SNI), NOT .host -- in transparent mode
@@ -149,7 +158,16 @@ class ResponseCtx(_Ctx):
 
     @property
     def request_path(self) -> str:
-        return self._flow.request.path
+        # The target as the WORKSPACE sent it (placeholder-bearing), NOT live
+        # request.path: a query-location scheme has swapped the real key into the
+        # live path by now, and a response-phase read (a re-seal script, or an
+        # inheriting rule via RuleResponseCtx) could echo it back to the workspace.
+        # addon.request() snapshots the pre-injection target into flow.metadata;
+        # the fallback strips the query so a missing snapshot still can't leak.
+        orig = self._flow.metadata.get("credproxy_pre_inject_path")
+        if orig is not None:
+            return orig
+        return self._flow.request.path.split("?", 1)[0]
 
     @property
     def request_host(self) -> str:
@@ -331,6 +349,35 @@ class BodyScheme(_SubstituteScheme):
         if not text or ctx.placeholder is None or ctx.placeholder not in text:
             return False
         ctx.set_body_text(text.replace(ctx.placeholder, ctx.secret()))
+        return True
+
+
+class QueryScheme(_SubstituteScheme):
+    """Substring-swap the placeholder for the real value in the URL query string
+    — for APIs that authenticate via a query param with no header form (Shodan's
+    `?key=…`). The workspace sends `?key=<placeholder>`; the swap happens here.
+
+    Scoped to the query portion (after the first `?`): a placeholder-shaped
+    substring in the path is left alone. Operates on the raw target, not the
+    parsed query multidict, so other params' percent-encoding survives byte-for-
+    byte (a query signer depends on that). The real value is percent-encoded on
+    the way in (`quote(safe="")`) — a no-op for the alnum default placeholder,
+    but it keeps a secret containing `&`/`=`/`#`/space from corrupting the
+    request line."""
+
+    name = "query"
+    location_kind = "query"
+    header_default = None
+
+    def on_request(self, ctx: RequestCtx) -> bool:
+        target = ctx.path
+        if ctx.placeholder is None or "?" not in target:
+            return False
+        head, sep, query = target.partition("?")
+        if ctx.placeholder not in query:
+            return False
+        query = query.replace(ctx.placeholder, quote(ctx.secret(), safe=""))
+        ctx.set_path(head + sep + query)
         return True
 
 
@@ -643,6 +690,6 @@ class OAuth2ResealScheme:
 
 
 SCHEMES: dict[str, Scheme] = {
-    s.name: s for s in (BearerScheme(), BasicScheme(), BodyScheme(),
+    s.name: s for s in (BearerScheme(), BasicScheme(), BodyScheme(), QueryScheme(),
                         SigV4Scheme(), OAuth2ResealScheme())
 }

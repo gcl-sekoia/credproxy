@@ -77,6 +77,23 @@ def test_scripted_body_swaps():
     assert req.text == "client_secret=REAL&x=1"
 
 
+def test_scripted_query_swaps():
+    s = _scripted("query")
+    ctx, req = _ctx()
+    req.path = "/search?key=PH&q=x"
+    assert s.on_request(ctx) is True
+    assert req.path == "/search?key=REAL&q=x"
+
+
+def test_scripted_query_ignores_path_placeholder():
+    """The query.star twin is scoped to the query portion, like the built-in."""
+    s = _scripted("query")
+    ctx, req = _ctx()
+    req.path = "/PH?x=1"
+    assert s.on_request(ctx) is False
+    assert req.path == "/PH?x=1"
+
+
 # ---- behavioural equivalence with the Python built-ins -----------------------
 
 @pytest.mark.parametrize("header_val", [
@@ -121,6 +138,22 @@ def test_body_equivalence(body):
     cst, rst = _ctx(body=body)
     assert py.on_request(cpy) == st.on_request(cst)
     assert rpy.text == rst.text
+
+
+@pytest.mark.parametrize("path", [
+    "/search?key=PH&q=x", "/x?key=PH", "/no-query", "/x?key=other", "/PH",
+])
+def test_query_equivalence(path):
+    # Native and script agree for URL-safe secrets: the default "REAL" is alnum,
+    # so the native scheme's percent-encoding is a no-op. The one intended
+    # divergence -- metacharacter encoding -- is absent here by construction (see
+    # query.star), so it can't split the two.
+    py = schemes.SCHEMES["query"]
+    st = _scripted("query")
+    cpy, rpy = _ctx(); rpy.path = path
+    cst, rst = _ctx(); rst.path = path
+    assert py.on_request(cpy) == st.on_request(cst)
+    assert rpy.path == rst.path
 
 
 # ---- sign-family crypto/encoding primitives ----------------------------------
@@ -334,6 +367,26 @@ def test_req_mutation_in_response_phase_fails_closed():
     with pytest.raises(ScriptResponseError):
         s.on_response(rc)
     assert "X" not in flow.response.headers
+
+
+def test_req_set_path_rewrites_target():
+    ctx, req = _ctx()
+    req.path = "/old?a=1"
+    s = ScriptedScheme(
+        "p", "def on_request():\n    req_set_path('/new?b=2')\n    return True\n")
+    assert s.on_request(ctx) is True
+    assert req.path == "/new?b=2"
+
+
+def test_req_set_path_in_response_phase_fails_closed():
+    """req_set_path is request-phase only (like req_set_header): a response-phase
+    request-line write hits the phase guard and fails closed."""
+    from starlark_runtime import ScriptResponseError
+    s = ScriptedScheme(
+        "g", "def on_response():\n    req_set_path('/x')\n    return True\n")
+    rc, _ = _resp_ctx()
+    with pytest.raises(ScriptResponseError):
+        s.on_response(rc)
 
 
 # ---- sandbox + fail-closed + timeout -----------------------------------------

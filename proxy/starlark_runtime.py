@@ -240,6 +240,15 @@ def _req_set_body(text):
     _require("request", "req_set_body").set_body_text(text)
 
 
+def _req_set_path(target):
+    # Byte-exact raw target (path plus `?query`) writer -- the setter twin of the
+    # `req_path` reader. Request phase only: like req_set_header/req_set_body, and
+    # because a response-phase write to the request line is meaningless. A query
+    # signer needs the exact bytes it composed, so this bypasses the parsed query
+    # multidict (see RequestCtx.set_path).
+    _require("request", "req_set_path").set_path(target)
+
+
 # -- response (response phase only) --
 def _resp_status():
     return _require("response", "resp_status").status_code
@@ -448,6 +457,7 @@ PRIMITIVES = {
     # request mutation (request phase)
     "req_set_header": _req_set_header,
     "req_set_body": _req_set_body,
+    "req_set_path": _req_set_path,
     # response (response phase)
     "resp_status": _resp_status,
     "resp_header": _resp_header,

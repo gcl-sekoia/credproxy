@@ -54,6 +54,12 @@ CATALOG: dict[str, SchemeSpec] = {
                          {"header": "Authorization"}),
     "body":   SchemeSpec("body",   "substitute", ("value",), {},
                          location_kind="body", header_default=None),
+    # Query-string substitute: the workspace sends `?key=<placeholder>`, the proxy
+    # swaps the real value into the query in transit (Shodan's `?key=…` and other
+    # APIs with no header auth form). location_kind="query" -> location_key
+    # ("query",), so like `body` all query bindings on a host collide.
+    "query":  SchemeSpec("query",  "substitute", ("value",), {},
+                         location_kind="query", header_default=None),
     # Sign family: AWS SigV4. region/service are read from the request, so no
     # params; the workspace holds throwaway creds and the proxy re-signs. It
     # rewrites the Authorization header, so it collides there.
@@ -73,7 +79,7 @@ CATALOG: dict[str, SchemeSpec] = {
 
 
 _FAMILIES = ("substitute", "sign")
-_LOCATION_KINDS = ("header", "body")
+_LOCATION_KINDS = ("header", "body", "query")
 
 
 def get_scheme(name: str) -> SchemeSpec:

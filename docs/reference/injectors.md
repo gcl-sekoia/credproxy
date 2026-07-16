@@ -37,6 +37,7 @@ as configuration, not code. Schemes fall into two families:
 | `bearer` | substitute | `header` (default `Authorization`) | `value` | most REST APIs (PATs, OpenAI, Stripe, …) |
 | `basic` | substitute | `header` (default `Authorization`) | `value` | git-over-HTTPS, registries, any HTTP Basic |
 | `body` | substitute | — | `value` | OAuth2 client-credentials, key-in-body APIs |
+| `query` | substitute | — | `value` | APIs that authenticate via a URL query parameter (Shodan's `?key=…`) |
 | `oauth2-reseal` | substitute | `api_hosts` (required), `token_field`, `expires_field`, `ttl`, `reseal_header` | `value` | OAuth2 client-credentials where even the minted token must stay out of the workspace |
 | `sigv4` | sign | — | `access_key_id`, `secret_access_key` | AWS + all S3-compatible services |
 
@@ -46,6 +47,20 @@ decodes the `Authorization: Basic` blob, swaps the component equal to the
 placeholder (password by default, or username), and re-encodes — so the
 placeholder is a **bare token**, never hand-computed base64. `body` swaps the
 placeholder anywhere in the request body.
+
+`query` swaps the placeholder inside the URL query string, for APIs that take
+their credential as a query parameter and offer no header form — the workspace
+sends `?key=<placeholder>` and the proxy substitutes the real key in transit,
+percent-encoding it. The swap is scoped to the query portion (after the first
+`?`), so a look-alike substring in the path is never touched, and the real value
+is percent-encoded so a key with `&`/`=`/`#` can't corrupt the request line.
+
+> **Security note:** a query-string credential is echo-prone in a way a header
+> credential is not. A server that reflects the request URL — a `301` that
+> rewrites the path and repeats `?key=…` in `Location`, or an error body that
+> quotes the full URL — sends the real key back to the workspace in its
+> response. This is inherent to query-parameter auth (servers echo URLs, not
+> `Authorization` headers); prefer a header scheme when the API supports one.
 
 `sigv4` (sign family) is different: the AWS secret is a *signing key* that never
 transits the wire, so there is no placeholder. The workspace's AWS SDK signs
@@ -167,8 +182,17 @@ scheme owns the wire shape.
 | `bearer` | `bearer` | `header = Authorization` | default (`credproxy_` + 30 alnum, 40 total) | none |
 | `basic` | `basic` | `header = Authorization` | default | none |
 | `body` | `body` | — | default | none |
+| `query` | `query` | — | default | none |
 | `oauth2-reseal` | `oauth2-reseal` | `api_hosts` (edit before use), `token_field`, `expires_field`, `ttl`, `reseal_header` | default | none |
 | `sigv4` | `sigv4` | — | none (sign family) | none |
+
+A `query` binding for Shodan (send `?key=<placeholder>`, proxy swaps the real
+key in transit):
+
+```sh
+credproxy workspace NAME binding add --injector query --provider env \
+    --secret SHODAN_API_KEY --host api.shodan.io --env SHODAN_API_KEY
+```
 
 A `sigv4` binding uses a multi-slot secret, e.g.:
 
@@ -338,9 +362,12 @@ prefix also encodes the **phase** they belong to:
 - `req_` **getters** (`req_method`, `req_path`, `req_host`, `req_header`,
   `req_body`, `req_body_b64`) work in **both** phases — in `on_request()` they
   read the live outbound request; in `on_response()` they read the request that
-  was answered.
-- `req_set_*` **mutators** are **request-phase only** — calling `req_set_header`
-  or `req_set_body` from `on_response()` raises (→ fail closed).
+  was answered. In `on_response()`, `req_path()` returns the target as the
+  **workspace sent it** (with the placeholder), not the injected one — a `query`
+  scheme has swapped the real key into the live path by then, and returning that
+  would let a response script echo the secret back to the workspace.
+- `req_set_*` **mutators** are **request-phase only** — calling `req_set_header`,
+  `req_set_body`, or `req_set_path` from `on_response()` raises (→ fail closed).
 - `resp_*` (and the re-seal `mint`/`mint_into_json`) are **response-phase
   only** — calling any of them from `on_request()` raises (→ fail closed). The
   response phase is where re-seal runs.
@@ -358,7 +385,7 @@ prefix also encodes the **phase** they belong to:
 | Primitive | Returns | Purpose |
 |---|---|---|
 | `req_method()` | `str` | The request method (read-only). |
-| `req_path()` | `str` | The request path including query string (read-only). |
+| `req_path()` | `str` | The request target including query string (read-only). In `on_response()`, the target as the workspace sent it (pre-injection), so an injected `query` key is never exposed. |
 | `req_host()` | `str` | The request host (read-only). |
 | `req_header(name)` | `str\|None` | A request header value, or `None` if absent. |
 | `req_body()` | `str\|None` | The request body as text, or `None`. |
@@ -370,6 +397,7 @@ prefix also encodes the **phase** they belong to:
 |---|---|---|
 | `req_set_header(name, value)` | — | Set/replace a request header. |
 | `req_set_body(text)` | — | Replace the request body. |
+| `req_set_path(target)` | — | Replace the raw request target (path plus `?query`), byte-exact — for a query-string signer that composes its own encoding. |
 
 **Response (response phase only — phase-4 re-seal seam)**
 

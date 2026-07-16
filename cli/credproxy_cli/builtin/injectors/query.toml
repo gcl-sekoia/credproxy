@@ -1,0 +1,15 @@
+# credproxy builtin injector: query
+#
+# URL query-string injector. Runs the `query` scheme: the proxy substring-swaps
+# the inert placeholder for the real credential inside the request's query
+# string, percent-encoding the value. For APIs that authenticate via a query
+# parameter and offer no header form (Shodan's `?key=…`, and similar). The
+# workspace sends `?key=<placeholder>`; the swap happens in transit.
+
+scheme = "query"                # proxy mechanism: substitute in the query string
+# env  = "API_KEY"              # optional: suggested workspace-side env var
+
+# [placeholder] omitted -> default pattern (prefix "credproxy_", length 40,
+# charset "alnumeric"), which is URL-unreserved so it survives in a query
+# string verbatim. Only add a [placeholder] table if a service's key format
+# must be matched.

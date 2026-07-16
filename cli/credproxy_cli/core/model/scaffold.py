@@ -183,7 +183,7 @@ api           = 1            # primitive-API version the script targets
 family        = "sign"       # compute auth material on every request
                             #   (use "substitute" to swap an inert placeholder)
 slots         = ["key"]      # named secret inputs; bind each with --secret slot=REF
-location_kind = "header"     # "header" or "body"
+location_kind = "header"     # "header", "body" or "query"
 """,
     "substitute": """\
 # credproxy scripted injector: {name}  (custom injection logic in Starlark)
@@ -200,7 +200,7 @@ api           = 1            # primitive-API version the script targets
 family        = "substitute" # swap an inert placeholder for the real value
                             #   (use "sign" to compute auth material instead)
 slots         = ["value"]    # the single secret; bind with --secret REF
-location_kind = "header"     # "header" or "body"
+location_kind = "header"     # "header", "body" or "query"
 """,
 }
 
@@ -236,7 +236,7 @@ Manifest fields (a TOML injector; generate with `injector scaffold NAME --script
                                 #   placeholder); substitute: swap an inert
                                 #   placeholder the workspace holds for the value
   slots         = ["key"]       # named secret inputs; bind with --secret slot=REF
-  location_kind = "header"      # "header" or "body"
+  location_kind = "header"      # "header", "body" or "query"
 
 Script (.star) contract and primitives:
 """

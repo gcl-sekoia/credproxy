@@ -45,6 +45,11 @@ def _bearer_binding(host, placeholder, real):
             "placeholder": placeholder}
 
 
+def _query_binding(host, placeholder, real):
+    return {"name": "b", "hosts": [host], "scheme": "query", "params": {},
+            "secret": {"value": real}, "placeholder": placeholder}
+
+
 def _records(out, kind=None):
     """The proxy's structured `credproxy {json}` records from captured stdout,
     optionally filtered by `kind` (see proxy/log.py)."""
@@ -465,6 +470,15 @@ def test_rule_script_cannot_use_crypto_primitive():
                              "def on_request():\n    x = hmac_sha256('a', 'b')\n")])
 
 
+def test_rule_script_cannot_use_req_set_path():
+    """A URL rewrite is an injection-tier capability, not a rule one: req_set_path
+    is absent from the rule primitive set, so a rule referencing it fails to
+    compile."""
+    with pytest.raises(ConfigError, match="req_set_path"):
+        _creds([_script_rule("s",
+                             "def on_request():\n    req_set_path('/x')\n")])
+
+
 # ---- audit ------------------------------------------------------------------
 
 def test_hidden_rule_hit_is_audited(capsys):
@@ -787,3 +801,32 @@ def test_no_inject_names_binding_and_reason(capsys):
     ni2 = [e for e in _records(capsys.readouterr().out)
            if e.get("kind") == "audit" and e["event"] == "no-inject"]
     assert ni2 and "did not match" in ni2[0]["reason"]
+
+
+def test_no_inject_query_reason(capsys):
+    # A query binding whose placeholder isn't in the query string audits with the
+    # query-specific decline reason (not the generic 'not eligible').
+    creds = _creds([], bindings=[_query_binding("api.github.com", "PH", "REAL")])
+    log = addon.HostnameLogger(_state(creds))
+    log.request(_flow(path="/x?key=WRONG"))
+    ni = [e for e in _records(capsys.readouterr().out)
+          if e.get("kind") == "audit" and e["event"] == "no-inject"]
+    assert ni and "query string" in ni[0]["reason"]
+
+
+def test_response_rule_cannot_read_injected_query_secret(capsys):
+    """The security invariant with query injection: a response-phase rule script
+    reads the request line the WORKSPACE sent (placeholder), never the live path
+    the query scheme injected the real key into. A rule that echoes req_path()
+    into the response body must not leak the key."""
+    creds = _creds(
+        [_script_rule("echo", "def on_response():\n"
+                              "    resp_set_body(req_path())\n")],
+        bindings=[_query_binding("api.github.com", "PH", "REALKEY")])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow(path="/search?key=PH", resp=True)
+    log.request(flow)
+    assert flow.request.path == "/search?key=REALKEY"    # injected upstream
+    log.response(flow)
+    assert "REALKEY" not in flow.response.text
+    assert "PH" in flow.response.text                    # saw the placeholder path

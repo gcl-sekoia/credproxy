@@ -1034,6 +1034,29 @@ def test_render_binding_block_writes_env_false(xdg):
     assert parsed.env_suppressed is True and parsed.env is None
 
 
+def test_binding_add_query_injector(xdg, workspaces_dir):
+    """`binding add --injector query` lands a query-scheme binding with a minted
+    placeholder (the Shodan `?key=…` case) and resolves to the query scheme."""
+    from test_porcelain import _run
+    ws = _write_ws(workspaces_dir, "shodan", 'image = "x"\n')
+    ec, out, err = _run(["workspace", "shodan", "binding", "add",
+                         "--injector", "query", "--provider", "env",
+                         "--secret", "SHODAN_API_KEY", "--host", "api.shodan.io",
+                         "--env", "SHODAN_API_KEY"])
+    assert ec == 0, err
+    import tomllib
+    raw = tomllib.loads(ws.config_path.read_text())
+    assert raw["binding"][0]["injector"] == "query"
+
+    from credproxy_cli.core.model.resolver import resolve_workspace
+    from credproxy_cli.core.model.bindings import wire_config
+    r = resolve_workspace(ws)
+    b = r.bindings[0]
+    assert b.placeholder and b.placeholder.startswith("credproxy_")
+    result = wire_config([b], fetch_many=lambda p, refs: {x: "REALKEY" for x in refs})
+    assert result["bindings"][0]["scheme"] == "query"
+
+
 def test_binding_add_no_env_writes_env_false(xdg, workspaces_dir):
     """`binding add --no-env` records `env = false` in the TOML."""
     from test_porcelain import _run

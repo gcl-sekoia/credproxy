@@ -45,6 +45,9 @@ response is already sealed into a placeholder before any rule sees it.
 **Consequence: rule code — declarative or script — never observes a real
 credential.** It sees inert placeholders on the request side and exactly what the
 workspace would see on the response side. Rules add no new exfiltration surface.
+One case is worth naming: a `query` binding injects the real key into the request
+line, so a response-phase `req_path()` returns the target as the workspace sent
+it (the pre-injection snapshot), never the injected key.
 
 Evaluation is strict declaration order: `rewrite` actions apply cumulatively; the
 first terminal action (`block`/`respond`, or a `script` that calls one)

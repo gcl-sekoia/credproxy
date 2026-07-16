@@ -47,8 +47,9 @@ def _decline_reason(t, req) -> str:
     no-inject audit event (#15). Distinguishes the two common misconfigs -- the
     expected header absent vs present-but-placeholder/format-mismatch (e.g. the
     token in a different header than `params` expects, or the placeholder not
-    matching); a body scheme's placeholder not in the body; and the sign family
-    (no placeholder) as 'not eligible'. Reads only header PRESENCE, never a value."""
+    matching); a body scheme's placeholder not in the body; a query scheme's
+    placeholder not in the query string; and the sign family (no placeholder) as
+    'not eligible'. Reads only header PRESENCE, never a value."""
     scheme = t.scheme
     if getattr(scheme, "family", None) == "substitute" and t.placeholder:
         if scheme.location_kind == "header":
@@ -58,6 +59,8 @@ def _decline_reason(t, req) -> str:
                     if present else f"{header} header absent")
         if scheme.location_kind == "body":
             return "placeholder not found in request body"
+        if scheme.location_kind == "query":
+            return "placeholder not found in query string"
     return "request not eligible (no re-signable material / no placeholder)"
 
 
@@ -121,6 +124,12 @@ class HostnameLogger:
             # this single check covers the clean block/respond path AND the 502.
             flow.metadata["credproxy_rule_terminated"] = True
             return
+
+        # Snapshot the as-sent target before injection mutates the request line
+        # (a query scheme, or a script via req_set_path), so response-phase reads
+        # get the placeholder-bearing path, never the injected secret -- see
+        # ResponseCtx.request_path for the leak this closes.
+        flow.metadata["credproxy_pre_inject_path"] = req.path
 
         applied: list[str] = []
         fired: list = []  # the request-time Transform objects whose on_request fired

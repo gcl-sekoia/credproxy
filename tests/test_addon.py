@@ -13,7 +13,7 @@ from config import Transform
 
 def _t(scheme, placeholder, real, *, header="Authorization", name="b"):
     """Build a Transform for `scheme` with a single `value` secret slot."""
-    params = {} if scheme == "body" else {"header": header}
+    params = {} if scheme in ("body", "query") else {"header": header}
     return Transform(name, schemes.SCHEMES[scheme], params, placeholder,
                      {"value": real})
 
@@ -157,6 +157,55 @@ def test_request_non_intercepted_host_no_change():
     flow = make_flow(host="example.com", headers={"Authorization": "Bearer PH"})
     log.request(flow)
     assert flow.request.headers["Authorization"] == "Bearer PH"
+
+
+# ---- request: query-string substitution ----
+
+def test_request_query_substitutes_placeholder():
+    log = addon.HostnameLogger(make_state({
+        "api.github.com": [_t("query", "PH", "REAL")]
+    }))
+    flow = make_flow(path="/search?key=PH&q=x")
+    log.request(flow)
+    assert flow.request.path == "/search?key=REAL&q=x"
+
+
+def test_request_query_percent_encodes_secret():
+    """A key with URL metacharacters is percent-encoded on insertion, else it
+    would corrupt request-line parsing."""
+    log = addon.HostnameLogger(make_state({
+        "api.github.com": [_t("query", "PH", "a&b c")]
+    }))
+    flow = make_flow(path="/x?key=PH")
+    log.request(flow)
+    assert flow.request.path == "/x?key=a%26b%20c"
+
+
+def test_request_query_leaves_path_placeholder_untouched():
+    """The swap is scoped to the query portion: a placeholder-shaped substring
+    in the path is not a credential slot and stays put."""
+    log = addon.HostnameLogger(make_state({
+        "api.github.com": [_t("query", "PH", "REAL")]
+    }))
+    flow = make_flow(path="/PH?x=1")
+    log.request(flow)
+    assert flow.request.path == "/PH?x=1"
+
+
+def test_request_query_snapshot_hides_injected_secret_from_response_read():
+    """After injection the live request.path carries the real key; a response-
+    phase read (re-seal script, or an inheriting rule via RuleResponseCtx) must
+    see the pre-injection snapshot, so the secret can't be echoed to the
+    workspace."""
+    log = addon.HostnameLogger(make_state({
+        "api.github.com": [_t("query", "PH", "REAL")]
+    }))
+    flow = make_flow(path="/token?key=PH")
+    log.request(flow)
+    assert flow.request.path == "/token?key=REAL"        # injected on the wire
+    rc = schemes.ResponseCtx(flow, {}, {}, None)
+    assert rc.request_path == "/token?key=PH"            # snapshot, not the key
+    assert "REAL" not in rc.request_path
 
 
 # ---- glob host patterns through the addon (real BindingCredentials) ----

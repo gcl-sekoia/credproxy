@@ -314,8 +314,8 @@ def _build_scripted_scheme(entry: dict, source: str, where: str):
             or not all(isinstance(s, str) and s for s in slots):
         _fail(f"{source}: {where}.slots must be a non-empty array of strings")
     location_kind = entry.get("location_kind", "header")
-    if location_kind not in ("header", "body"):
-        _fail(f"{source}: {where}.location_kind must be 'header' or 'body'")
+    if location_kind not in ("header", "body", "query"):
+        _fail(f"{source}: {where}.location_kind must be 'header', 'body' or 'query'")
     header_default = entry.get("header_default")
     if header_default is not None and not isinstance(header_default, str):
         _fail(f"{source}: {where}.header_default must be a string or null")

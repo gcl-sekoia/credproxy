@@ -15,7 +15,10 @@ credential and a rewrite happens before sigv4 signs. Response rules run AFTER
 re-seal, so a token-endpoint response is already sealed into a placeholder before
 any user rule sees it. Consequence: rule code -- declarative or script -- never
 observes a real credential. It sees inert placeholders on the request side and
-exactly what the workspace would see on the response side.
+exactly what the workspace would see on the response side. The one path that is
+NOT automatic: a `query` scheme injects the real key into the request line, so a
+response-phase `req_path()` reads the pre-injection snapshot (ResponseCtx.
+request_path), never the live injected target.
 
 Matching is hostname + optional method + optional path glob. Host globs reuse
 `hostmatch` verbatim (dot-spanning `*`, host-only). Path globs are fnmatch-
