@@ -60,15 +60,24 @@ def main():
     elif op == "help":
         json.dump({"help": HELP}, sys.stdout)
     elif op == "get":
-        values = {}
+        # Partial-failure aware: a per-ref not-found goes into `errors` (which ref,
+        # and why) instead of aborting the batch, so one missing secret doesn't mask
+        # the ones that resolved. A Missing (backend) failure is total -> aborts.
+        values, errors = {}, {}
         try:
             for ref in req.get("secrets") or []:
-                values[ref] = get(ref)
-        except NotFound as e:
-            _fail(str(e), 2)
+                try:
+                    values[ref] = get(ref)
+                except NotFound as e:
+                    errors[ref] = str(e)
         except Missing as e:
             _fail(str(e), 1)
-        json.dump({"values": values}, sys.stdout)
+        resp = {"values": values}
+        if errors:
+            resp["errors"] = errors
+        json.dump(resp, sys.stdout)
+        if errors:
+            sys.exit(2)
     else:
         _fail("unsupported op", 3)
 

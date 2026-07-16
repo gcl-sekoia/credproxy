@@ -51,7 +51,9 @@ def test_op_found(fake_op):
 def test_op_not_found(fake_op):
     r = _run({"version": 1, "op": "get", "secrets": ["op://x/y/z"]})
     assert r.returncode == 2
-    assert "could not read" in r.stderr
+    # The per-ref reason now travels in the response `errors` map (so a batch can
+    # name which ref failed), not stderr.
+    assert "could not read" in json.loads(r.stdout)["errors"]["op://x/y/z"]
 
 
 def test_op_missing_binary_exits_1(tmp_path, monkeypatch):

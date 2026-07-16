@@ -170,6 +170,62 @@ def test_fetch_exit2_not_found(xdg):
         fetch("notfound_prov", "mysecret")
 
 
+def test_fetch_exit2_errors_map_names_only_failed(xdg):
+    """A provider that returns a partial body with an `errors` map on exit 2 ->
+    the CLI names exactly the failed ref (+reason), not the whole batch."""
+    d = _user_providers(xdg)
+    _make_provider(d, "errmap_prov", """\
+        #!/bin/sh
+        echo '{"values": {"AAA": "x"}, "errors": {"BBB": "no such thing"}}'
+        exit 2
+    """)
+
+    from credproxy_cli.core.errors import ProviderError
+    from credproxy_cli.core.providers import fetch_many
+
+    with pytest.raises(ProviderError) as ei:
+        fetch_many("errmap_prov", ["AAA", "BBB"])
+    msg = str(ei.value)
+    assert "BBB" in msg and "no such thing" in msg
+    assert "AAA" not in msg
+
+
+def test_fetch_exit2_partial_values_names_only_missing(xdg):
+    """A provider that omits the unresolved ref from `values` on exit 2 (no
+    `errors` map) still gets precise attribution via the missing key."""
+    d = _user_providers(xdg)
+    _make_provider(d, "partial2_prov", """\
+        #!/bin/sh
+        echo '{"values": {"AAA": "x"}}'
+        exit 2
+    """)
+
+    from credproxy_cli.core.errors import ProviderError
+    from credproxy_cli.core.providers import fetch_many
+
+    with pytest.raises(ProviderError) as ei:
+        fetch_many("partial2_prov", ["AAA", "BBB"])
+    msg = str(ei.value)
+    assert "BBB" in msg
+    assert "AAA" not in msg
+
+
+def test_fetch_exit2_empty_body_falls_back_to_full_batch(xdg):
+    """A provider that returns nothing on exit 2 -> the CLI falls back to blaming
+    the batch (the old behavior, still correct for a single ref)."""
+    d = _user_providers(xdg)
+    _make_provider(d, "silent2_prov", """\
+        #!/bin/sh
+        exit 2
+    """)
+
+    from credproxy_cli.core.errors import ProviderError
+    from credproxy_cli.core.providers import fetch_many
+
+    with pytest.raises(ProviderError, match="'AAA', 'BBB'"):
+        fetch_many("silent2_prov", ["AAA", "BBB"])
+
+
 def test_fetch_exit3_unsupported(xdg):
     """Exit code 3 -> ProviderError about unsupported op/version."""
     d = _user_providers(xdg)
@@ -339,6 +395,24 @@ def test_builtin_bw_provider_missing_item_exit2(xdg, monkeypatch, tmp_path):
     from credproxy_cli.core.providers import fetch
     with pytest.raises(ProviderError, match="not found"):
         fetch("bw", "ghost")
+
+
+def test_builtin_bw_provider_partial_batch_blames_only_missing(xdg, monkeypatch, tmp_path):
+    """A batch where ONE ref is missing must name only that ref -- not blame the
+    whole batch (the reported bug: one missing secret said all failed)."""
+    fake_bin, _ = _fake_bw(tmp_path, [{"id": "id-gh", "name": "github",
+                                       "login": {"password": "ghp_tok"}, "fields": []}])
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("BW_SESSION", raising=False)
+    monkeypatch.setenv("BITWARDENCLI_APPDATA_DIR", str(tmp_path / "no-vault"))
+
+    from credproxy_cli.core.errors import ProviderError
+    from credproxy_cli.core.providers import fetch_many
+    with pytest.raises(ProviderError) as ei:
+        fetch_many("bw", ["github", "ghost"])
+    msg = str(ei.value)
+    assert "ghost" in msg          # the missing ref is named
+    assert "github" not in msg     # the resolved ref is NOT blamed
 
 
 def test_builtin_bw_provider_argon2_no_session_falls_back_to_cli(xdg, monkeypatch, tmp_path):

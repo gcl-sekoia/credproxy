@@ -208,6 +208,35 @@ def _tail(text: str, lines: int = 5) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
+def _notfound_message(
+    provider_name: str, stdout: str | None, refs: list[str], refs_label: str
+) -> str:
+    """Attribute an exit-2 (not found) to the SPECIFIC ref(s) that failed, not the
+    whole batch. Because the CLI batches every binding on a provider into one
+    invocation, blaming all refs when one is missing is actively misleading. A
+    provider MAY return a partial body on exit 2 -- an `errors` map (ref->reason)
+    and/or the `values` it did resolve -- so we name exactly what failed (with the
+    provider's reason when given). Falls back to the full batch label for a
+    provider that returns nothing on exit 2 (the old behavior, still correct when
+    the batch is a single ref)."""
+    try:
+        payload = json.loads(stdout or "")
+    except (json.JSONDecodeError, TypeError):
+        payload = None
+    if isinstance(payload, dict):
+        errors = payload.get("errors")
+        if isinstance(errors, dict) and errors:
+            detail = "; ".join(f"'{r}': {msg}" for r, msg in errors.items())
+            return f"provider '{provider_name}': secret(s) not found -- {detail}"
+        values = payload.get("values")
+        if isinstance(values, dict):
+            missing = [r for r in refs if r not in values]
+            if missing:
+                label = ", ".join(f"'{r}'" for r in missing)
+                return f"provider '{provider_name}': secret(s) {label} not found"
+    return f"provider '{provider_name}': secret(s) {refs_label} not found"
+
+
 def fetch_many(provider_name: str, refs: list[str]) -> dict[str, str]:
     """Exec the named provider once with a batch `get` request and return the
     ref->value map.
@@ -255,7 +284,7 @@ def fetch_many(provider_name: str, refs: list[str]) -> dict[str, str]:
 
     if proc.returncode == EXIT_NOT_FOUND:
         raise ProviderError(
-            f"provider '{provider_name}': secret(s) {refs_label} not found"
+            _notfound_message(provider_name, proc.stdout, refs, refs_label)
         )
     if proc.returncode == EXIT_UNSUPPORTED:
         raise ProviderError(
