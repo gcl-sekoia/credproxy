@@ -39,6 +39,32 @@ singleton — the highest-priority overlay's wins). The rest of what it ships ar
 - **`session-context.d/example.sh`** — an inert copy-me SessionStart fragment; edit it and
   uncomment its mount in the template to add project orientation (the `claude-code` pack's
   hook concatenates every `/opt/session-context.d/*.sh`).
+- **`skills/suggesting-bindings/`** — a Claude Code **skill** the base `claude-code` pack
+  installs into `$CLAUDE_CONFIG_DIR/skills/` (the *profile-supplies-the-asset, base-supplies-
+  the-mechanism* style, same as the agent defs). It teaches a workspace agent to suggest
+  copy-pasteable `[[binding]]` blocks for credentials it needs — see *Keeping the skill
+  fresh* below.
+
+## Keeping the `suggesting-bindings` skill fresh
+
+The skill is **agent-facing and auto-invoked**, and it **hardcodes** the binding
+model: the builtin injector catalog, the provider list, the `binding`/`pack` CLI
+command surface, and the `[[binding]]`/`[[pack]]` TOML shape. None of that is
+derived at runtime, so when any of it evolves the skill drifts *silently* and
+starts handing agents wrong suggestions.
+
+**When you change the binding/injector/provider set, the `binding`/`pack` CLI
+flags, the config/TOML syntax, or the host-pattern rules — update the skill in the
+same change** (`skills/suggesting-bindings/SKILL.md` + `references/injectors.md`),
+exactly as you would update `docs/` and the tests. This matters most on an
+**upstream sync**: a rebase that pulls in a new injector, a renamed flag, or a
+config-shape change must carry the skill forward too.
+
+`tests/test_skill.py` is the tripwire for the mechanical half — it fails if a
+builtin injector or provider isn't mentioned in the skill (so adding/renaming one
+upstream breaks the overlay suite until the skill is updated). It can't catch
+CLI-flag or TOML-syntax drift, though — that half is on you, which is why it's
+called out here.
 
 ## Override styles it demonstrates
 

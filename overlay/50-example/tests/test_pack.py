@@ -21,6 +21,19 @@ def test_oracle_agent_ships_via_the_profile_template():
     assert "name: oracle" in text and "model: fable" in text
 
 
+def test_bindings_helper_skill_ships_via_the_profile_template():
+    # The profile's template mounts the skill DIRECTORY where claude-code-setup.sh
+    # installs it ($CLAUDE_CONFIG_DIR/skills/); base ships no skills, only the mechanism.
+    data = tomllib.loads(resolve_singleton("workspace.template.toml").read_text())
+    sources = [m.get("overlay") for m in data.get("mounts", [])]
+    assert "skills/suggesting-bindings" in sources
+    # The source resolves to a real skill directory with a SKILL.md carrying frontmatter.
+    import os
+    skill_dir = _overlay_source("skills/suggesting-bindings", "test")
+    text = open(os.path.join(skill_dir, "SKILL.md")).read()
+    assert "name: suggesting-bindings" in text and "[[binding]]" in text
+
+
 def test_persist_resolves_from_this_overlay():
     assert load_pack_sources().get("persist") == "overlay:50-example"
 

@@ -1,11 +1,14 @@
 #!/bin/bash
 # Claude Code client config (part of the claude-code pack):
 #   1. skip interactive onboarding when a non-interactive token is present,
-#   2. apply baseline settings defaults (from $CLAUDE_CODE_DEFAULTS), and
+#   2. apply baseline settings defaults (from $CLAUDE_CODE_DEFAULTS),
 #   3. install shipped agent manifests (from $CLAUDE_CODE_AGENTS_DIR) into the
-#      config's agents/ dir.
-# Both the defaults and the agents are data (a profile mounts them — edit/shadow
-# to change policy; no logic here); base ships neither, only this mechanism.
+#      config's agents/ dir, and
+#   4. install shipped skills (from $CLAUDE_CODE_SKILLS_DIR) into the config's
+#      skills/ dir.
+# The defaults, agents, and skills are all data (a profile mounts them —
+# edit/shadow to change policy; no logic here); base ships none of them, only
+# these mechanisms.
 # Idempotent; run by the claude-code pack's [[setup]] step, as the workspace user.
 set -euo pipefail
 
@@ -48,5 +51,24 @@ if [ -d "$AGENTS_DIR" ]; then
         [ -e "$a" ] || continue                        # empty dir -> nothing shipped
         cp "$a" "$agents_dest/" \
             || { echo "claude-code: failed to install agent $(basename "$a")" >&2; exit 1; }
+    done
+fi
+
+# 4. Skills: install every shipped skill into the config's skills/ dir. A skill is
+#    a DIRECTORY (SKILL.md + optional references/scripts), unlike a single-file
+#    agent, so each entry under skills.d/ is a subdir copied wholesale. Mounted
+#    read-only (a profile ships them), so copy to land editable, config-dir-resolved
+#    files. The shipped copy is replaced each run (the overlay is the source of
+#    truth for those names); a user-authored skill of another name is untouched.
+SKILLS_DIR="${CLAUDE_CODE_SKILLS_DIR:-/opt/claude-code/skills.d}"
+if [ -d "$SKILLS_DIR" ]; then
+    skills_dest="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"
+    mkdir -p "$skills_dest"
+    for s in "$SKILLS_DIR"/*/; do
+        [ -d "$s" ] || continue                        # empty dir -> nothing shipped
+        name="$(basename "$s")"
+        rm -rf "$skills_dest/$name"                     # replace the shipped copy wholesale
+        cp -r "$s" "$skills_dest/$name" \
+            || { echo "claude-code: failed to install skill $name" >&2; exit 1; }
     done
 fi

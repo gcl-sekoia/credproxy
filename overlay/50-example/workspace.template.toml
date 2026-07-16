@@ -40,6 +40,8 @@ mounts = [
   # claude-code: agent defs the pack installs into $CLAUDE_CONFIG_DIR/agents/ (one per file).
   { overlay = "agents/oracle.md", target = "/opt/claude-code/agents.d/oracle.md" },
   { overlay = "agents/sol.md", target = "/opt/claude-code/agents.d/sol.md" },
+  # claude-code: skills the pack installs into $CLAUDE_CONFIG_DIR/skills/ (one dir per skill).
+  { overlay = "skills/suggesting-bindings", target = "/opt/claude-code/skills.d/suggesting-bindings" },
   # claude-code session context: profile note (copy-me) — edit session-context.d/example.sh,
   # then uncomment (claude-code's hook concatenates every /opt/session-context.d/*.sh):
   # { overlay = "session-context.d/example.sh", target = "/opt/session-context.d/30-example.sh" },

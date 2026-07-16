@@ -24,8 +24,10 @@ hosts    = ["api.anthropic.com"]
 env      = "CLAUDE_CODE_OAUTH_TOKEN"
 
 # Client config: skip onboarding (uses the token above), merge settings-defaults,
-# and install any agent manifests a profile mounts at /opt/claude-code/agents.d/*.md
-# into $CLAUDE_CONFIG_DIR/agents/ (base ships none; 50-example ships the oracle).
+# install any agent manifests a profile mounts at /opt/claude-code/agents.d/*.md
+# into $CLAUDE_CONFIG_DIR/agents/, and install any skills a profile mounts as
+# directories under /opt/claude-code/skills.d/*/ into $CLAUDE_CONFIG_DIR/skills/
+# (base ships neither; 50-example ships the oracle agent + a bindings-helper skill).
 [[mount]]
 overlay = "setup.d/claude-code-setup.sh"
 target  = "/opt/claude-code-setup.sh"
