@@ -1,0 +1,55 @@
+# credproxy injector: gcp-sa-jwt
+#
+# Google Cloud service-account *self-signed JWT* auth. On every intercepted
+# request the proxy mints a fresh RS256 JWT from the SA's private key and sets
+# `Authorization: Bearer <jwt>`. This is the "direct" SA auth path google-auth
+# uses when you hand it an SA key and a REST transport: there is NO token
+# exchange with an OAuth endpoint — the signed JWT IS the credential — so the
+# only host contacted is the API itself, and the SA private key never enters the
+# workspace.
+#
+# Contrast the `gcloud` pack/provider, which mints a short-lived OAuth2 *access
+# token* on the host and swaps it in as a plain `bearer`. Use THIS when you hold
+# a raw SA key (no gcloud login) and want the key kept host-side while the proxy
+# does the signing.
+#
+# THREE slots, all sourced from the SA key JSON (`private_key`, `private_key_id`,
+# `client_email`) — they belong together, so they live at the provider, not baked
+# into this file, and the injector stays reusable across service accounts:
+#
+#   private_key   -> the PEM (PKCS#8/PKCS#1) RSA private key            (SA JSON: private_key)
+#   key_id        -> the JOSE header `kid`; MUST equal the SA key id    (SA JSON: private_key_id)
+#                    or Google can't select the public key to verify with
+#   client_email  -> the JWT `iss`/`sub` claims                         (SA JSON: client_email)
+#
+# The audience (`aud`) is the service root; by default it is derived per request
+# as `https://<host>/`, so one binding on `*.googleapis.com` mints the right
+# audience for every service. Pin `aud` in [params] only for an API whose
+# audience is not its own host root.
+#
+# Bind it (or use the `gcp-sa-jwt` pack, which wires the same three slots):
+#
+#   credproxy workspace NAME binding add \
+#       --injector gcp-sa-jwt --provider env \
+#       --secret private_key=GCP_SA_PRIVATE_KEY \
+#       --secret key_id=GCP_SA_KEY_ID \
+#       --secret client_email=GCP_SA_CLIENT_EMAIL \
+#       --host '*.googleapis.com'
+#
+# WORKSPACE SIDE: the client must send an *unauthenticated* REST request for the
+# proxy to stamp — build the Google client with `transport="rest"` and
+# `credentials=AnonymousCredentials()` (gate that behind a dev-only flag; the
+# gRPC default can't be header-injected, and letting the client sign in-process
+# would keep the key in the container). See docs/reference/injectors.md.
+
+scheme        = "script"
+script        = "gcp-sa-jwt"
+api           = 1
+family        = "sign"                 # the private key never transits the wire
+slots         = ["private_key", "key_id", "client_email"]
+location_kind = "header"
+
+[params]
+# aud = ""     # empty (default) -> derive https://<host>/ per request; pin only
+#              # for an API whose audience isn't its own host root.
+ttl = "3600"   # JWT lifetime in seconds (GCP caps SA JWTs at 3600)
