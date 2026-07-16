@@ -1,0 +1,18 @@
+# credproxy injector: x-auth-token
+#
+# A bearer token sent BARE in the `X-Auth-Token` header (no scheme prefix) — the
+# convention Scaleway and OpenStack/Keystone use. The `bearer` scheme
+# substring-swaps the inert placeholder inside whatever header it targets, so
+# this is just `bearer` retargeted from Authorization to X-Auth-Token. It holds
+# no service-specific logic (unlike, say, `ovh`), so it's named for the header it
+# fills, not any one service; the service identity lives on the binding (its
+# name, hosts, and env var).
+#
+# No custom placeholder: the default credproxy_ sentinel is used. Some of these
+# keys are UUID-shaped (Scaleway's are) — if an SDK validates the format before
+# sending, set a UUID-shaped `placeholder` on the binding.
+
+scheme = "bearer"               # substring-swap the placeholder in a header
+
+[params]
+header = "X-Auth-Token"
