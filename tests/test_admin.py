@@ -1058,3 +1058,138 @@ async def test_llms_txt_covers_schemes_and_network_limits(aiohttp_client, app):
                    # commands, breaking a literal copy-paste.
                    'eval "$(curl -s http://proxy.local/exports.sh)"'):
         assert anchor in txt, anchor
+
+
+# ---- /admin/config/patch: surgical single-binding refresh -------------------
+
+
+_TWO_BINDING_CONFIG = {
+    "bindings": [
+        {"name": "a", "hosts": ["api.a.com"], "scheme": "bearer",
+         "params": {"header": "Authorization"}, "placeholder": "PH_A",
+         "secret": {"value": "a_v1"}, "env": "A_TOK"},
+        {"name": "b", "hosts": ["api.b.com"], "scheme": "bearer",
+         "params": {"header": "Authorization"}, "placeholder": "PH_B",
+         "secret": {"value": "b_v1"}, "env": "B_TOK"},
+    ],
+    "fingerprint": "fp-1",
+}
+
+
+async def _push(client, body):
+    return await client.post(
+        "/admin/config", headers={"Authorization": "Bearer established"}, json=body)
+
+
+async def _patch(client, body):
+    return await client.post(
+        "/admin/config/patch",
+        headers={"Authorization": "Bearer established"}, json=body)
+
+
+async def test_patch_refreshes_one_binding_bumps_generation(
+        aiohttp_client, app, state):
+    client = await aiohttp_client(app)
+    assert (await _push(client, _TWO_BINDING_CONFIG)).status == 200
+    assert state.generation == 1
+
+    resp = await _patch(client, {"bindings": [
+        {"name": "b", "hosts": ["api.b.com"], "scheme": "bearer",
+         "params": {"header": "Authorization"}, "placeholder": "PH_B",
+         "secret": {"value": "b_v2"}, "env": "B_TOK"}]})
+    assert resp.status == 200
+    payload = await resp.json()
+    assert payload["ok"] and payload["generation"] == 2
+    assert payload["patched"] == ["b"]
+    assert state.generation == 2
+
+    # The held config now has b's new value; a is untouched.
+    persisted = json.loads(admin.CONFIG_PATH.read_text())
+    by_name = {x["name"]: x for x in persisted["bindings"]}
+    assert by_name["b"]["secret"]["value"] == "b_v2"
+    assert by_name["a"]["secret"]["value"] == "a_v1"
+
+
+async def test_patch_preserves_unpatched_bindings_in_live_creds(
+        aiohttp_client, app, state):
+    client = await aiohttp_client(app)
+    await _push(client, _TWO_BINDING_CONFIG)
+    await _patch(client, {"bindings": [
+        {"name": "a", "hosts": ["api.a.com"], "scheme": "bearer",
+         "params": {"header": "Authorization"}, "placeholder": "PH_A",
+         "secret": {"value": "a_v2"}, "env": "A_TOK"}]})
+    # Both bindings still intercept their hosts (the swap validated the whole set).
+    assert state.creds.intercepts("api.a.com")
+    assert state.creds.intercepts("api.b.com")
+
+
+async def test_patch_carries_fingerprint(aiohttp_client, app, state):
+    client = await aiohttp_client(app)
+    await _push(client, _TWO_BINDING_CONFIG)
+    await _patch(client, {"bindings": [
+        {"name": "a", "hosts": ["api.a.com"], "scheme": "bearer",
+         "params": {"header": "Authorization"}, "placeholder": "PH_A",
+         "secret": {"value": "a_v2"}, "env": "A_TOK"}], "fingerprint": "fp-2"})
+    persisted = json.loads(admin.CONFIG_PATH.read_text())
+    assert persisted["fingerprint"] == "fp-2"
+
+
+async def test_patch_unchanged_fingerprint_when_omitted(aiohttp_client, app, state):
+    client = await aiohttp_client(app)
+    await _push(client, _TWO_BINDING_CONFIG)
+    await _patch(client, {"bindings": [
+        {"name": "a", "hosts": ["api.a.com"], "scheme": "bearer",
+         "params": {"header": "Authorization"}, "placeholder": "PH_A",
+         "secret": {"value": "a_v2"}, "env": "A_TOK"}]})
+    persisted = json.loads(admin.CONFIG_PATH.read_text())
+    assert persisted["fingerprint"] == "fp-1"   # preserved from the last push
+
+
+async def test_patch_unknown_binding_rejected(aiohttp_client, app, state):
+    client = await aiohttp_client(app)
+    await _push(client, _TWO_BINDING_CONFIG)
+    resp = await _patch(client, {"bindings": [
+        {"name": "ghost", "hosts": ["api.x.com"], "scheme": "bearer",
+         "params": {"header": "Authorization"}, "placeholder": "PH_X",
+         "secret": {"value": "v"}}]})
+    assert resp.status == 400
+    assert "ghost" in (await resp.json())["error"]
+    assert state.generation == 1   # untouched
+
+
+async def test_patch_with_no_config_loaded_409(aiohttp_client, app, state):
+    client = await aiohttp_client(app)
+    resp = await _patch(client, {"bindings": [
+        {"name": "a", "hosts": ["api.a.com"], "scheme": "bearer",
+         "params": {"header": "Authorization"}, "placeholder": "PH_A",
+         "secret": {"value": "v"}}]})
+    assert resp.status == 409
+
+
+async def test_patch_empty_bindings_400(aiohttp_client, app, state):
+    client = await aiohttp_client(app)
+    await _push(client, _TWO_BINDING_CONFIG)
+    resp = await _patch(client, {"bindings": []})
+    assert resp.status == 400
+
+
+async def test_patch_requires_token(aiohttp_client, app, state):
+    client = await aiohttp_client(app)
+    await _push(client, _TWO_BINDING_CONFIG)
+    resp = await client.post("/admin/config/patch", json={"bindings": []})
+    assert resp.status == 401
+
+
+async def test_patch_invalid_config_does_not_overwrite(aiohttp_client, app, state):
+    """A patch that produces an invalid merged config is rejected and leaves the
+    live creds + generation untouched (fail-closed, same as a full push)."""
+    client = await aiohttp_client(app)
+    await _push(client, _TWO_BINDING_CONFIG)
+    # Overlap 'a' onto b's host+header with a substring placeholder collision would
+    # be rejected; simplest: a malformed scheme.
+    resp = await _patch(client, {"bindings": [
+        {"name": "a", "hosts": ["api.a.com"], "scheme": "no-such-scheme",
+         "params": {}, "placeholder": "PH_A", "secret": {"value": "v"}}]})
+    assert resp.status == 400
+    assert state.generation == 1
+    assert state.creds.intercepts("api.a.com")

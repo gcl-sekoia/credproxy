@@ -7,7 +7,7 @@ import sys
 
 from ..core.errors import CredproxyError
 from . import render
-from .render import fail
+from .render import fail, say
 from .common import Ctx, _resolve_ws, _require_exists
 
 
@@ -105,6 +105,10 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
             placeholder=placeholder,
             env=env,
             env_suppressed=env_suppressed,
+            # --required-for-setup implies --manual (it's a modifier on a manual
+            # binding); the model would otherwise reject the mismatch.
+            manual=a.manual or a.required_for_setup,
+            required_for_setup=a.required_for_setup,
         )
         core_bindings.validate(existing + [binding], str(ws.config_path))
 
@@ -141,6 +145,8 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         "hosts": list(binding.hosts),
         "placeholder": placeholder,
         "env": env,
+        "manual": binding.manual,
+        "required_for_setup": binding.required_for_setup,
     }, attached=core_config.quick_attach(ws))
 
 
@@ -158,6 +164,7 @@ def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None
 
 
 def do_binding_list(ctx: Ctx, name: str | None) -> None:
+    from ..core.engine.containers import _load_applied_active
     from ..core.model.resolver import resolve_workspace
 
     ws = _resolve_ws(ctx, name)
@@ -166,6 +173,7 @@ def do_binding_list(ctx: Ctx, name: str | None) -> None:
     # not-yet-persisted placeholder is ephemeral until start/push/add/test mints
     # it into the lock).
     bindings = resolve_workspace(ws).bindings
+    active = _load_applied_active(ws)
     rows = [
         {
             "name": b.name,
@@ -175,10 +183,49 @@ def do_binding_list(ctx: Ctx, name: str | None) -> None:
             "hosts": list(b.hosts),
             "placeholder": b.placeholder,
             "env": b.env,
+            "manual": b.manual,
+            # A manual binding is active iff tracked in applied.active; an
+            # always-on binding is always active.
+            "active": (not b.manual) or (b.name in active),
         }
         for b in bindings
     ]
     render.OUT.binding_list(ws.name, rows)
+
+
+def do_binding_activate(ctx: Ctx, name: str | None, a: argparse.Namespace,
+                        *, activate: bool) -> None:
+    """Activate (or deactivate) on-demand `manual` bindings by name and re-push.
+
+    The proxy holds the effect only in its tmpfs (a fresh proxy is off-by-default),
+    so this requires a running/reachable proxy and writes `applied.active` only
+    after the push lands. `enter` on a warm proxy preserves the activation (the
+    fingerprint matches, so no re-push / re-auth); an explicit `start`/`recreate`
+    or stop/start turns it back off."""
+    from ..core.engine import startup
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    result = startup.set_binding_active(
+        ws, a.binding_name, notify=say, activate=activate)
+    render.OUT.binding_activation(ws.name, {
+        "activate": result.activate,
+        "changed": list(result.changed),
+        "hosts": list(result.hosts),
+        "active": list(result.active),
+    })
+
+
+def do_binding_refresh(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    """Re-resolve ONLY the named bindings' secrets and surgically patch them onto
+    the running proxy (leaving every other active binding's provider untouched) --
+    for rotating a short-lived token (gcloud) without re-authing the rest."""
+    from ..core.engine import startup
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    refreshed = startup.refresh_bindings(ws, a.binding_name, notify=say)
+    render.OUT.binding_refreshed(ws.name, list(refreshed))
 
 
 def do_binding_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
@@ -202,10 +249,21 @@ def do_binding_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         if resolved.lock_dirty:
             save_lock(ws, resolved.lock)
     bindings = resolved.bindings
+    skipped = []
     if a.binding_name is not None:
+        # An explicit NAME is explicit intent: fetch it even if it's an inactive
+        # manual binding (the on-demand check-it-now path).
         bindings = [b for b in bindings if b.name == a.binding_name]
         if not bindings:
             fail(f"binding '{a.binding_name}' not found in workspace '{ws.name}'")
+    else:
+        # Bare `binding test` (all): skip INACTIVE manual bindings so it doesn't
+        # trigger a slow/interactive provider by default (parity with `doctor
+        # --fetch`; name one explicitly to check it on demand).
+        from ..core.engine.containers import _load_applied_active
+        active = _load_applied_active(ws)
+        skipped = [b for b in bindings if b.manual and b.name not in active]
+        bindings = [b for b in bindings if not (b.manual and b.name not in active)]
 
     # Batch by provider: a workspace whose bindings share one provider (e.g. a
     # vault) resolves it once for the whole `binding test`, not once per binding.
@@ -221,6 +279,12 @@ def do_binding_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
             "value_len": r.value_len,
             "error": r.error,
             "note": r.note,
+        })
+    for b in skipped:
+        results.append({
+            "name": b.name, "provider": b.provider, "ok": True,
+            "value_len": None, "error": None,
+            "note": "manual, inactive -- not tested (name it explicitly to test)",
         })
     render.OUT.binding_test(results)
     if any_fail:
@@ -289,11 +353,29 @@ def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     env_group = p.add_mutually_exclusive_group()
     env_group.add_argument("--env", default=None)
     env_group.add_argument("--no-env", action="store_true")
+    # On-demand binding: not resolved/pushed automatically; activated via
+    # `binding activate NAME`. --required-for-setup (implies --manual) force-
+    # activates it for the recreate setup window only.
+    p.add_argument("--manual", action="store_true",
+                   help="on-demand: skip at start/enter until `binding activate`")
+    p.add_argument("--required-for-setup", dest="required_for_setup",
+                   action="store_true",
+                   help="force-activate for the setup window only (implies --manual)")
 
     p = parent.add_parser("remove")
     p.add_argument("binding_name", metavar="NAME")
 
     parent.add_parser("list")
+
+    # activate/deactivate: turn one or more manual bindings on/off on the running
+    # proxy (NAME positional repeats). Both take the same shape.
+    for verb in ("activate", "deactivate"):
+        p = parent.add_parser(verb)
+        p.add_argument("binding_name", metavar="NAME", nargs="+")
+
+    # refresh: re-resolve only the named live bindings' secrets and patch them.
+    p = parent.add_parser("refresh")
+    p.add_argument("binding_name", metavar="NAME", nargs="+")
 
     p = parent.add_parser("test")
     p.add_argument("binding_name", metavar="NAME", nargs="?", default=None)

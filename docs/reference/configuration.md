@@ -400,6 +400,8 @@ it for the real value on requests to the scoped hosts.
 | `name` | **yes** | Handle used to address the binding (`binding remove`, `binding test NAME`). Hand-authored — `binding add` writes it for you (`<injector>-<provider>`, `-2`/`-3`/… on collision), but a binding you write by hand must include one. Omitting it is an error that names the exact line to add. |
 | `placeholder` | no | The inert sentinel the workspace sends (substitute schemes). **Omit it** — the generated value lives in the machine-owned lockfile (`$XDG_STATE_HOME/credproxy/workspaces/<name>/lock.json`), not the TOML, so the CLI never rewrites your file. Set it explicitly only to pin a specific value: an explicit `placeholder` **wins** and never enters the lock. |
 | `env` | no | Suggested env var name surfaced to the workspace via `/setup` (and pre-exported via `/exports.sh`); must be a valid shell identifier (letters, digits, `_`; not starting with a digit). A non-empty string overrides; **absent** inherits the injector's `env` hint; **`env = false`** suppresses it entirely (no env exposed — `binding add --no-env`). `env = ""` and `env = true` are rejected. |
+| `manual` | no | `true` marks the binding **on-demand**: it is NOT resolved or pushed automatically at `start`/`enter`, only when you name it with `binding activate NAME` (`binding add --manual`). For a slow/interactive provider (e.g. gcloud) you skip by default, or an optional binding on a throwaway workspace. See *On-demand ("manual") bindings* below. |
+| `required_for_setup` | no | `true` force-activates a **manual** binding for the duration of the recreate **setup window** only (so a `[[setup]]` step sees its placeholder in the binding env), then reverts to off. Requires `manual = true` (an always-on binding is already available to setup — the mismatch is an error). |
 
 **One-way dataflow (intent file + lockfile).** The workspace TOML is your
 hand-owned **intent** file — credproxy never rewrites inside it (comments are
@@ -424,6 +426,68 @@ next resolve re-mints placeholders (a binding with no explicit `placeholder`) an
 re-expands every `[[pack]]` reference from its **current** definition, then
 re-snapshots the lot. (The one visible consequence: a placeholder value changes
 if you delete the lock, so a workspace mid-flight would want a fresh `apply`.)
+
+#### On-demand ("manual") bindings
+
+By default every `[[binding]]` is resolved from its provider and pushed to the
+proxy on **every** `start`/`enter` — there is no host-side secret cache. That is
+costly when a provider is slow or interactive (a gcloud login, a vault unlock),
+and unwanted for an optional binding you keep defined but rarely use (an optional
+`github` binding on a throwaway "scratch" workspace).
+
+Mark such a binding `manual = true` (or `binding add --manual`). It is then
+**skipped by default** and only resolved + pushed when you name it:
+
+```toml
+[[binding]]
+name     = "gcloud"
+injector = "bearer"
+provider = "gcloud"
+secret   = "access-token"
+hosts    = ["*.googleapis.com"]
+manual   = true
+```
+
+```console
+$ credproxy workspace scratch binding activate gcloud   # resolve + push now
+$ credproxy workspace scratch binding deactivate gcloud # push without it
+$ credproxy workspace scratch binding refresh gcloud    # re-resolve just this one
+$ credproxy workspace scratch binding list              # STATE column: manual / manual*
+```
+
+Semantics:
+
+- **A running proxy is required** to activate — the effect lives only on the
+  proxy's tmpfs config, so `binding activate` on a stopped workspace is an error
+  pointing at `start`.
+- **Activation survives `enter`** on a warm proxy (the fast path recomputes the
+  same config fingerprint and skips the push, so the credential is not
+  re-resolved / re-authenticated), but **resets to off on a fresh run** — a
+  stop/start, `recreate`, or (for an attached/CI workspace) a `push` to a proxy
+  that isn't holding the last-pushed config. An explicit `start`/`recreate` keeps
+  an already-active binding active but *does* re-resolve it (a re-auth).
+- **While inactive**, a manual binding's hosts are **not intercepted** (they stay
+  passthrough), its env is absent from `/setup` and `/exports.sh`, and its
+  provider is never called — including by `doctor --fetch` (which reports it as
+  "manual, inactive — not fetched"; use `binding test NAME` to check it on
+  demand). Its placeholder identity is still pinned in the lock, so activation is
+  stable.
+- **`required_for_setup = true`** (implies `manual`) force-activates the binding
+  for the recreate **setup window** only: `start` widens the pushed set to include
+  it, runs `[[setup]]` (so a step sees its placeholder in the binding env), then
+  re-pushes the resting set — the binding never persists as active. Use it when a
+  provisioning step needs a credential you otherwise want off by default.
+
+**Refreshing one binding's secret** (`binding refresh NAME…`). A `push`/`apply`
+re-resolves **every** active binding from its provider — so refreshing one
+short-lived token (a gcloud access token expires ~hourly) would needlessly re-auth
+the rest. `binding refresh` re-resolves **only** the named live binding(s) and
+surgically patches them onto the running proxy (via `/admin/config/patch`),
+leaving every other active binding's already-resolved secret — and its provider —
+untouched. It works on any live binding (always-on or an activated manual one); an
+inactive manual binding isn't on the proxy to refresh (activate it first). The
+metadata is unchanged, so the config fingerprint (and the `enter` fast path) is
+unaffected; only the generation bumps.
 
 #### Host patterns
 

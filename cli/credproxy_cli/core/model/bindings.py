@@ -55,6 +55,17 @@ class Binding:
     # the effective env is None (omitted from the wire, /setup, /exports.sh).
     # Distinct from `env` being absent (None), which INHERITS the injector hint.
     env_suppressed: bool = False
+    # On-demand ("manual") bindings: host-side SELECTION metadata, NEVER wire
+    # fields (the proxy never learns "manual"). A manual binding is EXCLUDED from
+    # the automatic resolve+push at start/enter and only included once the
+    # operator names it (`binding activate NAME`); the active set is tracked
+    # host-side in the lock's `applied.active`. `required_for_setup` force-includes
+    # a manual binding for the DURATION of the recreate setup window only (so a
+    # setup step sees its placeholder), never persisting into the active set --
+    # it requires `manual` (a no-op otherwise, since an always-on binding is
+    # already available to setup). See `select_active`.
+    manual: bool = False
+    required_for_setup: bool = False
 
 
 def effective_env(binding: Binding, injector: Injector) -> str | None:
@@ -88,6 +99,19 @@ def binding_env_map(bindings: list[Binding]) -> dict[str, str]:
             continue
         out[name] = b.placeholder
     return out
+
+
+def select_active(bindings: list[Binding], active: set[str]) -> list[Binding]:
+    """The bindings to actually resolve + push, given the host-tracked active set
+    of manual-binding names (`applied.active`): every always-on binding, plus the
+    manual bindings the operator has activated. The ONE selection seam -- every
+    push/fingerprint/drift/resolve consumer threads the single list this returns,
+    so a manual binding is included in exactly one place.
+
+    `resolve_workspace` still returns ALL bindings (validation, placeholder
+    identity, and `binding_env_map` need the full set); this narrows at the push
+    boundary only. Input order is preserved."""
+    return [b for b in bindings if not b.manual or b.name in active]
 
 
 def secret_refs(binding: Binding) -> dict[str, str]:
@@ -221,6 +245,19 @@ def _parse_bindings(raw: dict, source: str) -> list[Binding]:
             raise ConfigError(
                 f"{source}: {where}.env must be a string or `false`")
 
+        # `manual`/`required_for_setup`: plain booleans (host-side selection
+        # metadata). The `required_for_setup => manual` rule is a cross-field
+        # check enforced in `validate` (so a constructed Binding is held to it too).
+        def _bool_field(key: str) -> bool:
+            v = b.get(key)
+            if v is None:
+                return False
+            if not isinstance(v, bool):
+                raise ConfigError(f"{source}: {where}.{key} must be a boolean")
+            return v
+        manual = _bool_field("manual")
+        required_for_setup = _bool_field("required_for_setup")
+
         out.append(Binding(
             name=name,            # may be None -> materialized later
             injector=injector,
@@ -230,6 +267,8 @@ def _parse_bindings(raw: dict, source: str) -> list[Binding]:
             placeholder=placeholder,  # may be None -> materialized later
             env=env,
             env_suppressed=env_suppressed,
+            manual=manual,
+            required_for_setup=required_for_setup,
         ))
     return out
 
@@ -287,6 +326,16 @@ def validate(bindings: list[Binding], source: str) -> None:
         if b.name in names:
             raise ConfigError(f"{source}: duplicate binding name '{b.name}'")
         names.add(b.name)
+
+        # `required_for_setup` is a modifier on a manual binding (force-include it
+        # for the setup window). On an always-on binding it's a no-op -- reject it
+        # so the intent can't be silently misread as "this is special".
+        if b.required_for_setup and not b.manual:
+            raise ConfigError(
+                f"{source}: binding '{b.name}': `required_for_setup` requires "
+                f"`manual = true` (an always-on binding is already available to "
+                f"setup)"
+            )
 
         # Re-checked here (not only at parse) so a constructed Binding -- the
         # `binding add --env` path -- fails at add time, not on the next load.
@@ -620,6 +669,10 @@ def _render_binding_block(binding: Binding) -> str:
         lines.append("env      = false")
     elif binding.env is not None:
         lines.append(f'env      = {_toml_str(binding.env)}')
+    if binding.manual:
+        lines.append("manual   = true")
+    if binding.required_for_setup:
+        lines.append("required_for_setup = true")
     return "\n".join(lines) + "\n"
 
 

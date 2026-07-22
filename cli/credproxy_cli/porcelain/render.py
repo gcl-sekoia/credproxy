@@ -383,6 +383,11 @@ class Renderer:
         print(f"  placeholder {b['placeholder'] or '(none)'}")
         if b.get("env"):
             print(f"  env         {b['env']}")
+        if b.get("manual"):
+            extra = ", required for setup" if b.get("required_for_setup") else ""
+            print(f"  manual      on-demand{extra} "
+                  f"(activate with `credproxy workspace {ws} binding activate "
+                  f"{b['name']}`)")
         # Managed workspaces stay hintless (start/enter/apply all push); an
         # ATTACHED workspace has no such implicit path, so hint the push.
         if attached:
@@ -416,17 +421,27 @@ class Renderer:
         if not rows:
             print(f"no bindings in workspace '{ws}'")
             return
-        header = ("NAME", "INJECTOR", "PROVIDER", "SECRET", "HOSTS", "ENV", "PLACEHOLDER")
+        # STATE marks manual bindings: `manual*` = activated, `manual` = inactive;
+        # an always-on binding shows `-` (nothing special).
+        header = ("NAME", "INJECTOR", "PROVIDER", "SECRET", "HOSTS", "ENV",
+                  "STATE", "PLACEHOLDER")
         table = [header]
         for b in rows:
+            if b.get("manual"):
+                state = "manual*" if b.get("active") else "manual"
+            else:
+                state = "-"
             table.append((
                 b["name"], b["injector"], b["provider"], secret_display(b["secret"]),
-                ",".join(b["hosts"]), b["env"] or "-", b["placeholder"] or "-",
+                ",".join(b["hosts"]), b["env"] or "-", state, b["placeholder"] or "-",
             ))
         widths = [max(len(row[i]) for row in table) for i in range(len(header) - 1)]
         for row in table:
             cells = [f"{row[i]:<{widths[i]}}" for i in range(len(widths))]
             print("  ".join(cells) + "  " + row[-1])
+        if any(b.get("manual") for b in rows):
+            say("manual = on-demand binding; * = activated "
+                "(`binding activate NAME` / `binding deactivate NAME`)")
 
     # -- binding test --
     def binding_test(self, results: list[dict]) -> None:
@@ -439,6 +454,26 @@ class Renderer:
                 )
             else:
                 print(f"FAIL  {r['name']}  (provider {r['provider']}): {r['error']}")
+
+    # -- binding activate / deactivate --
+    def binding_activation(self, ws: str, r: dict) -> None:
+        verb = "activated" if r["activate"] else "deactivated"
+        if not r["changed"]:
+            already = "already active" if r["activate"] else "already inactive"
+            print(f"no change ({already}) in workspace '{ws}'")
+        else:
+            print(f"{verb} binding(s) in workspace '{ws}': "
+                  f"{', '.join(r['changed'])}")
+            if r["hosts"]:
+                onoff = "now injecting on" if r["activate"] \
+                    else "no longer intercepting"
+                print(f"  {onoff}: {', '.join(r['hosts'])}")
+        active = r["active"]
+        print(f"  active manual binding(s): {', '.join(active) if active else '(none)'}")
+
+    def binding_refreshed(self, ws: str, names: list) -> None:
+        print(f"refreshed binding(s) in workspace '{ws}': {', '.join(names)} "
+              f"(only these providers were re-invoked)")
 
     # -- rule add / remove / list / test --
     def rule_added(self, name: str, ws: str, r: dict,
@@ -958,6 +993,12 @@ class JsonRenderer(Renderer):
 
     def binding_test(self, results: list[dict]) -> None:
         self._emit(results)
+
+    def binding_activation(self, ws: str, r: dict) -> None:
+        self._emit({"workspace": ws, **r})
+
+    def binding_refreshed(self, ws: str, names: list) -> None:
+        self._emit({"workspace": ws, "refreshed": names})
 
     def rule_added(self, name: str, ws: str, r: dict,
                    attached: bool = False) -> None:

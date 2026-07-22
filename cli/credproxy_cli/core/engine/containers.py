@@ -206,6 +206,16 @@ def _load_applied_postgres(ws: Workspace) -> list[dict] | None:
     return p if isinstance(p, list) else None
 
 
+def _load_applied_active(ws: Workspace) -> set[str]:
+    """The host-tracked set of ACTIVATED manual-binding names (`applied.active`).
+    Absent/malformed reads as the empty set (nothing activated). This is what
+    `bindings.select_active` consults to decide which manual bindings to push;
+    it is RESET to empty whenever the proxy isn't holding our last-pushed config
+    (a fresh proxy on managed start, a generation-mismatch on the push path)."""
+    a = _load_applied(ws).get("active")
+    return {n for n in a if isinstance(n, str)} if isinstance(a, list) else set()
+
+
 def create_workspace_files(ws: Workspace, text: str | None = None) -> None:
     """Scaffold a managed workspace's config + auth token. `text` overrides the
     rendered template (used by `create` after in-memory `[[pack]]` expansion, so
@@ -746,6 +756,12 @@ class BindingSummary:
     hosts: tuple[str, ...]
     placeholder: str | None
     env: str | None
+    # Display-only selection state (not part of drift comparison): a manual
+    # binding and whether it is currently activated. `active` is True for an
+    # always-on binding and for an activated manual one; an inactive manual
+    # binding's hosts revert to passthrough (not intercepted) until activated.
+    manual: bool = False
+    active: bool = True
 
 
 @dataclass(frozen=True)
@@ -1163,6 +1179,12 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
         except (ImageError, DockerError):
             host_port = None
 
+    # Display ALL bindings (annotated manual/active), but compute drift on the
+    # SELECTED set -- an inactive manual binding is neither pushed nor recorded in
+    # applied.bindings, so it must NOT read as "added" drift.
+    from ..model.bindings import select_active
+    active = _load_applied_active(ws)
+    active_names = {b.name for b in select_active(resolved.bindings, active)}
     bindings = tuple(
         BindingSummary(
             name=b.name,
@@ -1172,13 +1194,17 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
             hosts=b.hosts,
             placeholder=b.placeholder,
             env=b.env,
+            manual=b.manual,
+            active=b.name in active_names,
         )
         for b in resolved.bindings
     )
+    selected_summaries = [s for s in bindings if s.active]
 
     current_rules = resolved.rules
 
-    drift = _compute_drift(ws, cfg, bindings, running, current_rules=current_rules,
+    drift = _compute_drift(ws, cfg, selected_summaries, running,
+                           current_rules=current_rules,
                            current_postgres=list(resolved.postgres))
 
     # Live drift: when the proxy is reachable (its port resolved), compare the
@@ -1221,17 +1247,22 @@ def _inspect_attached(ws: Workspace, cfg: dict) -> WorkspaceInspect:
     except CredproxyError:
         attach_target = None
 
+    from ..model.bindings import select_active
     resolved = resolve_workspace(ws)
+    active = _load_applied_active(ws)
+    active_names = {b.name for b in select_active(resolved.bindings, active)}
     bindings = tuple(
         BindingSummary(name=b.name, injector=b.injector, provider=b.provider,
                        secret=b.secret, hosts=b.hosts, placeholder=b.placeholder,
-                       env=b.env)
+                       env=b.env, manual=b.manual, active=b.name in active_names)
         for b in resolved.bindings
     )
+    selected_summaries = [s for s in bindings if s.active]
     current_rules = resolved.rules
     # No managed container, so "running" is not meaningful; drift is computed
-    # against applied.bindings/.rules regardless (added/removed/changed).
-    drift = _compute_drift(ws, cfg, bindings, running=False,
+    # against applied.bindings/.rules regardless (added/removed/changed) -- on the
+    # SELECTED set (inactive manual bindings aren't pushed, so not drift).
+    drift = _compute_drift(ws, cfg, selected_summaries, running=False,
                            current_rules=current_rules,
                            current_postgres=list(resolved.postgres))
     # Live drift rides the SAME resolved attach admin URL push uses (loopback

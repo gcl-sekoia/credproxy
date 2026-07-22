@@ -125,6 +125,31 @@ def push_to_target(admin_url: str, token: str, bindings, rules,
         f"{payload.get('error', payload)}")
 
 
+def patch_bindings(admin_url: str, token: str, wire_bindings: list,
+                   fingerprint: str | None = None, notify: Notify = _noop) -> int | None:
+    """POST a SUBSET of already-resolved wire bindings to /admin/config/patch --
+    the surgical `binding refresh`. The proxy merges them into the config it is
+    holding BY NAME (so the other active bindings' secrets, which the host does not
+    cache, stay untouched -- no re-invocation of their providers) and bumps the
+    generation, returning it. `fingerprint` (the full selected-set metadata hash)
+    keeps the proxy's reported fingerprint accurate so `enter` still skips when
+    nothing metadata-changed. The URL MUST already be loopback-validated (I8).
+    Raises ProxyError on connect/401/non-200."""
+    require_loopback(admin_url)
+    body: dict = {"bindings": wire_bindings}
+    if fingerprint is not None:
+        body["fingerprint"] = fingerprint
+    status, payload = _http_post_json(
+        f"{admin_url}/admin/config/patch", json.dumps(body).encode(), token)
+    if status == 200:
+        return payload.get("generation") if isinstance(payload, dict) else None
+    if status == 401:
+        raise ProxyError(f"proxy at {admin_url} rejected the token (HTTP 401)")
+    raise ProxyError(
+        f"binding refresh at {admin_url} failed: HTTP {status}: "
+        f"{payload.get('error', payload) if isinstance(payload, dict) else payload}")
+
+
 def push_config(ws: "Workspace", http_port: int, notify: Notify = _noop,
                 bindings=None, rules=None, fingerprint=None, postgres=None):
     """Resolve bindings + rules (placeholders bound from the lock), fetch each
@@ -137,6 +162,14 @@ def push_config(ws: "Workspace", http_port: int, notify: Notify = _noop,
     are resolved/computed here. Resolution reads (and, on a miss, mints) generated
     placeholders in the lockfile -- a dirty lock is persisted here (this is a
     mutating command).
+
+    IMPORTANT: the default-resolve path (`bindings is None`) pushes the FULL
+    resolved set, which does NOT apply the manual-binding `select_active` filter.
+    Every current caller pre-selects and passes `bindings=` explicitly (see
+    startup.py), so this is never reached with manual bindings in play; a future
+    caller that omits `bindings=` on a workspace with `manual` bindings would push
+    them all. Pre-select at the call site (`bindings.select_active`) rather than
+    relying on this path when manual bindings may exist.
 
     A thin wrapper over the shared push engine (`push_to_target`), so
     `start`/`apply` (this function) and the `push`/stateless verbs POST a

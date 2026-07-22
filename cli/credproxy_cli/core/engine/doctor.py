@@ -335,7 +335,21 @@ def _binding_checks(ws: Workspace, *, fetch: bool) -> tuple[list[Check], dict]:
         out.append(_fail(f"ws:{ws.name}:bindings", f"[{ws.name}] bindings: {e}"))
 
     if fetch and bs is not None:
-        results = test_bindings(bs)
+        # Skip INACTIVE manual bindings: a routine `doctor NAME --fetch` must not
+        # trigger every slow/interactive manual provider (e.g. gcloud). An operator
+        # who wants to verify one on demand uses `binding test NAME` (still fetches).
+        from .containers import _load_applied_active
+        active = _load_applied_active(ws)
+        to_fetch = []
+        for b in bs:
+            if b.manual and b.name not in active:
+                out.append(_ok(
+                    f"ws:{ws.name}:{b.name}:fetch",
+                    f"[{ws.name}] {b.name}: manual, inactive -- not fetched "
+                    f"(use `binding test {b.name}` to check it on demand)"))
+            else:
+                to_fetch.append(b)
+        results = test_bindings(to_fetch)
         for r in results:
             out.append(_ok(f"ws:{ws.name}:{r.name}:fetch",
                            f"[{ws.name}] {r.name}: secret resolved ({r.value_len} chars)")
@@ -344,7 +358,7 @@ def _binding_checks(ws: Workspace, *, fetch: bool) -> tuple[list[Check], dict]:
         # Record each fetched (provider, first-ref) -> ok so the pack-requires
         # layer can reuse the outcome rather than re-invoking the provider
         # (finding 4). `test_bindings` keeps input order, so zip is 1:1.
-        for b, r in zip(bs, results):
+        for b, r in zip(to_fetch, results):
             fetched[(b.provider, _secret_ref(b.secret))] = r.ok
     return out, fetched
 

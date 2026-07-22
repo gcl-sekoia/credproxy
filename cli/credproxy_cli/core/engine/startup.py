@@ -27,6 +27,179 @@ from .proxy_http import proxy_status, wait_for_ready
 from .push import push_config
 
 
+@dataclass(frozen=True)
+class ActivationResult:
+    """Outcome of a `binding activate|deactivate`.
+
+    activate:  True for activate, False for deactivate.
+    changed:   the manual bindings whose state actually flipped this call.
+    hosts:     the union of the changed bindings' hosts (for the intercept note --
+               a manual binding's host is passthrough while inactive).
+    active:    the full new active set (sorted), as persisted to `applied.active`.
+    """
+    activate: bool
+    changed: tuple[str, ...]
+    hosts: tuple[str, ...]
+    active: tuple[str, ...]
+
+
+def set_binding_active(ws: Workspace, names: list[str], notify: Notify = _noop,
+                       *, activate: bool) -> ActivationResult:
+    """Activate (or deactivate) the named `manual` bindings and re-push the full
+    wire config to the workspace's proxy. `applied.active` is written ONLY after
+    a successful push (atomically, under the single workspace lock), so the lock
+    never claims an activation the push didn't deliver.
+
+    A managed workspace's proxy MUST be running -- an activation lives only on the
+    proxy's tmpfs and can't survive a fresh one, so activating against a stopped
+    proxy is a hard error pointing at `start` (decision #3). Names must resolve to
+    `manual` bindings (an always-on binding is already active). Reachable-but-
+    reality-drifted is fine: the push restores the whole selected set."""
+    from . import push as core_push
+    from ..model.bindings import select_active
+    from ..model.lock import save_lock
+    from ..model.resolver import resolve_workspace
+    from ..model.rules import combined_fingerprint
+    from ..model.workspace import read_token
+
+    verb = "activate" if activate else "deactivate"
+    cfg = load_config(ws)
+    attached = cfg.get("attach") is not None
+    if not attached and docker.container_status(ws.proxy_container) != "running":
+        raise WorkspaceError(
+            f"workspace '{ws.name}' proxy is not running, so there is nothing to "
+            f"{verb} on -- an activation lives only on the running proxy and can't "
+            f"survive a fresh start. Start it first: "
+            f"`credproxy workspace {ws.name} start`")
+
+    admin_url = containers.resolve_admin_url(ws, notify)
+    token = read_token(ws)
+    with ws.lock():
+        resolved = resolve_workspace(ws)
+        for n in resolved.notes:
+            notify(f"note: {n}")
+        if resolved.lock_dirty:
+            save_lock(ws, resolved.lock)
+
+        by_name = {b.name: b for b in resolved.bindings}
+        manual_names = {b.name for b in resolved.bindings if b.manual}
+        unknown = [n for n in names if n not in by_name]
+        if unknown:
+            raise ConfigError(
+                f"no such binding in workspace '{ws.name}': {', '.join(unknown)}")
+        not_manual = [n for n in names if n in by_name and n not in manual_names]
+        if not_manual:
+            raise ConfigError(
+                f"binding(s) {', '.join(not_manual)} are not `manual` -- an "
+                f"always-on binding is always pushed, so there is nothing to {verb}")
+
+        active = containers._load_applied_active(ws)
+        new_active = set(active)
+        if activate:
+            changed = [n for n in names if n not in new_active]
+            new_active |= set(names)
+        else:
+            changed = [n for n in names if n in new_active]
+            new_active -= set(names)
+
+        selected = select_active(resolved.bindings, new_active)
+        fp = combined_fingerprint(selected, resolved.rules, resolved.postgres)
+        pb, pr, gen = core_push.push_to_target(
+            admin_url, token, selected, resolved.rules, fp, notify,
+            postgres=resolved.postgres)
+        # Write-after-success: record the pushed bindings/rules metadata AND the
+        # new active set together (both merge into `applied`), only now the push
+        # has landed.
+        containers._write_applied_push(ws, pb, pr, gen, postgres=resolved.postgres)
+        containers._update_applied(ws, active=sorted(new_active))
+
+    hosts: list[str] = []
+    for n in changed:
+        for h in by_name[n].hosts:
+            if h not in hosts:
+                hosts.append(h)
+    return ActivationResult(
+        activate=activate, changed=tuple(changed), hosts=tuple(hosts),
+        active=tuple(sorted(new_active)))
+
+
+def refresh_bindings(ws: Workspace, names: list[str],
+                     notify: Notify = _noop) -> tuple[str, ...]:
+    """The `binding refresh` verb: re-resolve ONLY the named bindings' secrets and
+    surgically patch them onto the running proxy, leaving every other active
+    binding untouched. This is the answer to short-lived tokens (gcloud ~1h): a
+    full `push`/`apply` re-invokes every active provider, so refreshing one
+    expiring credential would needlessly re-auth the rest -- `refresh` re-resolves
+    only what you name and posts it to /admin/config/patch.
+
+    Works on ANY live binding (always-on or an activated manual one); a `manual`
+    binding that is inactive can't be refreshed (it isn't on the proxy -- error
+    toward `activate`). Requires a reachable proxy (managed: running, else error
+    toward `start`). Records the new config generation so inspect/apply stay in
+    sync; the metadata (and thus the fingerprint) is unchanged by a value refresh,
+    so `enter` still skips. Returns the refreshed names."""
+    from . import push as core_push
+    from ..model.bindings import select_active, wire_config
+    from ..model.lock import save_lock
+    from ..model.resolver import resolve_workspace
+    from ..model.rules import combined_fingerprint
+    from ..model.workspace import read_token
+
+    cfg = load_config(ws)
+    attached = cfg.get("attach") is not None
+    if not attached and docker.container_status(ws.proxy_container) != "running":
+        raise WorkspaceError(
+            f"workspace '{ws.name}' proxy is not running; start it first "
+            f"(`credproxy workspace {ws.name} start`)")
+
+    admin_url = containers.resolve_admin_url(ws, notify)
+    token = read_token(ws)
+    with ws.lock():
+        resolved = resolve_workspace(ws)
+        for n in resolved.notes:
+            notify(f"note: {n}")
+        if resolved.lock_dirty:
+            save_lock(ws, resolved.lock)
+
+        all_by_name = {b.name: b for b in resolved.bindings}
+        active = containers._load_applied_active(ws)
+        selected = select_active(resolved.bindings, active)
+        selected_by_name = {b.name: b for b in selected}
+
+        chosen = []
+        for n in names:
+            if n not in all_by_name:
+                raise ConfigError(
+                    f"no such binding in workspace '{ws.name}': {n}")
+            if n not in selected_by_name:
+                raise ConfigError(
+                    f"binding '{n}' is manual and inactive, so it is not on the "
+                    f"proxy to refresh -- activate it first "
+                    f"(`credproxy workspace {ws.name} binding activate {n}`)")
+            chosen.append(selected_by_name[n])
+
+        # Resolve ONLY the chosen bindings' secrets (one provider call per distinct
+        # provider among them) -- the whole point: the other active providers are
+        # never touched. The full selected-set fingerprint (metadata only, cheap)
+        # keeps the proxy's reported fingerprint accurate.
+        notify(f"refreshing {', '.join(names)}...")
+        wire = wire_config(chosen)
+        fp = combined_fingerprint(selected, resolved.rules, resolved.postgres)
+        generation = core_push.patch_bindings(
+            admin_url, token, wire["bindings"], fingerprint=fp, notify=notify)
+        # Refresh is VALUE-oriented: the wire metadata it sends is the current
+        # resolved metadata, so for the intended use (rotating a secret VALUE) the
+        # metadata is unchanged and `applied.bindings` stays accurate -- we record
+        # only the new generation. A metadata change belongs to `apply`/`start`
+        # (which re-push the whole set and rewrite `applied.bindings`); running
+        # `refresh` after a metadata edit would leave `applied.bindings` showing
+        # offline drift until the next apply, a benign display lag (no secret
+        # exposure, since the proxy holds exactly what we patched).
+        if generation is not None:
+            containers._update_applied(ws, config_generation=generation)
+    return tuple(names)
+
+
 def push_workspace(ws: Workspace, notify: Notify = _noop, *,
                    wait: bool = False, timeout: float = 120.0) -> str:
     """The `push` verb: resolve every binding's secret and POST the FULL wire
@@ -41,6 +214,7 @@ def push_workspace(ws: Workspace, notify: Notify = _noop, *,
     aborts the whole push before anything is sent (materialize/wire_config raise)."""
     from . import push as core_push
     from ..model.lock import save_lock
+    from ..model.bindings import select_active
     from ..model.resolver import resolve_workspace
     from ..model.rules import combined_fingerprint
     from ..model.workspace import read_token
@@ -59,12 +233,22 @@ def push_workspace(ws: Workspace, notify: Notify = _noop, *,
         # load-modify-write reads the fresh lock and preserves the placeholders.
         if resolved.lock_dirty:
             save_lock(ws, resolved.lock)
-        bindings, rules, postgres = \
-            resolved.bindings, resolved.rules, resolved.postgres
-        fp = combined_fingerprint(bindings, rules, postgres)
+        # Attached/CI freshness (the managed `proxy_fresh` analogue): if the proxy
+        # is NOT holding the generation we last recorded (a fresh externally-run
+        # proxy, a lost tmpfs, or a foreign push), any manual activation we tracked
+        # can't have survived it -- reset the active set to off-by-default. A
+        # reachable, in-sync proxy keeps activations across a `push`. Ordered AFTER
+        # save_lock so its load-modify-write isn't clobbered by the placeholder save.
+        live = containers._live_drift(ws, admin_url, has_content_drift=False)
+        if live is not None and live.verdict == "reality-drift":
+            containers._update_applied(ws, active=[])
+        rules, postgres = resolved.rules, resolved.postgres
+        active = containers._load_applied_active(ws)
+        selected = select_active(resolved.bindings, active)
+        fp = combined_fingerprint(selected, rules, postgres)
         _, _, generation = core_push.push_to_target(
-            admin_url, token, bindings, rules, fp, notify, postgres=postgres)
-        containers._write_applied_push(ws, bindings, rules, generation,
+            admin_url, token, selected, rules, fp, notify, postgres=postgres)
+        containers._write_applied_push(ws, selected, rules, generation,
                                        postgres=postgres)
     return admin_url
 
@@ -77,6 +261,7 @@ def resolve_workspace_wire(ws: Workspace, notify: Notify = _noop) -> dict:
     The result carries real secrets: it is the one at-rest disclosure path, so
     `resolve --out` writes it mode 0600 and warns outside the state dir."""
     from ..model.lock import save_lock
+    from ..model.bindings import select_active
     from ..model.resolver import resolve_workspace
     from ..model.rules import combined_fingerprint
     from ..model.wire import build_wire
@@ -85,10 +270,15 @@ def resolve_workspace_wire(ws: Workspace, notify: Notify = _noop) -> dict:
         resolved = resolve_workspace(ws)
         if resolved.lock_dirty:
             save_lock(ws, resolved.lock)
-    bindings, rules, postgres = \
-        resolved.bindings, resolved.rules, resolved.postgres
-    fp = combined_fingerprint(bindings, rules, postgres)
-    return build_wire(bindings, rules, fp, postgres=postgres)
+        active = containers._load_applied_active(ws)
+    # `resolve --out` feeds the attach / stateless `push --config` path, which
+    # POSTs this wire verbatim -- so it must carry the SAME selected set a managed
+    # push would (an inactive manual binding stays out; an active one is included),
+    # never the full unselected set.
+    rules, postgres = resolved.rules, resolved.postgres
+    selected = select_active(resolved.bindings, active)
+    fp = combined_fingerprint(selected, rules, postgres)
+    return build_wire(selected, rules, fp, postgres=postgres)
 
 
 def start_workspace(ws: Workspace, notify: Notify = _noop,
@@ -179,16 +369,24 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
     # (bindings/rules/config, lock) was computed up front.
     from ..model.lock import save_lock
     from ..model.rules import combined_fingerprint
+    from ..model.bindings import select_active
     if resolved.lock_dirty:
         save_lock(ws, resolved.lock)
-    bindings, rules, postgres = \
-        resolved.bindings, resolved.rules, resolved.postgres
-    want_fp = combined_fingerprint(bindings, rules, postgres)
+    rules, postgres = resolved.rules, resolved.postgres
+    # Manual bindings are off by default on a fresh proxy: a (re)started proxy has
+    # an empty tmpfs config, so any activation the operator made cannot survive it.
+    # Reset the host-tracked active set to match that reality BEFORE selecting, so
+    # `selected` (and the fingerprint) reflect the config actually about to ship.
+    if proxy_fresh:
+        containers._update_applied(ws, active=[])
+    active = containers._load_applied_active(ws)
+    selected = select_active(resolved.bindings, active)
+    want_fp = combined_fingerprint(selected, rules, postgres)
     status = None if (force_push or proxy_fresh) else proxy_status(ws, host_port)
     if containers._should_push(force_push, proxy_fresh, status, want_fp):
         notify("pushing config...")
         pushed_bindings, pushed_rules, generation = push_config(
-            ws, host_port, notify, bindings=bindings, rules=rules,
+            ws, host_port, notify, bindings=selected, rules=rules,
             fingerprint=want_fp, postgres=postgres)
         containers._write_applied_push(ws, pushed_bindings, pushed_rules, generation,
                                        postgres=postgres)
@@ -232,13 +430,47 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
         # cadence as setup: runs once per fresh/recreated container (the
         # fabricated parents live in the home volume, so idempotent thereafter).
         containers.chown_mount_parents(ws, cfg, notify)
-        # `bindings` (materialized above) supplies the binding env for typed
-        # setup steps -- placeholders are known post-push, so no in-container curl.
-        setup.run_setup(ws, cfg, notify, bindings=bindings)
-        # After setup: the `user` may have been provisioned by it, and must
-        # exist before we chown user-owned volumes to it by name.
-        setup.chown_user_owned_volumes(ws, cfg, notify)
-        setup._write_setup_marker(ws, container_id)
+        # `required_for_setup` manual bindings must be live for the setup window
+        # (so a typed setup step sees their placeholder in the binding env) WITHOUT
+        # persisting into the active set -- else a provisioning-only credential
+        # would stay live on every later enter. Widen -> setup -> narrow, and ONLY
+        # when there is something to widen (a config with no such binding is
+        # byte-identical to before: one push, `selected` supplies the setup env).
+        selected_names = {b.name for b in selected}
+        needs_bracket = [b for b in resolved.bindings
+                         if b.required_for_setup and b.name not in selected_names]
+        setup_bindings = selected
+        if needs_bracket:
+            setup_bindings = select_active(
+                resolved.bindings,
+                active | {b.name for b in resolved.bindings if b.required_for_setup})
+            notify("activating setup-required binding(s) for the setup window: "
+                   + ", ".join(b.name for b in needs_bracket))
+            push_config(ws, host_port, notify, bindings=setup_bindings,
+                        rules=rules, postgres=postgres)
+        try:
+            # `setup_bindings` (materialized + pushed) supplies the binding env for
+            # typed setup steps -- placeholders known post-push, no in-container curl.
+            setup.run_setup(ws, cfg, notify, bindings=setup_bindings)
+            # After setup: the `user` may have been provisioned by it, and must
+            # exist before we chown user-owned volumes to it by name.
+            setup.chown_user_owned_volumes(ws, cfg, notify)
+            setup._write_setup_marker(ws, container_id)
+        finally:
+            if needs_bracket:
+                # Narrow back to off-by-default in a `finally`: a setup FAILURE must
+                # not leave the widened `required_for_setup` credential live on the
+                # proxy (injectable on its hosts) until the operator's next `start`.
+                # Re-push the resting selected set and record it as applied so
+                # drift/generation reflect the resting config, not the transient
+                # widened one. Runs on success and on a setup exception alike (the
+                # exception still propagates after this).
+                notify("restoring config after setup "
+                       "(setup-required binding(s) back off)")
+                pb, pr, gen = push_config(
+                    ws, host_port, notify, bindings=selected, rules=rules,
+                    fingerprint=want_fp, postgres=postgres)
+                containers._write_applied_push(ws, pb, pr, gen, postgres=postgres)
 
 
 def recreate_workspace(ws: Workspace, notify: Notify = _noop,
@@ -462,7 +694,22 @@ def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
         from ..model.lock import save_lock
         save_lock(ws, resolved.lock)
 
-    # Build the binding summaries for drift.
+    # Manual-binding selection: a NORMAL apply (proxy still holds our config)
+    # RECONCILES to the tracked intent -- the currently-active set (`applied.active`)
+    # -- rather than resetting (apply is a mid-run reconcile, not a fresh run). The
+    # off-by-default reset fires only when the proxy is NOT holding our config
+    # (reality-drift, handled below, in parity with `push_workspace`'s reset and the
+    # managed `proxy_fresh` reset). Compute `selected` ONCE and thread the SAME list
+    # through BOTH the drift summary AND the push -- if only one used it, an
+    # unrelated drift would still push+resolve every manual binding, silently
+    # reactivating them.
+    from ..model.bindings import select_active
+    active = containers._load_applied_active(ws)
+    selected = select_active(resolved.bindings, active)
+
+    # Build the binding summaries for drift (over the SELECTED set: applied.bindings
+    # records what we push, so an inactive manual binding is neither in the summary
+    # nor in applied -> no phantom drift).
     current_binding_summaries = [
         BindingSummary(
             name=b.name,
@@ -473,7 +720,7 @@ def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
             placeholder=b.placeholder,
             env=b.env,
         )
-        for b in resolved.bindings
+        for b in selected
     ]
 
     current_rules = resolved.rules
@@ -516,6 +763,19 @@ def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
                                   has_content_drift=content_drift)
     reality_drift = live is not None and live.verdict == "reality-drift"
 
+    # A proxy not holding our generation is effectively FRESH: a manual binding's
+    # activation lived only on its (now-gone) tmpfs config, so it can't have
+    # survived. Reset the active set to off-by-default and RE-SELECT before the
+    # push, so `apply` after an out-of-band proxy restart doesn't silently re-auth a
+    # manual (e.g. gcloud) provider -- parity with the `proxy_fresh`/push resets.
+    # (The drift summary above may still name a manual binding; that only affects
+    # the human `applied:` label, not what is pushed or recorded.)
+    if reality_drift and any(b.manual for b in selected):
+        notify("proxy is not holding our config (restarted?); "
+               "manual bindings reset to off-by-default")
+        containers._update_applied(ws, active=[])
+        selected = select_active(resolved.bindings, set())
+
     if content_drift or reality_drift:
         # Pass the already-resolved bindings/rules so push_config uses the same
         # (now-persisted) placeholder identity instead of re-resolving/re-minting.
@@ -523,7 +783,7 @@ def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
         # closing doctor's config-sync loop.
         pushed_bindings, pushed_rules, generation = push_config(
             ws, host_port, notify,
-            bindings=resolved.bindings, rules=resolved.rules,
+            bindings=selected, rules=resolved.rules,
             postgres=resolved.postgres)
         containers._write_applied_push(ws, pushed_bindings, pushed_rules, generation,
                                        postgres=resolved.postgres)

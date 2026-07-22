@@ -18,7 +18,7 @@ Grammar (canonical):
     credproxy workspace list [FILTER]
     credproxy list [FILTER]                       # canonical survey
     credproxy workspace NAME {enter|start|stop|recreate|delete|apply|inspect|logs}
-    credproxy workspace NAME binding {add|remove|list|test} ...
+    credproxy workspace NAME binding {add|remove|list|test|activate|deactivate|refresh} ...
     credproxy injector {scaffold NAME|list}
     credproxy provider {scaffold NAME|list}
     credproxy dev {build|test|reload}
@@ -44,8 +44,8 @@ from . import render
 from .render import fail, say
 from .common import Ctx, _LeafParser
 from .cmd_binding import (
-    do_binding_add, do_binding_list, do_binding_remove, do_binding_test,
-    _binding_subparsers,
+    do_binding_add, do_binding_activate, do_binding_list, do_binding_refresh,
+    do_binding_remove, do_binding_test, _binding_subparsers,
 )
 from .cmd_dev import (
     do_dev_build, do_dev_reload, do_dev_test, do_doctor, do_emit_compose,
@@ -229,7 +229,7 @@ _STRICT_HELP = (
     "  credproxy workspace NAME exec [--login|--raw] -- CMD...   (one-shot; scriptable)\n"
     "  credproxy workspace NAME bind-dir [--dir PATH]   (associate with a directory)\n"
     "  credproxy workspace NAME mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
-    "  credproxy workspace NAME binding add|remove|list|test ...\n"
+    "  credproxy workspace NAME binding add|remove|list|test|activate|deactivate|refresh ...\n"
     "  credproxy workspace NAME rule add|remove|list|test ...   (traffic guardrails)\n"
     "  credproxy workspace NAME pack add PACK   (service pack: bindings + rules)\n"
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
@@ -266,7 +266,7 @@ _LOOSE_HELP = (
     "  credp create [NAME] --attach SELECTOR    attached workspace (externally-run containers)\n"
     "  credp emit-compose [NAME] [--image TAG]  Docker Compose proxy-sidecar fragment\n"
     "  credp mount add --volume NAME --target PATH [--ro] [--preserve] [--user-owned]\n"
-    "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
+    "  credp binding add|remove|list|test|activate|deactivate|refresh ...   (default workspace)\n"
     "  credp rule add|remove|list|test ...      (traffic guardrails)\n"
     "  credp pack add PACK                  (service pack: bindings + rules)\n"
     "  credp binding test --provider P --secret REF [--injector I]\n"
@@ -591,7 +591,8 @@ def _verb_help(verb_argv: list[str]) -> str:
             return _BINDING_ADD_HELP
         if sub == "test":
             return _BINDING_TEST_HELP
-        return ("credproxy workspace NAME binding {add|remove|list|test} ...\n"
+        return ("credproxy workspace NAME binding "
+                "{add|remove|list|test|activate|deactivate|refresh} ...\n"
                 "Run `binding add --help` or `binding test --help` for details.")
     if verb == "mount":
         sub = verb_argv[1] if len(verb_argv) > 1 and not verb_argv[1].startswith("-") else ""
@@ -747,6 +748,12 @@ def _run_ws_verb(
             do_binding_list(ctx, name)
         elif bc == "test":
             do_binding_test(ctx, name, a)
+        elif bc == "activate":
+            do_binding_activate(ctx, name, a, activate=True)
+        elif bc == "deactivate":
+            do_binding_activate(ctx, name, a, activate=False)
+        elif bc == "refresh":
+            do_binding_refresh(ctx, name, a)
     elif verb == "mount":
         if a.mountcmd == "add":
             do_mount_add(ctx, name, a)

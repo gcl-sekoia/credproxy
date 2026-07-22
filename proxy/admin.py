@@ -157,11 +157,23 @@ async def admin_config(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid JSON body"}, status=400)
 
     try:
-        new_creds = config.load_resolved(body, source="POST /admin/config")
-        new_pg = pg.load_pg(body, source="POST /admin/config",
-                            reserved=pg.reserved_names(new_creds))
+        generation = _accept_config(state, body)
     except (config.ConfigError, pg.PgConfigError) as e:
         return web.json_response({"error": str(e)}, status=400)
+    log.emit("api", msg="config accepted", generation=generation)
+    return web.json_response({"ok": True, "generation": generation})
+
+
+def _accept_config(state: AppState, body: dict) -> int:
+    """Validate `body` as a FULL config, swap it in under a freshly-bumped
+    generation, persist the envelope, and return the new generation. Raises
+    config.ConfigError / pg.PgConfigError on invalid config (the caller maps to
+    400) WITHOUT touching state. Shared by the full push (`/admin/config`) and the
+    surgical patch (`/admin/config/patch`), so both go through the exact same
+    validate+swap path -- a patch is never a lighter-validated back door."""
+    new_creds = config.load_resolved(body, source="POST /admin/config")
+    new_pg = pg.load_pg(body, source="POST /admin/config",
+                        reserved=pg.reserved_names(new_creds))
 
     # Carry the live runtime (re-seal) layer across the swap, so a routine
     # re-push (apply/start) doesn't drop an in-flight minted token's dynamic
@@ -170,7 +182,7 @@ async def admin_config(request: web.Request) -> web.Response:
     new_creds.adopt_runtime(state.creds)
 
     # Bump the config generation on every accepted push (a validation failure
-    # returns above without touching it). `/ready` gates on generation >= 1, so
+    # raises above without touching it). `/ready` gates on generation >= 1, so
     # this is the creds-ready signal that attached-workspace integrations poll.
     generation = state.generation + 1
 
@@ -186,8 +198,85 @@ async def admin_config(request: web.Request) -> web.Response:
     state.creds = new_creds
     state.pg_creds = new_pg
     state.generation = generation
-    log.emit("api", msg="config accepted", generation=generation)
-    return web.json_response({"ok": True, "generation": generation})
+    return generation
+
+
+async def admin_config_patch(request: web.Request) -> web.Response:
+    """POST /admin/config/patch -- bearer-gated SURGICAL refresh of a subset of
+    bindings by name.
+
+    The workspace never sees this; the host CLI's `binding refresh` re-resolves
+    only the named binding(s) and posts them here, so the proxy re-mints just
+    those while every OTHER active binding's already-resolved secret (which the
+    host does NOT cache) stays untouched. A full `/admin/config` re-push would
+    re-invoke every active provider -- the pain this avoids when a short-lived
+    token (gcloud ~1h) must be refreshed alongside a second costly binding.
+
+    Body: `{"bindings": [<resolved wire binding>, ...], "fingerprint"?: <str>}`.
+    Each entry is merged into the currently-held config BY NAME (it must already
+    be present -- a patch refreshes a live binding, it does not create one), then
+    the merged config goes through the SAME `_accept_config` validate+swap path as
+    a full push (so a bad patch is rejected identically) and bumps the generation.
+    Requires a config to already be loaded (409 otherwise -- push first)."""
+    state = request.app[STATE_KEY]
+    err = _auth_error(request)
+    if err is not None:
+        return err
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+
+    patch = body.get("bindings")
+    if not isinstance(patch, list) or not patch:
+        return web.json_response(
+            {"error": "expected a non-empty `bindings` array to patch"}, status=400)
+
+    if not CONFIG_PATH.exists():
+        return web.json_response(
+            {"error": "no config loaded; push a full config before patching"},
+            status=409)
+    try:
+        current = json.loads(CONFIG_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        return web.json_response(
+            {"error": f"held config unreadable: {e}"}, status=500)
+
+    existing = current.get("bindings")
+    existing = existing if isinstance(existing, list) else []
+    index_by_name = {
+        b.get("name"): i for i, b in enumerate(existing) if isinstance(b, dict)}
+    merged = list(existing)
+    patched: list[str] = []
+    for entry in patch:
+        if not isinstance(entry, dict):
+            return web.json_response(
+                {"error": "each patched binding must be an object"}, status=400)
+        name = entry.get("name")
+        if name not in index_by_name:
+            return web.json_response(
+                {"error": f"cannot patch binding '{name}': it is not in the loaded "
+                          f"config (push or activate it first)"}, status=400)
+        merged[index_by_name[name]] = entry
+        patched.append(name)
+
+    # Rebuild the full body with the merged bindings, carry the caller's new
+    # fingerprint (metadata may be identical -> same fingerprint -> `enter` still
+    # skips), and drop the old generation so `_accept_config` stamps a fresh one.
+    new_body = dict(current)
+    new_body["bindings"] = merged
+    if "fingerprint" in body:
+        new_body["fingerprint"] = body["fingerprint"]
+    new_body.pop("generation", None)
+
+    try:
+        generation = _accept_config(state, new_body)
+    except (config.ConfigError, pg.PgConfigError) as e:
+        return web.json_response({"error": str(e)}, status=400)
+    log.emit("api", msg="config patched", generation=generation, bindings=patched)
+    return web.json_response(
+        {"ok": True, "generation": generation, "patched": patched})
 
 
 async def admin_config_get(request: web.Request) -> web.Response:
@@ -271,5 +360,6 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
 admin_routes = [
     web.post("/admin/config", admin_config),
     web.get("/admin/config", admin_config_get),
+    web.post("/admin/config/patch", admin_config_patch),
     web.post("/admin/rule-test", admin_rule_test),
 ]
