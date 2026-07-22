@@ -992,7 +992,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
     pushed = []
 
-    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+    def fake_push(ws, port, notify=None, bindings=None, rules=None, postgres=None):
         pushed.append(True)
         return ([Binding(
             name="myb", injector="github", provider="env",
@@ -1049,7 +1049,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     _write_applied_bindings(ws, [])
     _apply_env(monkeypatch)
 
-    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+    def fake_push(ws, port, notify=None, bindings=None, rules=None, postgres=None):
         # The flock is held (depth > 0) at the moment the push + applied write run.
         assert _lock_depth.get(str(ws.lock_path), 0) > 0
         return ([Binding(name="myb", injector="github", provider="env",
@@ -1088,7 +1088,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     _update_applied(ws, config_generation=99)   # a stale prior generation
     _apply_env(monkeypatch)
 
-    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+    def fake_push(ws, port, notify=None, bindings=None, rules=None, postgres=None):
         return ([Binding(name="myb", injector="github", provider="env",
                          secret="TOK", hosts=("api.github.com",),
                          placeholder="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -1133,7 +1133,7 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     )
     pushed = []
 
-    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+    def fake_push(ws, port, notify=None, bindings=None, rules=None, postgres=None):
         pushed.append(True)
         return ([Binding(
             name="myb", injector="github", provider="env", secret="TOK",
@@ -1312,7 +1312,7 @@ def test_apply_repushes_on_reality_drift_and_heals_doctor(xdg, workspaces_dir, m
                 "bindings": summary["bindings"], "rules": summary["rules"]}
     pushed = []
 
-    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+    def fake_push(ws, port, notify=None, bindings=None, rules=None, postgres=None):
         pushed.append(True)
         proxy_gen["v"] = 4   # proxy accepted the push, generation bumped
         return ([Binding(name="b", injector="bearer", provider="env",
@@ -1357,7 +1357,7 @@ def test_apply_pushes_on_changed_secret_ref_projection_identical(xdg, workspaces
         "bindings": summary["bindings"], "rules": summary["rules"]})
     pushed = []
 
-    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+    def fake_push(ws, port, notify=None, bindings=None, rules=None, postgres=None):
         pushed.append(True)
         return ([Binding(name="b", injector="bearer", provider="env",
                          secret="TOK", hosts=("api.github.com",),
@@ -1409,7 +1409,7 @@ def test_apply_pushes_on_changed_block_rule_projection_identical(xdg, workspaces
         "bindings": summary["bindings"], "rules": summary["rules"]})
     pushed = []
 
-    def fake_push(ws, port, notify=None, bindings=None, rules=None):
+    def fake_push(ws, port, notify=None, bindings=None, rules=None, postgres=None):
         pushed.append(True)
         return (list(bindings or []), list(rules or []), 6)
     monkeypatch.setattr("credproxy_cli.core.engine.startup.push_config", fake_push)
@@ -2086,7 +2086,7 @@ def _drive_start(monkeypatch, ws, fake, generation=7):
                         classmethod(lambda cls: _fake_env()))
 
     def fake_push_config(ws, port, notify=None, bindings=None, rules=None,
-                         fingerprint=None):
+                         fingerprint=None, postgres=None):
         return (bindings or [], rules or [], generation)
     monkeypatch.setattr(startup, "push_config", fake_push_config)
     startup.start_workspace(ws)

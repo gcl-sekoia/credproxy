@@ -488,6 +488,27 @@ resolve. `credproxy pack list` shows every pack's full expansion before you
 apply. Packs are data in the layered registry, so an org ships its own by
 dropping a TOML in an overlay — see [`overlays.md`](../advanced/overlays.md).
 
+**PostgreSQL upstreams.** A `[[postgres]]` block is a database the workspace
+reaches through credproxy's connection broker instead of mitmproxy (Postgres
+isn't HTTP). It carries no placeholder and no scheme — just where to connect and
+which provider resolves the `{ username, password }` pair:
+
+```toml
+[[postgres]]
+name     = "analytics"
+host     = "db.internal"
+dbname   = "warehouse"
+sslmode  = "verify-full"           # server-leg TLS policy (default)
+provider = "vault"
+secret   = { username = "db/analytics#user", password = "db/analytics#pass" }
+env      = "DATABASE_URL"          # optional DSN export target
+```
+
+The workspace dials `postgresql://analytics@proxy.local:5432/warehouse` with no
+password; the broker re-originates to the real database with the real
+credential. Names are unique across bindings, rules, and pg bindings. See
+[`postgres.md`](postgres.md) for the full model.
+
 Injector definitions are a separate declarative file type (scheme, params,
 placeholder pattern, env hint) — see [`injectors.md`](injectors.md). Providers
 are host-side executables — see [`providers.md`](providers.md).
@@ -506,6 +527,8 @@ file. You can always skip the command and edit the TOML directly.
 | `credproxy workspace NAME binding list` | Read and print the bindings (placeholders resolved from the lockfile, read-only — nothing is written). Shows name, injector, provider, secret-id, hosts, env, and placeholder. |
 | `credproxy workspace NAME binding test [BINDING_NAME]` | Dry-run: fetch each binding's secret through its provider and report success and **value length only** (never the value). Exit 1 if any fail. |
 | `credproxy workspace binding test --provider P --secret REF [--injector I]` | Ad-hoc variant: test a provider/injector combination **before** binding it. No workspace is required. |
+| `credproxy workspace NAME postgres add --provider P --secret username=REF --secret password=REF --host H --dbname D [--port N] [--sslmode M] [--sslrootcert PATH] [--name N] [--env E]` | Append a `[[postgres]]` block — a database the workspace reaches through the broker at `proxy.local:5432` (Postgres isn't HTTP). Auto-named `pg-<dbname>` unless `--name`. Validates the whole set before writing. See [`postgres.md`](postgres.md). |
+| `credproxy workspace NAME postgres remove NAME` · `list` · `test [NAME]` | Remove a pg block (surgical edit; gated on the default workspace, loose), print the pg bindings, or resolve-only dry-run the credential (reports slot lengths, never values; exit 1 on failure). |
 | `credproxy workspace NAME edit` | Open `<name>.toml` in `$VISUAL`/`$EDITOR` (default `vi`), then validate it: warns if the edit left it invalid (without reverting), otherwise hints `apply`/`start`. Pure sugar over opening the file yourself. |
 | `credproxy workspace NAME config [--declared]` | Read-only: dump the container-side config. Default `effective` — every field with its in-effect value, all defaults filled (including the enter-time `workdir`→home and `enter_prelude`→shim defaults `inspect` leaves null), so you can see what actually applies even when it's not in the file. `--declared` shows only what's literally in the TOML. `--json` on both. |
 | `credproxy workspace NAME inspect` | Read-only: print the parsed config, container state, resolved host port, binding summary, **itemized drift** between the file and what was last applied, and — when the proxy is reachable — a **live drift** layer comparing the resolved config against what the proxy is *actually* running (see below). |

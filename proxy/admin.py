@@ -31,7 +31,9 @@ from aiohttp import web
 
 import config
 import log
+import pg
 from config import BindingCredentials, Credentials
+from pg import PgCredentials
 
 TOKEN_PATH = Path(os.environ["CREDPROXY_TOKEN_PATH"])
 CONFIG_PATH = Path(os.environ["CREDPROXY_TMPFS"]) / "config.json"
@@ -40,6 +42,10 @@ CONFIG_PATH = Path(os.environ["CREDPROXY_TMPFS"]) / "config.json"
 @dataclass
 class AppState:
     creds: Credentials = field(default_factory=lambda: BindingCredentials({}))
+    # The PostgreSQL broker's bindings (the `pg_bindings` wire section). Loaded
+    # and swapped alongside `creds` on each accepted push, under the SAME
+    # generation counter; the broker live-reads this per connection.
+    pg_creds: PgCredentials = field(default_factory=lambda: pg.EMPTY)
     # Monotonic count of accepted (validated) config pushes. 0 == no config ever
     # accepted; >= 1 == creds-ready (what `/ready` gates on). Persisted inside the
     # tmpfs config envelope so it survives a SIGHUP re-exec (the tmpfs lives on);
@@ -69,14 +75,16 @@ def load_initial_state() -> AppState:
     try:
         raw = json.loads(CONFIG_PATH.read_text())
         creds = config.load_resolved(raw, source=str(CONFIG_PATH))
-    except config.ConfigError as e:
+        pg_creds = pg.load_pg(raw, source=str(CONFIG_PATH),
+                              reserved=pg.reserved_names(creds))
+    except (config.ConfigError, pg.PgConfigError) as e:
         raise SystemExit(f"[admin] persisted config invalid: {e}")
     # Restore the generation stamped into the envelope so `/ready` stays green
     # across a `credproxy dev reload` (SIGHUP re-exec keeps the tmpfs). A file
     # written by an accepted push always carries `generation`; default 0 only
     # for a hand-crafted/legacy file (pre-release, no compat burden).
     generation = raw.get("generation", 0) if isinstance(raw, dict) else 0
-    return AppState(creds=creds, generation=generation)
+    return AppState(creds=creds, pg_creds=pg_creds, generation=generation)
 
 
 # ---- Middleware ----
@@ -150,7 +158,9 @@ async def admin_config(request: web.Request) -> web.Response:
 
     try:
         new_creds = config.load_resolved(body, source="POST /admin/config")
-    except config.ConfigError as e:
+        new_pg = pg.load_pg(body, source="POST /admin/config",
+                            reserved=pg.reserved_names(new_creds))
+    except (config.ConfigError, pg.PgConfigError) as e:
         return web.json_response({"error": str(e)}, status=400)
 
     # Carry the live runtime (re-seal) layer across the swap, so a routine
@@ -171,7 +181,10 @@ async def admin_config(request: web.Request) -> web.Response:
     # spoof it. load_resolved ignores keys other than `bindings`/`rules`.
     envelope = dict(body, generation=generation)
     _atomic_write(CONFIG_PATH, json.dumps(envelope).encode(), 0o400)
+    # Swap both credential sets together (no await between, so an in-flight
+    # request sees one consistent generation).
     state.creds = new_creds
+    state.pg_creds = new_pg
     state.generation = generation
     log.emit("api", msg="config accepted", generation=generation)
     return web.json_response({"ok": True, "generation": generation})

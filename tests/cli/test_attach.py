@@ -331,7 +331,8 @@ def test_push_managed_calls_engine_once_and_records(xdg, workspaces_dir,
                         lambda ws, notify=None: "http://127.0.0.1:9")
     calls = []
 
-    def fake_engine(admin_url, token, bindings, rules, fp=None, notify=None):
+    def fake_engine(admin_url, token, bindings, rules, fp=None, notify=None,
+                    postgres=()):
         calls.append(admin_url)
         return bindings, rules, 1
     monkeypatch.setattr(core_push, "push_to_target", fake_engine)

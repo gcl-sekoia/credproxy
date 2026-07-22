@@ -18,12 +18,14 @@ import json
 import os
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 from aiohttp import web
 
 from admin import STATE_KEY
 from config import Credentials
-from constants import PROXY_PORT
+from constants import PG_CLIENT_PORT, PG_PORT, PROXY_PORT
+from pg import PgCredentials
 
 CA_CERT_PATH = Path("/home/mitmuser/.mitmproxy/mitmproxy-ca-cert.pem")
 VERSION = "0.0.1"
@@ -152,6 +154,20 @@ What YOU must do, per scheme:
                      disclose -- if a script binding won't authenticate, ask the
                      operator where its placeholder must ride.
 
+PostgreSQL: databases are NOT reached through the HTTP interception above --
+they go through a separate credential-injecting broker you dial explicitly.
+Fetch the pg upstreams (an object keyed by binding name) from /setup:
+
+    curl -s http://proxy.local/setup | jq '.pg_bindings'
+
+Each value has `env` (suggested env var, e.g. DATABASE_URL), `dbname`, and a
+ready-made `dsn`. Connect your client to that `dsn`
+(postgresql://<binding>@proxy.local:5432/<db>) -- you authenticate as the
+binding NAME with NO password (the client leg is trusted loopback); the broker
+re-originates to the real database with the real credential. After bootstrap a
+login shell already exports the DSN under `env` (e.g. $DATABASE_URL) via
+/exports.sh. You never see the real host, user, or password.
+
 You never see a real credential value -- the proxy holds it. A request to an
 intercepted host whose placeholder doesn't match is forwarded AS-IS: if you get
 an upstream 401 while sending a placeholder-shaped token, the binding didn't fire
@@ -180,7 +196,8 @@ Endpoints (all GET):
   /bootstrap.sh  one-shot setup: install CA + write /etc/profile.d
   /env.sh        CA-trust env exports only (for `eval` use)
   /exports.sh    binding placeholder exports (`export ENV="placeholder"`)
-  /setup         JSON: ca_url, ca_env, version, intercept_hosts, bindings, rules
+  /setup         JSON: ca_url, ca_env, version, intercept_hosts, bindings,
+                 pg_bindings, rules
   /llms.txt      this file
 """
 
@@ -205,6 +222,19 @@ def workspace_bindings(creds: Credentials) -> dict:
     }
 
 
+def pg_workspace_bindings(pg_creds: PgCredentials) -> dict:
+    """JSON shape for /setup's `pg_bindings`: an OBJECT keyed by binding name,
+    each value carrying ONLY the least-disclosure fields the workspace needs to
+    build its DSN -- the effective env var, the database name, and the ready-made
+    loopback `dsn`. NEVER the real upstream host, username, password, sslmode, or
+    sslrootcert (those are the operator's, and the workspace dials proxy.local
+    regardless). The `name` is the key, never repeated."""
+    return {
+        b.name: {"env": b.env, "dbname": b.dbname, "dsn": pg_dsn(b)}
+        for b in pg_creds.bindings.values()
+    }
+
+
 def _sh_squote(value: str) -> str:
     """POSIX single-quote `value` so it is safe as a shell word. Single quotes
     disable every expansion (`$`, backtick, `\\`, `"`), and an embedded single
@@ -222,13 +252,25 @@ def _sh_squote(value: str) -> str:
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-def exports_body(creds: Credentials) -> str:
-    """Body of /exports.sh: one `export ENV="placeholder"` line per binding that
-    has BOTH an effective env var name AND a non-null placeholder. Skips
-    sign-family bindings (no placeholder, e.g. sigv4) and env-less bindings; a
-    non-identifier env is skipped with an observable comment line (env names are
-    already disclosed via /setup) rather than breaking the whole script.
-    Reads the LIVE config each call. Nothing to export -> a valid empty script."""
+def pg_dsn(binding) -> str:
+    """The workspace-facing DSN for a pg binding: the workspace connects to the
+    broker at proxy.local:PG_CLIENT_PORT as the binding NAME (the selector), and
+    the broker re-originates to the real DB. The client leg is plain loopback
+    (sslmode=disable on THIS hop) -- the broker's server-leg TLS is independent.
+    Name and dbname are percent-encoded so an odd name still yields a valid URI
+    that round-trips back to the exact selector."""
+    user = quote(binding.name, safe="")
+    db = quote(binding.dbname, safe="")
+    return f"postgresql://{user}@proxy.local:{PG_CLIENT_PORT}/{db}?sslmode=disable"
+
+
+def exports_body(creds: Credentials, pg_creds: PgCredentials | None = None) -> str:
+    """Body of /exports.sh: one `export ENV=<value>` line per binding that has an
+    effective env var name -- the inert placeholder for an HTTP binding (skipping
+    sign-family/no-placeholder bindings), the loopback DSN for a pg binding. A
+    non-identifier env is skipped with an observable comment (env names are
+    already disclosed via /setup) rather than breaking the whole script. Reads
+    the LIVE config each call. Nothing to export -> a valid empty script."""
     lines = []
     for b in creds.inward_bindings():
         if not b.env or b.placeholder is None:
@@ -240,6 +282,14 @@ def exports_body(creds: Credentials) -> str:
             lines.append(f"# skipped '{name}': env is not a shell identifier")
             continue
         lines.append(f"export {b.env}={_sh_squote(b.placeholder)}")
+    for pb in (pg_creds.bindings.values() if pg_creds else ()):
+        if not pb.env:
+            continue
+        if not _ENV_NAME_RE.fullmatch(pb.env):
+            name = pb.name.replace("\r", " ").replace("\n", " ")
+            lines.append(f"# skipped pg '{name}': env is not a shell identifier")
+            continue
+        lines.append(f"export {pb.env}={_sh_squote(pg_dsn(pb))}")
     if not lines:
         return "# no credproxy exports\n"
     return "\n".join(lines) + "\n"
@@ -290,6 +340,11 @@ async def _capture_pending() -> list[str]:
     pending = []
     if not await _listener_bound(PROXY_HOST, PROXY_PORT):
         pending.append("mitmproxy-listener")
+    # The pg broker is a second always-on listener (started unconditionally in
+    # main.run, creds-agnostic like the others). Probe it too so `start`/`--wait`
+    # don't hand off a workspace whose pg egress isn't yet being brokered.
+    if not await _listener_bound(PROXY_HOST, PG_PORT):
+        pending.append("pg-listener")
     if not CA_CERT_PATH.exists():
         pending.append("ca-cert")
     return pending
@@ -361,7 +416,7 @@ async def exports_sh(request: web.Request) -> web.Response:
     CA-trust snapshot) so a power user can source exactly one -- and so this one
     reflects the LIVE loaded config on every request, not a module constant."""
     state = request.app[STATE_KEY]
-    return web.Response(body=exports_body(state.creds),
+    return web.Response(body=exports_body(state.creds, state.pg_creds),
                         content_type="text/x-shellscript")
 
 
@@ -381,6 +436,10 @@ async def setup(request: web.Request) -> web.Response:
         # the decision path still intercepts them.
         "intercept_hosts": sorted(state.creds.disclosed_intercept_hosts()),
         "bindings": workspace_bindings(state.creds),
+        # PostgreSQL broker upstreams (see pg_workspace_bindings): keyed by the
+        # binding name, least-disclosure {env, dbname, dsn}. Empty object when no
+        # pg bindings are configured.
+        "pg_bindings": pg_workspace_bindings(state.pg_creds),
         # Least disclosure: only VISIBLE rules are enumerated (name, hosts,
         # methods, path, action -- never script source or rewrite values); hidden
         # rules are excluded entirely. The /llms.txt sentence keeps the workspace
@@ -407,8 +466,8 @@ async def index(_: web.Request) -> web.Response:
         "  GET /ca.crt       proxy CA certificate (PEM)\n"
         "  GET /bootstrap.sh install CA + trust env  (curl -sSL proxy.local/bootstrap.sh | sh)\n"
         "  GET /env.sh       CA-trust env exports\n"
-        "  GET /exports.sh   binding placeholder exports (export ENV=...)\n"
-        "  GET /setup        bindings + workspace info (JSON)\n"
+        "  GET /exports.sh   binding placeholder + pg DSN exports (export ENV=...)\n"
+        "  GET /setup        bindings + pg_bindings + workspace info (JSON)\n"
         "  GET /llms.txt     guidance for agents\n\n"
         "Admin routes (/admin/*) require a bearer token and are host-only.\n"
     )

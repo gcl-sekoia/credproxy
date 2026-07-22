@@ -60,6 +60,10 @@ from .cmd_registry import (
     do_def_list, do_injector_api, do_injector_check, do_pack_list,
     do_provider_show, do_scaffold, do_scaffold_script, do_script_check,
 )
+from .cmd_postgres import (
+    do_postgres_add, do_postgres_list, do_postgres_remove, do_postgres_test,
+    _postgres_subparsers,
+)
 from .cmd_rule import (
     do_rule_add, do_rule_list, do_rule_remove, do_rule_test, _rule_subparsers,
 )
@@ -73,7 +77,7 @@ from .cmd_workspace import (
 _WS_VERBS = {
     "enter", "exec", "edit", "start", "stop", "recreate", "delete", "apply",
     "inspect", "config", "logs", "binding", "bind-dir", "mount", "rule",
-    "push", "resolve",
+    "postgres", "push", "resolve",
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
@@ -167,6 +171,10 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     rule = sub.add_parser("rule")
     rsub = rule.add_subparsers(dest="rulecmd", required=True)
     _rule_subparsers(rsub)
+
+    postgres = sub.add_parser("postgres")
+    pgsub = postgres.add_subparsers(dest="postgrescmd", required=True)
+    _postgres_subparsers(pgsub)
 
     pack = sub.add_parser("pack")
     psub = pack.add_subparsers(dest="packcmd", required=True)
@@ -599,6 +607,13 @@ def _verb_help(verb_argv: list[str]) -> str:
                 "Rules govern traffic on intercepted hosts (block/respond/rewrite/\n"
                 "script), credential-free. `rule test METHOD URL` dry-runs the\n"
                 "matcher. Run `rule add --help` for details.")
+    if verb == "postgres":
+        return ("credproxy workspace NAME postgres {add|remove|list|test} ...\n"
+                "PostgreSQL broker upstreams: the workspace dials\n"
+                "postgresql://<name>@proxy.local:5432/<db> and the proxy\n"
+                "re-originates to the real database with an injected credential.\n"
+                "`postgres add --provider P --secret username=REF --secret\n"
+                "password=REF --host H --dbname D [--sslmode M] [--env VAR]`.")
     if verb == "pack":
         return _PACK_ADD_HELP
     if verb in _VERB_HELP:
@@ -745,6 +760,16 @@ def _run_ws_verb(
             do_rule_list(ctx, name)
         elif rc == "test":
             do_rule_test(ctx, name, a)
+    elif verb == "postgres":
+        pc = a.postgrescmd
+        if pc == "add":
+            do_postgres_add(ctx, name, a)
+        elif pc == "remove":
+            do_postgres_remove(ctx, name, a)
+        elif pc == "list":
+            do_postgres_list(ctx, name)
+        elif pc == "test":
+            do_postgres_test(ctx, name, a)
     elif verb == "pack":
         if a.packcmd == "add":
             do_pack_add(ctx, name, a)
@@ -762,7 +787,7 @@ def _run_ws_verb(
 _ALIAS_TO_WS_VERB = {
     "enter", "exec", "edit", "start", "stop", "recreate", "delete", "apply",
     "inspect", "config", "logs", "binding", "bind-dir", "mount", "rule",
-    "resolve",
+    "postgres", "resolve",
 }
 
 
@@ -805,6 +830,13 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
         # a NAME by the generic path. Always acts on the resolved default
         # workspace; explicit names use `workspace NAME rule`.
         _run_ws_verb(ctx, None, ["rule", *rest], trailing)
+        return
+
+    if head == "postgres":
+        # Sub-noun (add/remove/list/test) -- special-cased like rule/binding/mount
+        # so the subcommand isn't eaten as a NAME. Acts on the resolved default
+        # workspace; explicit names use `workspace NAME postgres`.
+        _run_ws_verb(ctx, None, ["postgres", *rest], trailing)
         return
 
     if head in _ALIAS_TO_WS_VERB:

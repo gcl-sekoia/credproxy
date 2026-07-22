@@ -220,7 +220,7 @@ def _resolve_push(tail: list[str]) -> tuple[set[str], str | None]:
 
 def _resolve_alias(head: str, tail: list[str]) -> tuple[set[str], str | None]:
     # Mirrors _dispatch_alias (loose surface top-level aliases).
-    if head in ("binding", "mount", "rule"):
+    if head in ("binding", "mount", "rule", "postgres"):
         return _walk_leaf([head, *tail])
     if head == "use":
         return _GLOBALS, None

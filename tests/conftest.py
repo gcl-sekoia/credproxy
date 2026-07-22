@@ -35,6 +35,7 @@ if _proxy_dir not in sys.path:
 #    key is actually missing, so the in-image path never reads the file.
 _CONTRACT_KEYS = (
     "CREDPROXY_MITMPROXY_UID", "CREDPROXY_HTTP_PORT", "CREDPROXY_PROXY_PORT",
+    "CREDPROXY_PG_PORT", "CREDPROXY_PG_CLIENT_PORT",
     "CREDPROXY_SENTINEL_IP", "CREDPROXY_TMPFS", "CREDPROXY_TOKEN_PATH",
     "CREDPROXY_SOURCE",
 )

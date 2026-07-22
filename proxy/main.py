@@ -29,7 +29,8 @@ import addon
 import admin
 import bootstrap
 import log
-from constants import HTTP_PORT, PROXY_PORT
+import pgbroker
+from constants import HTTP_PORT, PG_PORT, PROXY_PORT
 
 
 def make_http_app(state: admin.AppState) -> web.Application:
@@ -59,6 +60,15 @@ async def run() -> None:
     await web.TCPSite(http_runner, "0.0.0.0", HTTP_PORT).start()
     log.emit("main", msg=f"HTTP API listening on 0.0.0.0:{HTTP_PORT}")
 
+    # PostgreSQL credential broker: a second listener the workspace explicitly
+    # dials at proxy.local:5432 (redirected to PG_PORT). Not HTTP, so it can't
+    # ride mitmproxy; it live-reads the pushed pg bindings off `state`. Runs as
+    # uid CREDPROXY_MITMPROXY_UID, so its server-leg outbound is owner-exempted
+    # from the iptables catch-all (no redirect loop).
+    broker = pgbroker.PgBroker(lambda: state.pg_creds)
+    pg_server = await asyncio.start_server(broker.handle, "127.0.0.1", PG_PORT)
+    log.emit("main", msg=f"pg broker listening on 127.0.0.1:{PG_PORT}")
+
     opts = options.Options(
         listen_host="127.0.0.1",
         listen_port=PROXY_PORT,
@@ -72,6 +82,8 @@ async def run() -> None:
     try:
         await master.run()
     finally:
+        pg_server.close()
+        await pg_server.wait_closed()
         await http_runner.cleanup()
 
 

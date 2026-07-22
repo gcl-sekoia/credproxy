@@ -42,6 +42,8 @@ Read these in order the first time.
 - [Injectors](reference/injectors.md) — the credential-shaping schemes
   (`bearer`, `basic`, `sigv4`, re-seal, scripts).
 - [Rules](reference/rules.md) — the traffic-governance layer in full.
+- [PostgreSQL](reference/postgres.md) — the credential-injecting connection
+  broker: a second listener the workspace dials at `proxy.local:5432`.
 - [Workspace internals](reference/workspace.md) — the bring-your-own-image
   contract: what joining the proxy's network imposes, and how users, mounts, and
   SELinux behave.

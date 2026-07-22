@@ -59,11 +59,13 @@ def push_workspace(ws: Workspace, notify: Notify = _noop, *,
         # load-modify-write reads the fresh lock and preserves the placeholders.
         if resolved.lock_dirty:
             save_lock(ws, resolved.lock)
-        bindings, rules = resolved.bindings, resolved.rules
-        fp = combined_fingerprint(bindings, rules)
+        bindings, rules, postgres = \
+            resolved.bindings, resolved.rules, resolved.postgres
+        fp = combined_fingerprint(bindings, rules, postgres)
         _, _, generation = core_push.push_to_target(
-            admin_url, token, bindings, rules, fp, notify)
-        containers._write_applied_push(ws, bindings, rules, generation)
+            admin_url, token, bindings, rules, fp, notify, postgres=postgres)
+        containers._write_applied_push(ws, bindings, rules, generation,
+                                       postgres=postgres)
     return admin_url
 
 
@@ -83,9 +85,10 @@ def resolve_workspace_wire(ws: Workspace, notify: Notify = _noop) -> dict:
         resolved = resolve_workspace(ws)
         if resolved.lock_dirty:
             save_lock(ws, resolved.lock)
-    bindings, rules = resolved.bindings, resolved.rules
-    fp = combined_fingerprint(bindings, rules)
-    return build_wire(bindings, rules, fp)
+    bindings, rules, postgres = \
+        resolved.bindings, resolved.rules, resolved.postgres
+    fp = combined_fingerprint(bindings, rules, postgres)
+    return build_wire(bindings, rules, fp, postgres=postgres)
 
 
 def start_workspace(ws: Workspace, notify: Notify = _noop,
@@ -178,15 +181,17 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
     from ..model.rules import combined_fingerprint
     if resolved.lock_dirty:
         save_lock(ws, resolved.lock)
-    bindings, rules = resolved.bindings, resolved.rules
-    want_fp = combined_fingerprint(bindings, rules)
+    bindings, rules, postgres = \
+        resolved.bindings, resolved.rules, resolved.postgres
+    want_fp = combined_fingerprint(bindings, rules, postgres)
     status = None if (force_push or proxy_fresh) else proxy_status(ws, host_port)
     if containers._should_push(force_push, proxy_fresh, status, want_fp):
         notify("pushing config...")
         pushed_bindings, pushed_rules, generation = push_config(
             ws, host_port, notify, bindings=bindings, rules=rules,
-            fingerprint=want_fp)
-        containers._write_applied_push(ws, pushed_bindings, pushed_rules, generation)
+            fingerprint=want_fp, postgres=postgres)
+        containers._write_applied_push(ws, pushed_bindings, pushed_rules, generation,
+                                       postgres=postgres)
     else:
         notify("config unchanged on the proxy; skipped push "
                "(use `enter --push` to refresh)")
@@ -474,7 +479,8 @@ def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
     current_rules = resolved.rules
 
     drift = containers._compute_drift(ws, cfg, current_binding_summaries,
-                                      running=True, current_rules=current_rules)
+                                      running=True, current_rules=current_rules,
+                                      current_postgres=list(resolved.postgres))
 
     applied_labels: list[str] = []
     deferred_labels: list[str] = []
@@ -487,13 +493,18 @@ def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
             f"credproxy workspace {ws.name} start)"
         )
 
-    # Bindings and/or rules drift -> ONE push (they ride the same wire config).
-    # These come from the OFFLINE, content-complete `_compute_drift`, so they see
-    # a changed secret ref / provider / injector params / rule detail that the
-    # lossy live projection cannot -- they are the AUTHORITATIVE config signal.
+    # Bindings, rules, and pg bindings drift -> ONE push (they all ride the same
+    # wire config). These come from the OFFLINE, content-complete `_compute_drift`,
+    # so they see a changed secret ref / provider / injector params / rule detail /
+    # pg upstream the lossy live projection cannot -- they are the AUTHORITATIVE
+    # config signal. Pg drift MUST be in this set: a `postgres remove`/rotate is
+    # live-appliable, and omitting it would silently keep a revoked binding (or a
+    # stale password) brokering on the running proxy until a full restart.
     binding_changes = [c for c in drift.changes if c.kind == "bindings"]
     rule_changes = [c for c in drift.changes if c.kind == "rules"]
-    content_drift = bool(binding_changes) or bool(rule_changes)
+    postgres_changes = [c for c in drift.changes if c.kind == "postgres"]
+    content_drift = bool(binding_changes) or bool(rule_changes) \
+        or bool(postgres_changes)
 
     # The live view can only ADD a push reason the offline signal can't see:
     # reality-drift -- the proxy lost its tmpfs (or a foreign push landed), so it
@@ -512,14 +523,19 @@ def _apply_config_locked(ws: Workspace, notify: Notify) -> "ApplyResult":
         # closing doctor's config-sync loop.
         pushed_bindings, pushed_rules, generation = push_config(
             ws, host_port, notify,
-            bindings=resolved.bindings, rules=resolved.rules)
-        containers._write_applied_push(ws, pushed_bindings, pushed_rules, generation)
+            bindings=resolved.bindings, rules=resolved.rules,
+            postgres=resolved.postgres)
+        containers._write_applied_push(ws, pushed_bindings, pushed_rules, generation,
+                                       postgres=resolved.postgres)
         if binding_changes:
             applied_labels.append(
                 f"bindings ({', '.join(c.item for c in binding_changes)})")
         if rule_changes:
             applied_labels.append(
                 f"rules ({', '.join(c.item for c in rule_changes)})")
+        if postgres_changes:
+            applied_labels.append(
+                f"postgres ({', '.join(c.item for c in postgres_changes)})")
         if reality_drift and not content_drift:
             applied_labels.append(
                 f"config re-pushed (proxy held a config we didn't push: "

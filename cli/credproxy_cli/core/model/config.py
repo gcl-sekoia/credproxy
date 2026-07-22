@@ -62,7 +62,7 @@ KNOWN_KEYS = frozenset({
     "image", "home", "directory", "mounts", "env", "setup", "user", "workdir",
     "enter_prelude", "shell", "exec_flags", "forward_env", "run_flags",
     "map_host_user", "user_uid", "auto_stop", "binding", "rule", "attach",
-    "pack",
+    "pack", "postgres",
 })
 
 # The `attach` selector keys. Exactly one must be present. `compose_project` is

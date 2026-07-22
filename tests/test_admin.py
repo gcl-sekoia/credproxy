@@ -328,7 +328,8 @@ async def test_health_503_when_listener_not_bound(aiohttp_client, app, monkeypat
     assert resp.status == 503
     body = await resp.json()
     assert body["ok"] is False
-    assert body["pending"] == ["mitmproxy-listener"]
+    # Both always-on listeners are probed; the shared stub reports both down.
+    assert body["pending"] == ["mitmproxy-listener", "pg-listener"]
 
 
 async def test_health_503_before_ca_generated(aiohttp_client, app, monkeypatch, tmp_path):
@@ -350,7 +351,20 @@ async def test_health_503_lists_all_pending_at_boot(aiohttp_client, app, monkeyp
     client = await aiohttp_client(app)
     resp = await client.get("/health")
     assert resp.status == 503
-    assert (await resp.json())["pending"] == ["mitmproxy-listener", "ca-cert"]
+    assert (await resp.json())["pending"] == \
+        ["mitmproxy-listener", "pg-listener", "ca-cert"]
+
+
+async def test_health_503_when_only_pg_listener_down(aiohttp_client, app, monkeypatch):
+    """Port-aware probe: mitmproxy up but the pg broker not yet accepting ->
+    only `pg-listener` pending. The pg listener is part of capture-readiness."""
+    async def probe(host, port, timeout=0.5):
+        return port != bootstrap.PG_PORT
+    monkeypatch.setattr(bootstrap, "_listener_bound", probe)
+    client = await aiohttp_client(app)
+    resp = await client.get("/health")
+    assert resp.status == 503
+    assert (await resp.json())["pending"] == ["pg-listener"]
 
 
 async def test_listener_bound_probe_observes_real_socket():
@@ -527,7 +541,7 @@ async def test_setup_generation_adds_no_disclosure(aiohttp_client, app):
     body = await (await client.get("/setup")).json()
     assert set(body.keys()) == {
         "version", "workspace", "config_generation", "ca_url", "ca_env",
-        "intercept_hosts", "bindings", "rules",
+        "intercept_hosts", "bindings", "pg_bindings", "rules",
     }
 
 

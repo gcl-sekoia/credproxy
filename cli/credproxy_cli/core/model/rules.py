@@ -613,18 +613,21 @@ def rules_fingerprint_items(rules: list[Rule]) -> list[dict]:
     return rule_wire_entries(rules)
 
 
-def combined_fingerprint(bindings, rules: list[Rule]) -> str:
-    """A single stable hash over the FULL pushed config (bindings + rules), so a
-    change to either re-pushes. Folds bindings.`_fingerprint_items` and this
-    module's rule items; equals bindings.config_fingerprint when there are no
-    rules only up to the wrapper shape (the push path always uses this)."""
+def combined_fingerprint(bindings, rules: list[Rule], postgres=()) -> str:
+    """A single stable hash over the FULL pushed config (bindings + rules + pg
+    bindings), so a change to any re-pushes. Folds bindings.`_fingerprint_items`,
+    this module's rule items, and postgres items. The `postgres` key is emitted
+    only when non-empty, so a workspace with no `[[postgres]]` hashes exactly as
+    before (no spurious re-push on upgrade)."""
     import hashlib
     import json as _json
 
     from .bindings import _fingerprint_items
 
-    blob = _json.dumps(
-        {"bindings": _fingerprint_items(bindings),
-         "rules": rules_fingerprint_items(rules)},
-        sort_keys=True, separators=(",", ":"))
+    payload = {"bindings": _fingerprint_items(bindings),
+               "rules": rules_fingerprint_items(rules)}
+    if postgres:
+        from .postgres import postgres_fingerprint_items
+        payload["postgres"] = postgres_fingerprint_items(list(postgres))
+    blob = _json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()

@@ -51,6 +51,12 @@ from .packs import (
     resolve_options,
     resolve_pack_credential,
 )
+from .postgres import (
+    Postgres,
+    _parse_postgres,
+    _require_postgres_names,
+    validate as validate_postgres,
+)
 from .rules import (
     Rule,
     _parse_rules,
@@ -81,6 +87,7 @@ class ResolvedWorkspace:
     config: dict
     bindings: list[Binding]
     rules: list[Rule]
+    postgres: list[Postgres]
     lock: dict
     lock_dirty: bool
     notes: list[str] = field(default_factory=list)
@@ -132,6 +139,8 @@ def _resolve_from(text: str, lock: dict, source: str, *,
     _require_binding_names(bindings, source)
     rules = _parse_rules(raw, source)
     _require_rule_names(rules, source)
+    postgres = _parse_postgres(raw, source)
+    _require_postgres_names(postgres, source)
 
     old_ph: dict = lock.get("placeholders", {})
     new_ph: dict[str, str] = {}
@@ -221,6 +230,11 @@ def _resolve_from(text: str, lock: dict, source: str, *,
     # wire.
     validate_bindings(merged_bindings, source)
     validate_rules(merged_rules, source)
+    validate_postgres(postgres, source)
+    # pg binding names share the config namespace with bindings/rules (the proxy
+    # keys /setup by name across all three, and mirrors this in load_pg's
+    # `reserved` check) -- so a pg name must not collide with either.
+    _reject_pg_collisions(postgres, merged_bindings, merged_rules, source)
 
     lock_dirty = new_ph != old_ph or packs_dirty or new_packs != old_packs
     new_lock = {**lock, "placeholders": new_ph}
@@ -234,10 +248,24 @@ def _resolve_from(text: str, lock: dict, source: str, *,
         config=cfg,
         bindings=merged_bindings,
         rules=merged_rules,
+        postgres=postgres,
         lock=new_lock,
         lock_dirty=lock_dirty,
         notes=notes,
     )
+
+
+def _reject_pg_collisions(postgres, bindings, rules, source: str) -> None:
+    """A `[[postgres]]` name must be unique across the whole config namespace --
+    not just among pg bindings (validate_postgres covers that), but against every
+    `[[binding]]` and `[[rule]]` too."""
+    taken = {b.name for b in bindings} | {r.name for r in rules}
+    for p in postgres:
+        if p.name in taken:
+            raise ConfigError(
+                f"{source}: pg binding '{p.name}' collides with a binding/rule of "
+                f"the same name -- names are unique across bindings, rules, and "
+                f"pg bindings")
 
 
 def _expand_ref(spec, ref, inputs: dict, old) -> dict:

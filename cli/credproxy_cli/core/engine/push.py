@@ -103,7 +103,7 @@ def _discover_container(spec: str, notify: Notify) -> str:
 
 def push_to_target(admin_url: str, token: str, bindings, rules,
                    fingerprint: str | None = None,
-                   notify: Notify = _noop) -> tuple:
+                   notify: Notify = _noop, postgres=()) -> tuple:
     """Resolve secrets + POST the wire body to `<admin_url>/admin/config`, bearer
     token. The shared engine every push path funnels through. Returns
     `(bindings, rules, generation)` so the caller can record applied-state --
@@ -111,7 +111,7 @@ def push_to_target(admin_url: str, token: str, bindings, rules,
     push (`{"ok": true, "generation": N}`), or None if the response omitted it.
     Raises ProxyError on connect/401/non-200. The URL must already be
     loopback-validated."""
-    wire = build_wire(bindings, rules, fingerprint)
+    wire = build_wire(bindings, rules, fingerprint, postgres=postgres)
     body = json.dumps(wire).encode()
     status, payload = _http_post_json(f"{admin_url}/admin/config", body, token)
     if status == 200:
@@ -126,7 +126,7 @@ def push_to_target(admin_url: str, token: str, bindings, rules,
 
 
 def push_config(ws: "Workspace", http_port: int, notify: Notify = _noop,
-                bindings=None, rules=None, fingerprint=None):
+                bindings=None, rules=None, fingerprint=None, postgres=None):
     """Resolve bindings + rules (placeholders bound from the lock), fetch each
     secret from its provider, and POST the resulting wire config (bindings + rules
     + a metadata `fingerprint`) to the managed proxy's /admin/config on
@@ -148,7 +148,7 @@ def push_config(ws: "Workspace", http_port: int, notify: Notify = _noop,
     from ..model.rules import combined_fingerprint
     from ..model.workspace import read_token
 
-    if bindings is None or rules is None:
+    if bindings is None or rules is None or postgres is None:
         resolved = resolve_workspace(ws)
         if resolved.lock_dirty:
             save_lock(ws, resolved.lock)
@@ -156,11 +156,13 @@ def push_config(ws: "Workspace", http_port: int, notify: Notify = _noop,
             bindings = resolved.bindings
         if rules is None:
             rules = resolved.rules
+        if postgres is None:
+            postgres = resolved.postgres
     if fingerprint is None:
-        fingerprint = combined_fingerprint(bindings, rules)
+        fingerprint = combined_fingerprint(bindings, rules, postgres)
     return push_to_target(
         f"http://127.0.0.1:{http_port}", read_token(ws),
-        bindings, rules, fingerprint, notify=notify)
+        bindings, rules, fingerprint, notify=notify, postgres=postgres)
 
 
 def rule_test(admin_url: str, token: str, method: str, url: str) -> dict:

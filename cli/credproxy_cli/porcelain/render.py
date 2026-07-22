@@ -317,6 +317,12 @@ class Renderer:
                 act = r["action"] + (f":{r['script']}" if r.get("script") else "")
                 vis = "" if r["visible"] else "  [hidden]"
                 print(f"  - {r['name']}: {m} {scope}{p}  -> {act}{vis}")
+        if data.get("postgres"):
+            print(f"postgres    {len(data['postgres'])}")
+            for p in data["postgres"]:
+                env = f"  ${p['env']}" if p.get("env") else ""
+                print(f"  - {p['name']}: {p['host']}:{p['port']}/{p['dbname']} "
+                      f"({p['sslmode']}, via {p['provider']}){env}")
         # Drift section.
         drift = data.get("drift", {})
         running = data.get("_running", False)
@@ -519,6 +525,44 @@ class Renderer:
             print(f"note:{passthrough.strip()}")
         for m in matches:
             print(self._rule_match_line(m))
+
+    # -- postgres add / remove / list / test --
+    def postgres_added(self, name: str, ws: str, p: dict,
+                       attached: bool = False) -> None:
+        print(f"added pg binding '{name}' to workspace '{ws}'")
+        print(f"  upstream {p['host']}:{p['port']}/{p['dbname']}")
+        print(f"  sslmode  {p['sslmode']}")
+        print(f"  provider {p['provider']} ({p['secret']})")
+        if p.get("env"):
+            print(f"  env      {p['env']}  (DSN via /exports.sh)")
+        print(f"  dial     postgresql://{name}@proxy.local:5432/{p['dbname']}")
+        _say_push_hint(ws, attached)
+
+    def postgres_removed(self, name: str, ws: str) -> None:
+        print(f"removed pg binding '{name}' from workspace '{ws}'")
+
+    def postgres_list(self, ws: str, rows: list[dict]) -> None:
+        if not rows:
+            print(f"no pg bindings in workspace '{ws}'")
+            return
+        header = ("NAME", "UPSTREAM", "DBNAME", "SSLMODE", "PROVIDER", "SECRET", "ENV")
+        table = [header]
+        for p in rows:
+            table.append((
+                p["name"], f"{p['host']}:{p['port']}", p["dbname"], p["sslmode"],
+                p["provider"], p["secret"], p.get("env") or "-",
+            ))
+        widths = [max(len(row[i]) for row in table) for i in range(len(header))]
+        for row in table:
+            print("  ".join(f"{row[i]:<{widths[i]}}" for i in range(len(header))).rstrip())
+
+    def postgres_test(self, results: list[dict]) -> None:
+        for r in results:
+            if r["ok"]:
+                slots = ", ".join(f"{s}: len {n}" for s, n in r["slots"].items())
+                print(f"ok    {r['name']}  (provider {r['provider']}; {slots})")
+            else:
+                print(f"FAIL  {r['name']}  (provider {r['provider']}): {r['error']}")
 
     # -- injector / provider list --
     def def_list(self, kind: str, rows: list[dict]) -> None:
@@ -928,6 +972,19 @@ class JsonRenderer(Renderer):
     def rule_test(self, method: str, url: str, matches: list[dict]) -> None:
         self._emit({"method": method, "url": url, "live": False,
                     "matches": matches})
+
+    def postgres_added(self, name: str, ws: str, p: dict,
+                       attached: bool = False) -> None:
+        self._emit({"workspace": ws, "postgres": p})
+
+    def postgres_removed(self, name: str, ws: str) -> None:
+        self._emit({"workspace": ws, "removed": name})
+
+    def postgres_list(self, ws: str, rows: list[dict]) -> None:
+        self._emit({"workspace": ws, "postgres": rows})
+
+    def postgres_test(self, results: list[dict]) -> None:
+        self._emit(results)
 
     def doctor(self, checks: list[dict]) -> None:
         self._emit(checks)

@@ -35,7 +35,14 @@ iptables -t nat -A OUTPUT -d "$CREDPROXY_SENTINEL_IP" -p tcp --dport 80 \
 iptables -t nat -A OUTPUT -m owner --uid-owner "$CREDPROXY_MITMPROXY_UID" -j RETURN
 # 3. Don't touch workspace-internal loopback.
 iptables -t nat -A OUTPUT -d 127.0.0.0/8 -j RETURN
-# 4. Send everything else to mitmproxy.
+# 4. Sentinel:5432 -> PostgreSQL credential broker. Destination-scoped to the
+#    sentinel only, so real pg egress to any other host stays passthrough (this
+#    is NOT port-based selection -- the workspace explicitly dials proxy.local).
+#    Must precede the catch-all: the broker binds PG_PORT, but the workspace
+#    connects to the well-known PG_CLIENT_PORT.
+iptables -t nat -A OUTPUT -d "$CREDPROXY_SENTINEL_IP" -p tcp \
+    --dport "$CREDPROXY_PG_CLIENT_PORT" -j REDIRECT --to-port "$CREDPROXY_PG_PORT"
+# 5. Send everything else to mitmproxy.
 iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port "$CREDPROXY_PROXY_PORT"
 
 # filter OUTPUT — force HTTP/3 to fall back to TCP.

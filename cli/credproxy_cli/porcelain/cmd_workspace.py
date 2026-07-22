@@ -503,6 +503,18 @@ def do_inspect(ctx: Ctx, name: str | None) -> None:
             }
             for r in data.rules
         ],
+        "postgres": [
+            {
+                "name": p.name,
+                "host": p.host,
+                "port": p.port,
+                "dbname": p.dbname,
+                "sslmode": p.sslmode,
+                "provider": p.provider,
+                "env": p.env,
+            }
+            for p in data.postgres
+        ],
         "drift": {
             "in_sync": data.drift.in_sync,
             "changes": [

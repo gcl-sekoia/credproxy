@@ -161,6 +161,7 @@ def _workspace_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
     out += binding_checks
     out += _script_compile_checks(ws)
     out += _rule_checks(ws)
+    out += _postgres_checks(ws, fetch=fetch)
     out += _pack_requires_checks(ws, fetch=fetch, fetched_refs=fetched_refs)
     out += _proxy_config_sync_check(ws)
     return out
@@ -514,3 +515,51 @@ def _rule_checks(ws: Workspace) -> list[Check]:
         # to report failures cleanly. (`:config`/`:toml` already flag the parse
         # error; this keeps the sweep going.)
         return [_fail(f"ws:{ws.name}:rules", f"[{ws.name}] rules: {e}")]
+
+
+def _postgres_checks(ws: Workspace, *, fetch: bool) -> list[Check]:
+    """The `[[postgres]]` layer: the authoritative parse+validate `start` runs
+    (mirrors the layer-2 bindings/rules check), a host-state `sslrootcert`
+    existence probe per pg binding, and -- under `--fetch` -- a resolve of each
+    binding's (username, password) via its provider (reporting lengths, never
+    values). A full server-leg handshake to the real DB is NOT attempted here
+    (the CLI can't run the pg protocol); `--fetch` verifies the credential path,
+    the same posture as the binding `--fetch` check."""
+    from ..model.postgres import load_postgres
+    out: list[Check] = []
+    try:
+        pgs = load_postgres(ws)
+    except (CredproxyError, tomllib.TOMLDecodeError, OSError) as e:
+        return [_fail(f"ws:{ws.name}:postgres", f"[{ws.name}] postgres: {e}")]
+    if not pgs:
+        return out
+    out.append(_ok(f"ws:{ws.name}:postgres",
+                   f"[{ws.name}] {len(pgs)} pg binding(s) pass static checks"))
+
+    # NOTE: we deliberately do NOT check `sslrootcert` for existence here. The
+    # broker reads that path INSIDE the proxy container at connect time, but
+    # doctor runs on the HOST -- an os.path.isfile() here would validate the
+    # wrong filesystem and report a false green (the path can exist on the host
+    # yet be absent in the container, where there is currently no mechanism to
+    # mount an arbitrary CA file). A wrong green is worse than no check; surface
+    # the container-side reachability as an advisory instead.
+    for i, p in enumerate(pgs):
+        if p.sslrootcert:
+            out.append(_ok(
+                f"ws:{ws.name}:pg[{i}]:sslrootcert",
+                f"[{ws.name}] {p.name}: sslrootcert {p.sslrootcert} must be "
+                f"readable INSIDE the proxy container (not verifiable from the "
+                f"host); the first connection fails if it is not present there"))
+
+    if fetch:
+        from ..providers import fetch_many as provider_fetch_many
+        for i, p in enumerate(pgs):
+            fid = f"ws:{ws.name}:pg[{i}]:fetch"
+            try:
+                values = provider_fetch_many(p.provider, list(p.secret.values()))
+                lens = ", ".join(f"{slot} {len(values[ref])}c"
+                                 for slot, ref in p.secret.items())
+                out.append(_ok(fid, f"[{ws.name}] {p.name}: credential resolved ({lens})"))
+            except CredproxyError as e:
+                out.append(_fail(fid, f"[{ws.name}] {p.name}: {e}"))
+    return out

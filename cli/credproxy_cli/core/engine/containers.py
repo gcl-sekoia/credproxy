@@ -148,21 +148,46 @@ def _binding_applied_records(bindings) -> list[dict]:
     ]
 
 
+def _postgres_applied_dict(p) -> dict:
+    """The canonical `applied.postgres` record for one pg binding -- the SAME
+    shape drift builds from the CURRENT config, so the two compare field-for-
+    field. Carries secret REFS (not values), the provider, and sslrootcert, so a
+    rotated ref / changed provider / flipped sslmode is DETECTABLE as drift (a
+    sanitized summary would hide exactly the rotation `apply` must catch). This is
+    host-only lock metadata -- never pushed, never disclosed to the workspace --
+    so storing refs here matches `_binding_applied_records`."""
+    return {
+        "name": p.name, "host": p.host, "port": p.port, "dbname": p.dbname,
+        "sslmode": p.sslmode, "sslrootcert": p.sslrootcert,
+        "provider": p.provider, "secret": dict(p.secret), "env": p.env,
+    }
+
+
+def _postgres_applied_records(postgres) -> list[dict]:
+    return [_postgres_applied_dict(p) for p in postgres]
+
+
 def _write_applied_push(ws: Workspace, bindings, rules,
-                        generation: int | None) -> None:
+                        generation: int | None, postgres=()) -> None:
     """Record the metadata of a successful config push into `applied`: binding
-    metadata (no secret values), rule wire metadata (rules carry no secret), and
-    the `config_generation` the proxy returned (None if the response omitted it).
-    Written in ONE lock update so the three move together."""
+    metadata (no secret values), rule wire metadata (rules carry no secret), pg
+    binding metadata (secret REFS, no values), and the `config_generation` the
+    proxy returned (None if the response omitted it). Written in ONE lock update
+    so they move together."""
     from ..model.rules import rule_wire_entries
 
     fields = {
         "bindings": _binding_applied_records(bindings),
         "rules": rule_wire_entries(rules),
-        # Always overwrite: a None generation (the proxy omitted it -- e.g. an
-        # attach.admin_url target on a proxy build that doesn't return it) must
-        # NOT leave a PREVIOUS push's generation attributed to this one. Stored
-        # null reads back as None == "unknown" for #66's reality comparison.
+        # ALWAYS written (even empty): if the last `[[postgres]]` was removed, the
+        # empty list must overwrite the prior record so `apply`/`inspect` see the
+        # removal reconciled (an absent key would leave the stale list, showing a
+        # permanent phantom "removed" drift). Same always-overwrite reasoning as:
+        # a None generation (the proxy omitted it -- e.g. an attach.admin_url
+        # target on a proxy build that doesn't return it) must NOT leave a PREVIOUS
+        # push's generation attributed to this one. Stored null reads back as None
+        # == "unknown" for #66's reality comparison.
+        "postgres": _postgres_applied_records(postgres),
         "config_generation": generation,
     }
     _update_applied(ws, **fields)
@@ -172,6 +197,13 @@ def _load_applied_rules(ws: Workspace) -> list[dict] | None:
     """The last recorded applied rules (`applied.rules`), or None if not present."""
     r = _load_applied(ws).get("rules")
     return r if isinstance(r, list) else None
+
+
+def _load_applied_postgres(ws: Workspace) -> list[dict] | None:
+    """The last recorded applied pg bindings (`applied.postgres`), or None if not
+    present (a pre-this-feature push -> first reconcile treats it as unknown)."""
+    p = _load_applied(ws).get("postgres")
+    return p if isinstance(p, list) else None
 
 
 def create_workspace_files(ws: Workspace, text: str | None = None) -> None:
@@ -747,6 +779,7 @@ class WorkspaceInspect:
     bindings: tuple[BindingSummary, ...]
     drift: DriftReport
     rules: tuple = ()           # tuple of core.rules.Rule (traffic governance)
+    postgres: tuple = ()        # tuple of core.postgres.Postgres (pg broker upstreams)
     # Attached workspaces: the `attach` selector and, best-effort, the admin URL
     # it currently resolves to (None if unresolvable / docker absent). Both None
     # for a managed workspace.
@@ -807,6 +840,7 @@ def _compute_drift(
     current_bindings: list,   # list of BindingSummary-like (name, injector, provider, secret, hosts, placeholder, env)
     running: bool,
     current_rules: list | None = None,   # list of core.rules.Rule
+    current_postgres: list | None = None,   # list of core.postgres.Postgres
 ) -> DriftReport:
     """Compare current config against the last applied spec + bindings + rules.
 
@@ -949,6 +983,10 @@ def _compute_drift(
     if current_rules is not None:
         changes.extend(_rules_drift(ws, current_rules, running))
 
+    # ---- postgres drift ----
+    if current_postgres is not None:
+        changes.extend(_postgres_drift(ws, current_postgres, running))
+
     return DriftReport(in_sync=len(changes) == 0, changes=tuple(changes))
 
 
@@ -996,6 +1034,47 @@ def _rules_drift(ws: Workspace, current_rules: list, running: bool) -> list:
     if cur_order != app_order and set(cur_order) == set(app_order):
         out.append(DriftItem(kind="rules", item="rules reordered",
                              applied=app_order, configured=cur_order))
+    return out
+
+
+def _postgres_drift(ws: Workspace, current_postgres: list, running: bool) -> list:
+    """Pg-binding drift against `applied.postgres`, keyed by name -- so `apply`
+    reconciles a `[[postgres]]` add/remove/change on a running proxy (a pg change
+    rides the same /admin/config push as bindings/rules; there is no container-
+    spec complication). Compares the FULL record (host/port/dbname/sslmode/
+    sslrootcert/provider/secret-refs/env), so rotating a secret ref or flipping
+    sslmode is caught -- and a REMOVAL is caught, so revoking a binding actually
+    takes effect on the next apply rather than lingering in the proxy. Validates
+    first (like `_rules_drift`) so inspect isn't more lenient than push."""
+    from ..errors import ConfigError, CredproxyError
+    from ..model.postgres import validate
+
+    out: list[DriftItem] = []
+    try:
+        validate(current_postgres, str(ws.config_path))
+        current = {p.name: _postgres_applied_dict(p) for p in current_postgres}
+    except (ConfigError, CredproxyError) as e:
+        return [DriftItem(kind="postgres", item=f"postgres invalid ({e})",
+                          applied=None, configured=None)]
+
+    applied = _load_applied_postgres(ws)
+    if applied is None:
+        if running and current:
+            out.append(DriftItem(kind="postgres", item="state unknown (re-push)",
+                                 applied=None, configured=None))
+        return out
+    applied_by_name = {e["name"]: e for e in applied}
+    for name, entry in current.items():
+        if name not in applied_by_name:
+            out.append(DriftItem(kind="postgres", item=f"pg binding added: '{name}'",
+                                 applied=None, configured=entry))
+        elif entry != applied_by_name[name]:
+            out.append(DriftItem(kind="postgres", item=f"pg binding changed: '{name}'",
+                                 applied=applied_by_name[name], configured=entry))
+    for name in applied_by_name:
+        if name not in current:
+            out.append(DriftItem(kind="postgres", item=f"pg binding removed: '{name}'",
+                                 applied=applied_by_name[name], configured=None))
     return out
 
 
@@ -1099,14 +1178,16 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
 
     current_rules = resolved.rules
 
-    drift = _compute_drift(ws, cfg, bindings, running, current_rules=current_rules)
+    drift = _compute_drift(ws, cfg, bindings, running, current_rules=current_rules,
+                           current_postgres=list(resolved.postgres))
 
     # Live drift: when the proxy is reachable (its port resolved), compare the
     # resolved intent against what it is actually running -- surfacing a proxy that
     # lost its tmpfs on restart (which the offline applied cache can't detect).
     live = None
     if host_port is not None:
-        content_drift = any(c.kind in ("bindings", "rules") for c in drift.changes)
+        content_drift = any(
+            c.kind in ("bindings", "rules", "postgres") for c in drift.changes)
         live = _live_drift(ws, f"http://127.0.0.1:{host_port}",
                            has_content_drift=content_drift)
 
@@ -1120,6 +1201,7 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
         host_port=host_port,
         bindings=bindings,
         rules=tuple(current_rules),
+        postgres=tuple(resolved.postgres),
         drift=drift,
         live=live,
     )
@@ -1150,16 +1232,19 @@ def _inspect_attached(ws: Workspace, cfg: dict) -> WorkspaceInspect:
     # No managed container, so "running" is not meaningful; drift is computed
     # against applied.bindings/.rules regardless (added/removed/changed).
     drift = _compute_drift(ws, cfg, bindings, running=False,
-                           current_rules=current_rules)
+                           current_rules=current_rules,
+                           current_postgres=list(resolved.postgres))
     # Live drift rides the SAME resolved attach admin URL push uses (loopback
     # enforced there), so an attached workspace gets reality-drift detection too.
     live = None
     if attach_target is not None:
-        content_drift = any(c.kind in ("bindings", "rules") for c in drift.changes)
+        content_drift = any(
+            c.kind in ("bindings", "rules", "postgres") for c in drift.changes)
         live = _live_drift(ws, attach_target, has_content_drift=content_drift)
     return WorkspaceInspect(
         name=ws.name, config_path=str(ws.config_path), config=cfg,
         proxy_status=None, ws_status=None, running=False, host_port=None,
-        bindings=bindings, rules=tuple(current_rules), drift=drift,
+        bindings=bindings, rules=tuple(current_rules),
+        postgres=tuple(resolved.postgres), drift=drift,
         attach=attach, attach_target=attach_target, live=live,
     )

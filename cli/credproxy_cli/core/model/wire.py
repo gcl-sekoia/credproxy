@@ -9,22 +9,28 @@ already-encoded body. The engine's `push.push_to_target` composes this encoder
 from __future__ import annotations
 
 
-def build_wire(bindings, rules, fingerprint: str | None = None) -> dict:
-    """Assemble the FULL proxy wire body from resolved bindings + rules: this is
-    the ONE place `{bindings, rules, fingerprint}` is shaped, so a managed,
-    attached, and stateless push all POST byte-identical bodies for the same
-    inputs. `wire_config` resolves each binding's secret via its provider."""
+def build_wire(bindings, rules, fingerprint: str | None = None,
+               postgres=()) -> dict:
+    """Assemble the FULL proxy wire body from resolved bindings + rules (+ pg
+    bindings): this is the ONE place `{bindings, rules, pg_bindings, fingerprint}`
+    is shaped, so a managed, attached, and stateless push all POST byte-identical
+    bodies for the same inputs. `wire_config`/`postgres_wire_entries` resolve each
+    secret via its provider. `pg_bindings` is emitted only when non-empty, so a
+    workspace with no `[[postgres]]` pushes exactly today's body."""
     from .bindings import wire_config
+    from .postgres import postgres_wire_entries
     from .rules import rule_wire_entries
 
     wire = wire_config(bindings)
     wire["rules"] = rule_wire_entries(rules)
+    if postgres:
+        wire["pg_bindings"] = postgres_wire_entries(list(postgres))
     if fingerprint is not None:
         wire["fingerprint"] = fingerprint
     return wire
 
 
-def summarize_wire(bindings, rules) -> dict:
+def summarize_wire(bindings, rules, postgres=()) -> dict:
     """The SANITIZED wire summary the proxy reports at GET /admin/config, derived
     from the resolved model -- the CLI half of the field contract with
     proxy/config.sanitized_live_config (a separate deploy unit; wire-parity tested).
@@ -58,4 +64,8 @@ def summarize_wire(bindings, rules) -> dict:
          "visible": r.effective_visible}
         for r in rules
     ]
-    return {"bindings": binding_summaries, "rules": rule_summaries}
+    out = {"bindings": binding_summaries, "rules": rule_summaries}
+    if postgres:
+        from .postgres import postgres_summaries
+        out["pg_bindings"] = postgres_summaries(list(postgres))
+    return out
